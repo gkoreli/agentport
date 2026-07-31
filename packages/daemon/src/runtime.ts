@@ -92,3 +92,8 @@ export const RUNTIMES: Record<string, () => AgentRuntime> = {
   echo: () => new EchoRuntime(),
   'demo-writer': () => new DemoWriterRuntime(),
 };
+
+/** Registered separately so the demo runtimes stay dependency-free. */
+export function registerRuntime(name: string, create: () => AgentRuntime): void {
+  RUNTIMES[name] = create;
+}
