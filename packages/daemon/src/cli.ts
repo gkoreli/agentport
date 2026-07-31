@@ -88,7 +88,7 @@ const daemon = new AgentDaemon({
   // The consent moment for drop-in sites. It happens here, in your terminal,
   // because this is where your key is — the website asking is holding an
   // ephemeral keypair with no authority whatsoever.
-  onConnectOffer: async ({ surface, grant }) => {
+  onConnectOffer: async ({ surface, grant, verify }) => {
     const gated = new Set([...grant.alwaysAsk, ...grant.tools.filter((t) => t.requiresApproval).map((t) => t.name)]);
     console.log('');
     console.log(`  ${surface.name} (${surface.origin}${surface.route ?? ''}) wants your agent.`);
@@ -98,6 +98,7 @@ const daemon = new AgentDaemon({
     }
     console.log('');
     console.log(`    grant expires ${new Date(grant.expiresAt).toLocaleTimeString()}`);
+    if (verify) console.log(`\n    verify: ${verify} (the site shows the same words)`);
     console.log('');
     return ask('  Allow?');
   },

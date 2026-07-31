@@ -36,6 +36,12 @@ export type SessionEvents = {
 export interface SessionInfo {
   agentName: string;
   runtime: string;
+  /**
+   * Fingerprint words for this attachment's sealing keys, e.g. "coral-anvil-fern".
+   * Render them: the daemon consent screen shows the same words, and a match
+   * proves the relay did not sit in the key exchange. Absent = unsealed.
+   */
+  verify?: string;
 }
 
 /**

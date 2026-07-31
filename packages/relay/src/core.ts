@@ -132,6 +132,9 @@ interface PendingConnect {
   surface: SurfaceDescriptor;
   grant: CapabilityGrant;
   expiresAt: number;
+  /** The page's ephemeral sealing key, carried through to the session.open. */
+  epk?: Hex;
+  epkSig?: Hex;
 }
 
 export interface RelayCoreOptions {
@@ -273,7 +276,7 @@ export class RelayCore {
       case 'pair.complete':
         return this.#onPairComplete(conn, frame.code, frame.cert);
       case 'connect.begin':
-        return this.#onConnectBegin(conn, frame.surface, frame.grant);
+        return this.#onConnectBegin(conn, frame);
       case 'connect.claim':
         return this.#onConnectClaim(conn, frame.code);
       case 'connect.accept':
@@ -393,12 +396,20 @@ export class RelayCore {
     }
   }
 
-  #onConnectBegin(conn: Conn, surface: SurfaceDescriptor, grant: CapabilityGrant): void {
+  #onConnectBegin(conn: Conn, frame: Extract<Frame, { t: 'connect.begin' }>): void {
     if (conn.role !== 'client') return this.#fail(conn, 'role', 'only clients may request a connection');
     this.#sweepConnects();
     const code = pairingCode();
     const expiresAt = this.#now() + CONNECT_TTL_MS;
-    this.#connects.set(code, { code, conn, surface, grant, expiresAt });
+    this.#connects.set(code, {
+      code,
+      conn,
+      surface: frame.surface,
+      grant: frame.grant,
+      expiresAt,
+      epk: frame.epk,
+      epkSig: frame.epkSig,
+    });
     conn.peer.send({ t: 'connect.pending', code, expiresAt });
   }
 
@@ -412,7 +423,17 @@ export class RelayCore {
     if (!connect) return this.#fail(conn, 'connect_unknown', 'unknown or expired connect code', code);
     conn.claimAttempts = 0;
     // Show the agent exactly what is being asked for, before anyone consents.
-    conn.peer.send({ t: 'connect.offer', code, surface: connect.surface, grant: connect.grant });
+    // The client identity and epk ride along so the consent screen can show
+    // the fingerprint words before anything is approved.
+    conn.peer.send({
+      t: 'connect.offer',
+      code,
+      surface: connect.surface,
+      grant: connect.grant,
+      client: connect.conn.pubkey!,
+      epk: connect.epk,
+      epkSig: connect.epkSig,
+    });
   }
 
   #onConnectAccept(conn: Conn, code: string): void {
@@ -452,6 +473,8 @@ export class RelayCore {
       grant: connect.grant,
       client: connect.conn.pubkey!,
       viaConnect: true,
+      epk: connect.epk,
+      epkSig: connect.epkSig,
     });
     this.#log(`connect ${code} accepted by ${conn.pubkey!.slice(0, 8)} as session ${id}`);
   }
@@ -508,7 +531,10 @@ export class RelayCore {
         // the agent again, and the token reaches only this client.
         session.agentName = frame.agentName;
         session.runtime = frame.runtime;
-        outbound = { ...frame, resume: session.token };
+        // The resume token reaches only this client; the agent identity stamp
+        // lets a drop-in client (which knows no agent key) verify the epk
+        // proof instead of trusting the relay outright.
+        outbound = { ...frame, resume: session.token, agent: session.agent.pubkey! };
       }
       if (session.client) session.client.peer.send(outbound);
       else session.missedWhileAway++;
@@ -564,6 +590,21 @@ export class RelayCore {
 
     const missed = session.missedWhileAway;
     session.missedWhileAway = 0;
+
+    // Sealing re-keys on every attachment: hand the agent the new client epk
+    // (with the client identity stamped from the authenticated socket) so it
+    // answers with a fresh key of its own. Synthesised here — a client has no
+    // way to originate a session.rekey itself.
+    if (frame.epk && frame.epkSig) {
+      session.agent.peer.send({
+        t: 'session.rekey',
+        s: session.id,
+        client: conn.pubkey!,
+        epk: frame.epk,
+        epkSig: frame.epkSig,
+      });
+    }
+
     conn.peer.send({
       t: 'session.resumed',
       s: session.id,
@@ -572,6 +613,7 @@ export class RelayCore {
       surface: session.surface,
       grant: session.grant,
       missed,
+      agent: session.agent.pubkey!,
     });
     this.#log(`session ${session.id} resumed (${missed} frame(s) were dropped while away)`);
   }

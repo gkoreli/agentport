@@ -183,8 +183,9 @@ Not built yet, in rough priority order:
    loopback-only MCP server (`McpBridge`) passed in `session/new`'s
    `mcpServers[]`, and withdrawn when the session closes. Verified end to end
    on `ssh vps` (ggsCloud) — see `scripts/acp-smoke.ts`.
-2. **End-to-end encryption.** The relay currently reads session frames. It
-   should only see routing metadata. Seal frame bodies to the peer's key.
+2. ~~End-to-end encryption.~~ **Done.** See "Transport" below — X25519 +
+   HKDF + XChaCha20-Poly1305, ephemeral per attachment, fingerprint words on
+   both consent surfaces, on-path-observer test in e2e section 10.
 3. **Extension packaging.** The wallet lives in the page today, which is only
    acceptable for a demo — the page can reach the user key. Move it behind an
    extension boundary with `postMessage`.
@@ -209,10 +210,27 @@ site can attach. For the paranoid case the answer is not a VPN but
 self-hosting — `AGENTPORT_RELAY=wss://your-own-host/relay` runs the identical
 `RelayCore`, so no third party is in the path at all.
 
-**Planned:** seal frame bodies to the peer's key (X25519 + AEAD), leaving only
-`t` and `s` readable by the relay. Both ends already have Ed25519 identities;
-the relay would hand each side the other's public key at session open. After
-that the relay is a dumb pipe by construction rather than by policy.
+**Shipped (ADR-003):** session content is sealed end-to-end. Each attachment
+mints an ephemeral X25519 keypair, proves it with an Ed25519 signature from its
+identity key (`epk`/`epkSig` on session.open/opened/resume, scope-bound so
+proofs cannot be replayed across sessions), derives a key via HKDF-SHA256, and
+every content frame crosses the relay as `{t:'enc', s, n, c}` under
+XChaCha20-Poly1305. The relay sees which session talks and how much — never
+what, and not even which frame type. Resume re-keys (`session.rekey`/`rekeyed`,
+relay-synthesised) so every attachment has a fresh key: forward secrecy.
+
+Because the relay can no longer see inner frame types, its per-type
+`mayOriginate` check applies only to lifecycle frames; for sealed content the
+same rule is enforced at the endpoints (`CLIENT_SEALABLE` in the daemon,
+`AGENT_SEALABLE` in the wallet). The relay keeps its structural checks: only
+stamped participants may speak, sessions only open toward owned agents.
+
+Drop-in first contact is TOFU (the page's identity is itself ephemeral), so
+both consent surfaces show three **fingerprint words** derived from the two
+epks — the daemon consent screen and the page (`session.info.verify`). A match
+means no relay sat in the key exchange. e2e section 10 proves the property
+with a literal on-path observer: a recording proxy between wallet and relay
+sees ciphertext only.
 
 ## Always-on agents
 

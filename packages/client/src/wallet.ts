@@ -2,14 +2,22 @@ import {
   Deferred,
   Emitter,
   PROTOCOL_VERSION,
+  SEALED_TYPES,
   authChallengeMessage,
   decodeFrame,
+  deriveSealKey,
   encodeFrame,
+  fingerprintWords,
+  generateSealKeyPair,
   isSessionFrame,
+  openSealed,
   publicKeyOf,
   randomId,
+  seal,
   sign,
   signCert,
+  signEpk,
+  verifyEpk,
   type AgentCert,
   type AgentSummary,
   type CapabilityGrant,
@@ -22,6 +30,9 @@ import { AgentSession, type ApprovalDecider, type SiteTool } from './session.js'
 import { OPEN, defaultSocketFactory, type SocketFactory, type WebSocketLike } from './socket.js';
 
 const DEFAULT_SESSION_TTL_MS = 60 * 60 * 1000;
+
+/** Frames an agent may legitimately put inside a sealed envelope. */
+const AGENT_SEALABLE = new Set<string>(['delta', 'thought', 'done', 'tool.call', 'approval.request', 'history']);
 
 export interface WalletOptions {
   relayUrl: string;
@@ -66,6 +77,9 @@ export class AgentWallet extends Emitter<WalletEvents> {
   #sessions = new Map<string, AgentSession>();
   #waiters = new Map<string, Deferred<Frame>[]>();
   #resumeTokens = new Map<string, string>();
+  /** Per-attachment symmetric keys; the relay never holds these (ADR-003). */
+  #sealKeys = new Map<string, Uint8Array>();
+  #verifyWords = new Map<string, string>();
   #ready = new Deferred<void>();
   #log: (message: string) => void;
 
@@ -179,7 +193,17 @@ export class AgentWallet extends Emitter<WalletEvents> {
       expiresAt: Date.now() + (request.ttlMs ?? DEFAULT_SESSION_TTL_MS),
     };
 
-    this.#sendRaw({ t: 'connect.begin', surface, grant });
+    // The sealing keypair is minted before the code even exists; its proof is
+    // scoped 'connect' because no session id exists yet. The daemon shows the
+    // fingerprint over this key on its consent screen.
+    const sealPair = generateSealKeyPair();
+    this.#sendRaw({
+      t: 'connect.begin',
+      surface,
+      grant,
+      epk: sealPair.publicKey,
+      epkSig: signEpk(this.#options.userSecretKey, 'connect', sealPair.publicKey),
+    });
     const pending = (await this.#await('connect.pending')) as Extract<Frame, { t: 'connect.pending' }>;
 
     const accepted = (async () => {
@@ -189,6 +213,7 @@ export class AgentWallet extends Emitter<WalletEvents> {
       }
       const opened = reply as Extract<Frame, { t: 'session.opened' }>;
       if (opened.resume) this.#resumeTokens.set(opened.s, opened.resume);
+      this.#establishSeal(opened.s, sealPair, opened, undefined);
       return this.#makeSession(opened.s, surface, grant, opened, request);
     })();
 
@@ -205,12 +230,23 @@ export class AgentWallet extends Emitter<WalletEvents> {
     tools: SiteTool[];
     decide?: ApprovalDecider;
   }): Promise<{ session: AgentSession; missed: number }> {
-    this.#sendRaw({ t: 'session.resume', s: request.id, token: request.token });
+    const sealPair = generateSealKeyPair();
+    this.#sendRaw({
+      t: 'session.resume',
+      s: request.id,
+      token: request.token,
+      epk: sealPair.publicKey,
+      epkSig: signEpk(this.#options.userSecretKey, request.id, sealPair.publicKey),
+    });
     const reply = await this.#await('session.resumed', 'session.denied');
     if (reply.t === 'session.denied') {
       throw new Error(`could not resume: ${(reply as { reason: string }).reason}`);
     }
     const resumed = reply as Extract<Frame, { t: 'session.resumed' }>;
+    // Every attachment gets a fresh key: wait for the agent's answering epk
+    // before returning, so the first history.request is already sealed.
+    const rekeyed = (await this.#await('session.rekeyed')) as Extract<Frame, { t: 'session.rekeyed' }>;
+    this.#establishSeal(request.id, sealPair, rekeyed, resumed.agent);
     const session = this.#makeSession(
       resumed.s,
       resumed.surface,
@@ -235,13 +271,25 @@ export class AgentWallet extends Emitter<WalletEvents> {
       expiresAt: Date.now() + (request.ttlMs ?? DEFAULT_SESSION_TTL_MS),
     };
 
-    this.#sendRaw({ t: 'session.open', s: id, agent: request.agent, surface, grant });
+    const sealPair = generateSealKeyPair();
+    this.#sendRaw({
+      t: 'session.open',
+      s: id,
+      agent: request.agent,
+      surface,
+      grant,
+      epk: sealPair.publicKey,
+      epkSig: signEpk(this.#options.userSecretKey, id, sealPair.publicKey),
+    });
     const reply = await this.#await('session.opened', 'session.denied');
     if (reply.t === 'session.denied') {
       throw new Error(`agent refused the session: ${(reply as { reason: string }).reason}`);
     }
     const opened = reply as Extract<Frame, { t: 'session.opened' }>;
     if (opened.resume) this.#resumeTokens.set(id, opened.resume);
+    // A paired wallet knows exactly which agent it called, so the epk proof is
+    // checked against the cert's key — the relay cannot substitute anything.
+    this.#establishSeal(id, sealPair, opened, request.agent);
 
     return this.#makeSession(id, surface, grant, opened, request);
   }
@@ -252,6 +300,36 @@ export class AgentWallet extends Emitter<WalletEvents> {
    */
   resumeTokenFor(sessionId: string): string | undefined {
     return this.#resumeTokens.get(sessionId);
+  }
+
+  /** Fingerprint words for a sealed session — show them; humans are the MITM check. */
+  verifyWordsFor(sessionId: string): string | undefined {
+    return this.#verifyWords.get(sessionId);
+  }
+
+  /**
+   * Verify the peer's epk proof and derive this attachment's key. When
+   * `expectedAgent` is set (paired flow) the proof MUST verify against that
+   * key. In the drop-in flow the agent identity arrives relay-stamped, so
+   * first contact is TOFU — which is exactly what the fingerprint words on
+   * the two consent surfaces exist to close.
+   */
+  #establishSeal(
+    sessionId: string,
+    sealPair: { publicKey: Hex; secretKey: Hex },
+    reply: { epk?: Hex; epkSig?: Hex; agent?: Hex },
+    expectedAgent: Hex | undefined,
+  ): void {
+    if (!reply.epk || !reply.epkSig) {
+      this.#log(`session ${sessionId} is NOT sealed — peer sent no epk`);
+      return;
+    }
+    const verifier = expectedAgent ?? reply.agent;
+    if (!verifier || !verifyEpk(verifier, sessionId, reply.epk, reply.epkSig)) {
+      throw new Error('agent epk proof failed — refusing to run the session unsealed');
+    }
+    this.#sealKeys.set(sessionId, deriveSealKey(sealPair.secretKey, reply.epk, sessionId));
+    this.#verifyWords.set(sessionId, fingerprintWords(sealPair.publicKey, reply.epk));
   }
 
   #makeSession(
@@ -265,12 +343,16 @@ export class AgentWallet extends Emitter<WalletEvents> {
       id,
       surface,
       grant,
-      info: { agentName: opened.agentName, runtime: opened.runtime },
+      info: { agentName: opened.agentName, runtime: opened.runtime, verify: this.#verifyWords.get(id) },
       tools: request.tools,
       decide: request.decide ?? (() => false),
-      send: (frame: SessionFrame) => this.#sendRaw(frame),
+      send: (frame: SessionFrame) => this.#sendSession(frame),
     });
-    session.on('closed', () => this.#sessions.delete(id));
+    session.on('closed', () => {
+      this.#sessions.delete(id);
+      this.#sealKeys.delete(id);
+      this.#verifyWords.delete(id);
+    });
     this.#sessions.set(id, session);
     this.#log(`session ${id} open with ${opened.agentName}`);
     return session;
@@ -280,6 +362,13 @@ export class AgentWallet extends Emitter<WalletEvents> {
 
   #sendRaw(frame: Frame): void {
     if (this.#socket && this.#socket.readyState === OPEN) this.#socket.send(encodeFrame(frame));
+  }
+
+  /** Session content leaves sealed whenever the attachment has a key. */
+  #sendSession(frame: SessionFrame): void {
+    const key = this.#sealKeys.get(frame.s);
+    if (key && SEALED_TYPES.has(frame.t)) this.#sendRaw(seal(key, frame));
+    else this.#sendRaw(frame);
   }
 
   async #onFrame(frame: Frame): Promise<void> {
@@ -300,10 +389,37 @@ export class AgentWallet extends Emitter<WalletEvents> {
       return;
     }
 
-    // These three answer a pending request rather than an existing session —
+    if (frame.t === 'enc') {
+      const key = this.#sealKeys.get(frame.s);
+      if (!key) {
+        this.#log(`sealed frame for ${frame.s} but no key — dropping`);
+        return;
+      }
+      let inner: SessionFrame;
+      try {
+        inner = openSealed(key, frame);
+      } catch (err) {
+        this.#log(`failed to open sealed frame on ${frame.s}: ${err instanceof Error ? err.message : String(err)}`);
+        return;
+      }
+      // The relay cannot check inner types anymore; the origination rule it
+      // used to enforce is applied here instead.
+      if (!AGENT_SEALABLE.has(inner.t)) {
+        this.#log(`agent sealed a frame it may not originate (${inner.t}) — dropping`);
+        return;
+      }
+      await this.#sessions.get(frame.s)?.handle(inner);
+      return;
+    }
+
+    // These answer a pending request rather than an existing session —
     // routing them by session id drops them, because the session does not
     // exist on this side yet.
-    const ANSWERS_A_REQUEST = frame.t === 'session.opened' || frame.t === 'session.denied' || frame.t === 'session.resumed';
+    const ANSWERS_A_REQUEST =
+      frame.t === 'session.opened' ||
+      frame.t === 'session.denied' ||
+      frame.t === 'session.resumed' ||
+      frame.t === 'session.rekeyed';
     if (isSessionFrame(frame) && !ANSWERS_A_REQUEST) {
       await this.#sessions.get(frame.s)?.handle(frame);
       return;

@@ -192,6 +192,10 @@ export interface ConnectBegin {
   t: 'connect.begin';
   surface: SurfaceDescriptor;
   grant: CapabilityGrant;
+  /** Ephemeral X25519 key for sealing; carried through to the session.open. */
+  epk?: Hex;
+  /** Signature by the page's (ephemeral) identity over epkProofMessage('connect', epk). */
+  epkSig?: Hex;
 }
 
 export interface ConnectPending {
@@ -210,6 +214,11 @@ export interface ConnectOffer {
   code: string;
   surface: SurfaceDescriptor;
   grant: CapabilityGrant;
+  /** The requesting page's authenticated identity key, stamped by the relay. */
+  client?: Hex;
+  /** The page's ephemeral sealing key, forwarded so consent can show fingerprint words. */
+  epk?: Hex;
+  epkSig?: Hex;
 }
 
 export interface ConnectAccept {
@@ -259,6 +268,10 @@ export interface SessionOpen {
   grant: CapabilityGrant;
   /** Filled in by the relay before forwarding; ignored if sent by a client. */
   client?: Hex;
+  /** Client's ephemeral X25519 public key for sealing this session (ADR-003). */
+  epk?: Hex;
+  /** Signature by the client's identity key over epkProofMessage(s, epk). */
+  epkSig?: Hex;
   /**
    * Set by the relay when this session came from a drop-in widget rather than
    * a wallet. The requesting page has no key and no agent list, so approvals
@@ -279,6 +292,16 @@ export interface SessionOpened {
    * on its own schedule.
    */
   resume?: string;
+  /** Agent's ephemeral X25519 public key; answers the client's `epk`. */
+  epk?: Hex;
+  /** Signature by the agent's device key over epkProofMessage(s, epk). */
+  epkSig?: Hex;
+  /**
+   * Stamped by the relay: the agent's identity key, so a drop-in client (which
+   * chose no agent and knows none) can verify `epkSig`. A paired wallet
+   * already knows the key from the cert and verifies against that instead.
+   */
+  agent?: Hex;
 }
 
 /** Re-attach to a session whose client socket went away (a page refresh). */
@@ -286,6 +309,31 @@ export interface SessionResume {
   t: 'session.resume';
   s: string;
   token: string;
+  /** Fresh ephemeral key — a resumed attachment never reuses the old one. */
+  epk?: Hex;
+  epkSig?: Hex;
+}
+
+/**
+ * Relay -> agent only, synthesised when a client resumes: the new client
+ * epk, so the agent can re-key. Not in any originate set — a client cannot
+ * inject one.
+ */
+export interface SessionRekey {
+  t: 'session.rekey';
+  s: string;
+  /** The resuming client's authenticated identity, stamped by the relay. */
+  client: Hex;
+  epk: Hex;
+  epkSig: Hex;
+}
+
+/** Agent -> client: the agent's fresh epk answering a rekey. */
+export interface SessionRekeyed {
+  t: 'session.rekeyed';
+  s: string;
+  epk: Hex;
+  epkSig: Hex;
 }
 
 export interface SessionResumed {
@@ -297,6 +345,8 @@ export interface SessionResumed {
   grant: CapabilityGrant;
   /** Frames the agent sent while nobody was listening. */
   missed: number;
+  /** Stamped by the relay, same purpose as on session.opened. */
+  agent?: Hex;
 }
 
 export interface SessionDenied {
@@ -402,6 +452,20 @@ export interface ApprovalRequest {
   call?: { name: string; arguments: Record<string, unknown> };
 }
 
+/**
+ * A sealed content frame (ADR-003). The relay routes it by `s` and enforces
+ * participant membership, and can see nothing else — the inner frame type,
+ * text, tool names and arguments are all inside the ciphertext.
+ */
+export interface Enc {
+  t: 'enc';
+  s: string;
+  /** XChaCha20 nonce, hex. */
+  n: Hex;
+  /** Ciphertext of the inner SessionFrame's JSON. */
+  c: Hex;
+}
+
 export interface ApprovalResponse {
   t: 'approval.response';
   s: string;
@@ -439,6 +503,9 @@ export type SessionFrame =
   | SessionOpened
   | SessionResume
   | SessionResumed
+  | SessionRekey
+  | SessionRekeyed
+  | Enc
   | SessionDenied
   | HistoryRequest
   | History
@@ -463,6 +530,9 @@ const SESSION_FRAME_TYPES = new Set<string>([
   'session.opened',
   'session.resume',
   'session.resumed',
+  'session.rekey',
+  'session.rekeyed',
+  'enc',
   'session.denied',
   'history.request',
   'history',
@@ -487,6 +557,7 @@ const CLIENT_ORIGINATED = new Set<string>([
   'session.open',
   'session.resume',
   'session.close',
+  'enc',
   'history.request',
   'prompt',
   'prompt.cancel',
@@ -497,9 +568,11 @@ const CLIENT_ORIGINATED = new Set<string>([
 /** Frames an agent is allowed to originate inside a session. */
 const AGENT_ORIGINATED = new Set<string>([
   'session.opened',
+  'session.rekeyed',
   'history',
   'session.denied',
   'session.close',
+  'enc',
   'delta',
   'thought',
   'done',

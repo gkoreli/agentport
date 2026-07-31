@@ -87,7 +87,7 @@ const daemon = new AgentDaemon({
   createRuntime,
   log: (m) => console.error(dim(`  [agentport] ${m}`)),
 
-  onConnectOffer: async ({ surface, grant }) => {
+  onConnectOffer: async ({ surface, grant, verify }) => {
     offerReceived = true;
     const gated = new Set([
       ...grant.alwaysAsk,
@@ -102,6 +102,12 @@ const daemon = new AgentDaemon({
       console.log(`    ${gated.has(tool.name) ? '[33m![0m' : '[32m✓[0m'} ${tool.description}`);
     }
     if (gated.size) console.log(dim(`\n  ! = asks you again, every single time`));
+    if (verify) {
+      console.log('');
+      console.log(`  Verify: ${bold(verify)}`);
+      console.log(dim('  The website shows the same three words. A mismatch means someone'));
+      console.log(dim('  is sitting between you — decline.'));
+    }
     console.log(dim(`\n  Expires ${new Date(grant.expiresAt).toLocaleTimeString()}. Nothing else about your agent is shared.`));
     console.log('');
     const allowed = await ask('  Allow?');

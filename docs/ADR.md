@@ -55,7 +55,7 @@ depending on a VPN that cannot reach half the connection.
 
 ---
 
-## ADR-003: Seal session frames end-to-end; the relay becomes a blind courier — planned (priority 1)
+## ADR-003: Seal session frames end-to-end; the relay becomes a blind courier — accepted (shipped 2026-07-31)
 
 **Context.** Both legs are TLS, but TLS terminates at the relay, so the relay
 operator (currently Cloudflare) can read frames in flight. This is the single

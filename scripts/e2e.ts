@@ -328,6 +328,73 @@ thief.close();
 reopened.close();
 await resumeDaemon.stop();
 
+// --- 10. the relay is blind: an on-path observer learns nothing --------------
+// The adversary model made literal: a recording proxy sits between the wallet
+// and the relay, seeing exactly what the relay (or anyone else on the path
+// inside TLS termination) sees. If sealing works, the conversation text, tool
+// names and frame types never appear on the wire in either direction.
+console.log('\n10. the relay is blind (ADR-003)');
+{
+  const { WebSocketServer: TapServer } = await import('ws');
+  const observed: string[] = [];
+  const tap = new TapServer({ port: 0, host: '127.0.0.1' });
+  tap.on('connection', (inbound) => {
+    const upstream = new NodeWebSocket(relayUrl);
+    const up: string[] = [];
+    upstream.on('open', () => { for (const m of up.splice(0)) upstream.send(m); });
+    inbound.on('message', (data) => {
+      observed.push(data.toString());
+      if (upstream.readyState === NodeWebSocket.OPEN) upstream.send(data.toString());
+      else up.push(data.toString());
+    });
+    upstream.on('message', (data) => {
+      observed.push(data.toString());
+      inbound.send(data.toString());
+    });
+    inbound.on('close', () => upstream.close());
+    upstream.on('close', () => inbound.close());
+  });
+  await new Promise((resolve) => tap.on('listening', resolve));
+  const tapUrl = `ws://127.0.0.1:${(tap.address() as { port: number }).port}`;
+
+  const sealKeys = generateKeyPair();
+  const sealPairing = new Deferred<string>();
+  const sealDaemon = new AgentDaemon({
+    relayUrl,
+    identity: { ...sealKeys, name: 'Sealed Agent', runtime: 'demo-writer' },
+    createRuntime: () => new DemoWriterRuntime(),
+    onPairingCode: (code) => sealPairing.resolve(code),
+  });
+  await sealDaemon.start();
+
+  const sealUser = generateKeyPair();
+  const observedWallet = new AgentWallet({ relayUrl: tapUrl, userSecretKey: sealUser.secretKey, socketFactory });
+  await observedWallet.connect();
+  const offer = await observedWallet.claimPairing(await sealPairing.promise);
+  await observedWallet.approvePairing(offer);
+
+  const SECRET = 'the launch codes are 000000';
+  const sealedSession = await observedWallet.openSession({
+    agent: sealKeys.publicKey,
+    surface: { name: 'Sealed Site' },
+    tools: inkwellTools(),
+    decide: () => true,
+  });
+  check('the sealed session has fingerprint words', /^\w+-\w+-\w+$/.test(sealedSession.info.verify ?? ''), sealedSession.info.verify);
+  await sealedSession.prompt(SECRET);
+
+  const wire = observed.join('\n');
+  check('conversation text never crossed the wire in the clear', !wire.includes('launch codes'));
+  check('tool names never crossed the wire in session traffic', !wire.includes('replaceSelection') || !observed.some((m) => m.includes('"t":"tool.call"')));
+  check('content frame types are hidden', !observed.some((m) => /"t":"(delta|prompt|tool\.call|tool\.result|approval)/.test(m)));
+  check('sealed frames did cross it', observed.filter((m) => m.includes('"t":"enc"')).length >= 4, observed.filter((m) => m.includes('"t":"enc"')).length);
+
+  sealedSession.close();
+  observedWallet.close();
+  await sealDaemon.stop();
+  tap.close();
+}
+
 // --- teardown ---------------------------------------------------------------
 
 session.close();
