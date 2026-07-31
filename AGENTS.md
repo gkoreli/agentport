@@ -142,6 +142,20 @@ One deliberate split, in both the extension and the site:
 `scripts/ui-smoke.ts` renders both under happy-dom and asserts the shadow root
 stays unreachable via `.shadowRoot`.
 
+The agent panel's transcript is the `@nisli/ui` ACP set, copied as source into
+`src/nisli-ui` by `npx nisli-ui add acp-chat` (config: `nisli-ui.json`). Two
+things to know before touching it:
+
+- **`wire()` in `site/src/agentport-ui.ts` is the adapter.** AgentPort frames
+  are not ACP frames; the panel maps session events onto ACP `session/update`
+  shapes and folds them with `createTranscript()`. A richer daemon channel
+  (structured tool calls, diffs) should land in that adapter, not in new
+  rendering code.
+- **Styling is the `data-slot` contract, not Tailwind.** The copied components
+  carry Tailwind class lists this site deliberately does not build; the "ACP
+  set" section of `site/public/styles.css` styles `[data-slot]` selectors in
+  the site's own palette. Do not add a Tailwind pipeline for this.
+
 ## Conventions
 
 - ESM everywhere, `.js` extensions in relative imports (TS `Bundler`

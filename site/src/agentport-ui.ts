@@ -1,18 +1,32 @@
 /**
- * The demo's agent panel, in nisli.
+ * The demo's agent panel, in nisli — rendered by the @nisli/ui ACP set.
  *
  * Note what is no longer here: no key, no `AgentWallet`, no picker, no consent
  * screen. Those moved to where the user's key actually is — an extension, or
  * their terminal via `connect.js`. This file is an honest example of what a
  * *site* writes, and nothing more.
  *
+ * The transcript is `createTranscript()` + `AcpChat` from the copied
+ * `src/nisli-ui` ACP set. AgentPort's wire frames are not ACP frames — the
+ * relay speaks its own protocol — so `wire()` is the adapter: each session
+ * event becomes the `session/update` shape the reducer folds. When the daemon
+ * grows a structured tool/diff channel, this adapter is the only thing that
+ * changes.
+ *
+ * Styling: the copied components carry Tailwind classes the site does not
+ * build (no Tailwind pipeline here, by choice). Presentation comes from the
+ * `data-slot` contract instead — see the "ACP set" section of styles.css.
+ *
  * This is our own page rather than an injected surface, so `component()` is
  * safe here; the injected modal deliberately avoids it (see modal.ts).
  */
 
-import { component, computed, each, html, signal, when, type ReadonlySignal } from '@nisli/core';
+import { component, computed, html, signal, when } from '@nisli/core';
 import AgentPortConnect from './connect.js';
 import type { AgentSession, SiteTool } from '@agentport/client';
+import type { HistoryEntry } from '@agentport/protocol';
+import { AcpChat } from '../../src/nisli-ui/ui/acp/acp-chat.js';
+import { createTranscript } from '../../src/nisli-ui/lib/acp-session.js';
 
 export type { SiteTool };
 
@@ -26,10 +40,14 @@ export interface SurfaceConfig {
   suggestions?: string[];
 }
 
-interface Line {
-  id: number;
-  kind: string;
-  text: string;
+const text = (t: string) => ({ type: 'text' as const, text: t });
+
+/** Guess a ToolKind from a namespaced tool name — for the glyph only. */
+function kindOf(name: string): 'read' | 'edit' | 'search' | 'other' {
+  if (/read|get|list|fetch/i.test(name)) return 'read';
+  if (/write|replace|update|set|append|complete|add/i.test(name)) return 'edit';
+  if (/search|find|query/i.test(name)) return 'search';
+  return 'other';
 }
 
 const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) => {
@@ -38,14 +56,18 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
   // fields, which is exactly how the connect button died quietly once already.
   const config = props.config.value;
 
-  const lines = signal<Line[]>([]);
+  const transcript = createTranscript();
   const status = signal('not connected');
   const online = signal(false);
   const live = signal(false);
-  const draft = signal('');
+  const busy = signal(false);
+  const notice = signal('');
 
   let session: AgentSession | null = null;
-  let nextId = 0;
+  let toolSeq = 0;
+  // prompt() keeps its id private, but every turn event carries it — track the
+  // live turn here so Cancel can address it.
+  let currentPromptId: string | null = null;
 
   // PROVENANCE. The site stores no transcript at all — not in localStorage,
   // not in sessionStorage, nowhere. On reload the panel re-attaches to the
@@ -53,14 +75,61 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
   // user's own agent session store on their own machine. The relay stores
   // none of it either.
 
-  const push = (kind: string, text: string): number => {
-    const id = nextId++;
-    lines.value = [...lines.value, { id, kind, text }];
-    return id;
-  };
-
-  const appendTo = (id: number, text: string) => {
-    lines.value = lines.value.map((line) => (line.id === id ? { ...line, text: line.text + text } : line));
+  /**
+   * The adapter: AgentPort session events → ACP `session/update` shapes.
+   * Tool events arrive only on completion here, so each becomes one terminal
+   * `tool_call`; approvals are decided in the wallet, so the panel records the
+   * outcome rather than rendering a consent card of its own.
+   */
+  const wire = (next: AgentSession) => {
+    next.on('delta', (event) => {
+      currentPromptId = event.promptId;
+      transcript.apply({ sessionUpdate: 'agent_message_chunk', content: text(event.text) });
+    });
+    next.on('thought', (event) => {
+      currentPromptId = event.promptId;
+      transcript.apply({ sessionUpdate: 'agent_thought_chunk', content: text(event.text) });
+    });
+    next.on('tool', (event) => {
+      const detail = event.ok
+        ? event.result !== undefined
+          ? JSON.stringify(event.result, null, 2)
+          : undefined
+        : (event.error ?? 'failed');
+      transcript.apply({
+        sessionUpdate: 'tool_call',
+        toolCallId: `t${toolSeq++}`,
+        title: event.name,
+        kind: kindOf(event.name),
+        status: event.ok ? 'completed' : 'failed',
+        rawInput: event.arguments,
+        content: detail === undefined ? undefined : [{ type: 'content', content: text(detail) }],
+      });
+    });
+    next.on('approval', (event) =>
+      transcript.apply({
+        sessionUpdate: 'tool_call',
+        toolCallId: `a${toolSeq++}`,
+        title: event.summary,
+        kind: 'other',
+        status: event.granted ? 'completed' : 'cancelled',
+        rawInput: event.call?.arguments,
+      }),
+    );
+    next.on('done', () => {
+      currentPromptId = null;
+      transcript.endTurn();
+      busy.value = false;
+    });
+    next.on('closed', (event) => {
+      notice.value = `session closed (${event.reason})`;
+      status.value = 'disconnected';
+      online.value = false;
+      live.value = false;
+      busy.value = false;
+      session = null;
+      currentPromptId = null;
+    });
   };
 
   const attach = (next: AgentSession) => {
@@ -68,33 +137,40 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
     live.value = true;
     online.value = true;
     status.value = `${next.info.agentName} · ${next.info.runtime}`;
-    push(
-      'meta',
-      `connected · ${next.grant.tools.length} tools lent · expires ${new Date(
-        next.grant.expiresAt,
-      ).toLocaleTimeString()}`,
-    );
-    if (config.suggestions?.length) push('meta', `try: ${config.suggestions.join(' · ')}`);
+    notice.value = `connected · ${next.grant.tools.length} tools lent · expires ${new Date(
+      next.grant.expiresAt,
+    ).toLocaleTimeString()}`;
+    wire(next);
+  };
 
-    let current: number | null = null;
-    next.on('delta', (event) => {
-      if (current === null) current = push('agent', '');
-      appendTo(current, event.text);
-    });
-    next.on('thought', (event) => push('meta', event.text.trim().slice(0, 200)));
-    next.on('tool', (event) =>
-      push(`tool ${event.ok ? 'ok' : 'err'}`, event.name + (event.ok ? '' : ` — ${event.error}`)),
-    );
-    next.on('done', () => {
-      current = null;
-    });
-    next.on('closed', (event) => {
-      push('meta', `session closed (${event.reason})`);
-      status.value = 'disconnected';
-      online.value = false;
-      live.value = false;
-      session = null;
-    });
+  /** Replay the agent's own history through the reducer, one settled entry each. */
+  const seed = (history: HistoryEntry[]) => {
+    transcript.reset();
+    for (const entry of history) {
+      switch (entry.role) {
+        case 'user':
+          transcript.apply({ sessionUpdate: 'user_message_chunk', content: text(entry.text) });
+          break;
+        case 'agent':
+          transcript.apply({ sessionUpdate: 'agent_message_chunk', content: text(entry.text) });
+          break;
+        case 'thought':
+          transcript.apply({ sessionUpdate: 'agent_thought_chunk', content: text(entry.text) });
+          break;
+        default:
+          // tool / approval history rows arrive as flat text.
+          transcript.apply({
+            sessionUpdate: 'tool_call',
+            toolCallId: `h${toolSeq++}`,
+            title: entry.text,
+            status: 'completed',
+          });
+      }
+      // History entries are complete messages; settle after each so
+      // consecutive same-role rows stay separate instead of coalescing the
+      // way a live stream should.
+      transcript.endTurn();
+    }
   };
 
   /**
@@ -116,23 +192,11 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
 
       // Hydrate from the agent's own store rather than from anything we kept.
       const history = await resumed.session.history();
-      const roles: Record<string, string> = {
-        user: 'user',
-        agent: 'agent',
-        thought: 'meta',
-        tool: 'tool ok',
-        approval: 'meta',
-      };
-      lines.value = history.map((entry, index) => ({
-        id: index,
-        kind: roles[entry.role] ?? 'meta',
-        text: entry.text,
-      }));
-      nextId = history.length;
-      push('meta', `reconnected · ${history.length} message(s) restored from your agent`);
+      seed(history);
+      notice.value = `reconnected · ${history.length} message(s) restored from your agent`;
     } catch (err) {
       console.error('[agentport] resume failed', err);
-      push('error', `could not reconnect: ${(err as Error).message}`);
+      notice.value = `could not reconnect: ${(err as Error).message}`;
     }
   };
   void restore();
@@ -155,20 +219,30 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
         // exactly like the button doing nothing.
         if (/cancelled/i.test(err.message)) return;
         console.error('[agentport] connect failed', err);
-        push('error', `connect failed: ${err.message}`);
+        notice.value = `connect failed: ${err.message}`;
       });
   };
 
-  const send = () => {
-    const text = draft.value.trim();
-    if (!text || !session) return;
-    draft.value = '';
-    push('user', text);
-    session.prompt(text).catch((err: Error) => {
+  const onPrompt = (prompt: string) => {
+    if (!session) return;
+    transcript.apply({ sessionUpdate: 'user_message_chunk', content: text(prompt) });
+    transcript.endTurn();
+    busy.value = true;
+    session.prompt(prompt).catch((err: Error) => {
       console.error('[agentport] prompt failed', err);
-      push('error', err.message);
+      transcript.endTurn();
+      busy.value = false;
+      notice.value = err.message;
     });
   };
+
+  const onCancel = () => {
+    if (session && currentPromptId) session.cancel(currentPromptId);
+  };
+
+  const empty = config.suggestions?.length
+    ? `Ask your agent something — try: ${config.suggestions.join(' · ')}`
+    : 'Ask your agent something.';
 
   return html`
     <div class="ap-head">
@@ -188,26 +262,20 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
       `,
     )}
 
-    <div class="ap-log" class:live=${computed(() => live.value || lines.value.length > 0)}>
-      ${each(
-        lines as ReadonlySignal<Line[]>,
-        (line) => line.id,
-        (line) =>
-          html`<div class=${computed(() => `ap-msg ${line.value.kind}`)}>
-            ${computed(() => line.value.text)}
-          </div>`,
+    <div class="ap-chat" class:live=${live}>
+      ${when(
+        computed(() => notice.value !== ''),
+        () => html`<div class="ap-notice">${notice}</div>`,
       )}
+      ${AcpChat({
+        entries: transcript.entries,
+        onPrompt,
+        onCancel,
+        busy,
+        empty,
+        placeholder: config.placeholder ?? 'Ask your agent…',
+      })}
     </div>
-
-    <form class="ap-form" class:live=${live} @submit.prevent=${send}>
-      <input
-        placeholder=${config.placeholder ?? 'Ask your agent…'}
-        autocomplete="off"
-        .value=${draft}
-        @input=${(event: Event) => (draft.value = (event.target as HTMLInputElement).value)}
-      />
-      <button>Send</button>
-    </form>
   `;
 });
 
