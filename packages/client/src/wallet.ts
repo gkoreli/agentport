@@ -97,7 +97,11 @@ export class AgentWallet extends Emitter<WalletEvents> {
       void this.#onFrame(frame);
     });
     socket.addEventListener('close', () => this.emit('closed', undefined));
-    socket.addEventListener('error', (err) => this.#ready.reject(err));
+    // A WebSocket 'error' event carries no message; rejecting with the raw
+    // Event is how "[object Event]" ends up in user-facing status lines.
+    socket.addEventListener('error', () =>
+      this.#ready.reject(new Error(`could not reach the relay at ${this.#options.relayUrl}`)),
+    );
 
     return this.#ready.promise;
   }

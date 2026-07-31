@@ -184,8 +184,14 @@ function post<T>(body: Extract<PageOutbound, { rid: string }>): Promise<T> {
 
 /** Rejection reasons match `ProviderRejected` in @agentport/client. */
 class ProviderRejected extends Error {
-  constructor(readonly reason: string) {
-    super(`agent connection ${reason}`);
+  constructor(
+    readonly reason: string,
+    detail?: string,
+  ) {
+    // The worker's detail says WHICH denial this was ("no agents paired yet",
+    // "the user declined the capability grant", …). Dropping it collapses
+    // every failure into one unactionable string.
+    super(detail ? `agent connection ${reason} — ${detail}` : `agent connection ${reason}`);
     this.name = 'ProviderRejected';
   }
 }

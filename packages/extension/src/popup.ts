@@ -113,7 +113,12 @@ const Pairing = component('ap-pairing', () => {
   return html`
     <section>
       ${when(firstRun, () => html`
-        <p>Pair your agent once. After that, connecting anywhere is one tap.</p>`)}
+        <p>Your agent runs in a terminal; this extension is only its wallet. To pair the two, once:</p>
+        <ol class="steps">
+          <li>In a terminal (laptop or server), run <code>npx agentport</code> and leave it running.</li>
+          <li>It prints a short pairing code — paste it below.</li>
+        </ol>
+        <p class="hint">After that, connecting on any site is one tap, and approvals appear where the agent runs.</p>`)}
       ${when(computed(() => offer.value === null), () => html`
         <div class="row">
           <input
