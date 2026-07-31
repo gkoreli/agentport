@@ -45,6 +45,18 @@ export interface AcpRuntimeOptions {
   log?: (message: string) => void;
 }
 
+/**
+ * The conversation outlives any one attachment: ACP agents persist sessions on
+ * the user's disk and advertise `loadSession`. This registry remembers which
+ * ACP session belongs to which surface, so a page that reconnects after the
+ * orphan grace expired — or after a daemon restart within one process — gets
+ * its conversation back instead of a fresh brain.
+ */
+const sessionRegistry = new Map<string, string>();
+
+const surfaceKey = (surface: { name: string; origin: string }): string =>
+  `${surface.origin}|${surface.name}`;
+
 export class AcpRuntime implements AgentRuntime {
   readonly name: string;
 
@@ -123,11 +135,38 @@ export class AcpRuntime implements AgentRuntime {
       },
     ];
 
+    // Same surface, earlier conversation? Ask the agent to load it rather
+    // than starting over — its store is the authoritative transcript.
+    const key = surfaceKey(context.surface);
+    const previous = sessionRegistry.get(key);
+    if (previous !== undefined && this.#supportsLoad && connection.loadSession) {
+      try {
+        // The replay this streams is discarded here (no live turn and no
+        // collector); the panel asks for it explicitly via replayHistory.
+        await connection.loadSession({
+          sessionId: previous,
+          cwd: this.#options.cwd ?? process.cwd(),
+          mcpServers: this.#mcpServers,
+        });
+        this.#sessionId = previous;
+        this.#log(
+          `acp session ${previous} resumed for ${context.surface.name}; lent ${context.tools.length} tool(s)`,
+        );
+        return;
+      } catch (err) {
+        this.#log(
+          `loadSession(${previous}) failed, starting fresh: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        sessionRegistry.delete(key);
+      }
+    }
+
     const session = await connection.newSession({
       cwd: this.#options.cwd ?? process.cwd(),
       mcpServers: this.#mcpServers,
     });
     this.#sessionId = session.sessionId;
+    sessionRegistry.set(key, session.sessionId);
     this.#log(
       `acp session ${session.sessionId} ready; lent ${context.tools.length} tool(s) from ${context.surface.name}`,
     );
@@ -213,6 +252,10 @@ export class AcpRuntime implements AgentRuntime {
             const last = this.#replay[this.#replay.length - 1];
             if (last?.role === 'agent') last.text += update.content.text;
             else this.#replay.push({ role: 'agent', text: update.content.text, at: 0 });
+          } else if (update.sessionUpdate === 'agent_thought_chunk' && update.content.type === 'text') {
+            const last = this.#replay[this.#replay.length - 1];
+            if (last?.role === 'thought') last.text += update.content.text;
+            else this.#replay.push({ role: 'thought', text: update.content.text, at: 0 });
           } else if (update.sessionUpdate === 'tool_call') {
             this.#replay.push({ role: 'tool', text: update.title, at: 0 });
           }
