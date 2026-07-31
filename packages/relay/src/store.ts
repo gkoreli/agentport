@@ -51,6 +51,11 @@ export class CertStore {
     return [...this.#byAgent.values()].filter((cert) => cert.user === user);
   }
 
+  /** Every stored cert, used to seed the in-memory index at boot. */
+  all(): AgentCert[] {
+    return [...this.#byAgent.values()];
+  }
+
   /** Revocation: forget the binding entirely. */
   remove(agent: Hex): boolean {
     const removed = this.#byAgent.delete(agent);
