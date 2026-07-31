@@ -50,6 +50,8 @@ interface ResumeRecord {
   token: string;
   relay: string;
   surface: string;
+  /** The session was sealed; refuse to resume it as plaintext. */
+  sealed?: boolean;
 }
 
 function rememberSession(record: ResumeRecord): void {
@@ -110,6 +112,7 @@ const provider: AgentProvider & {
         token: record.token,
         tools: request.tools,
         decide: () => true,
+        requireSealed: record.sealed,
       });
       resumed.session.on('closed', forgetSession);
       return resumed;
@@ -152,7 +155,15 @@ const provider: AgentProvider & {
     try {
       const session = await Promise.race([accepted, modal.cancelled]);
       const token = wallet.resumeTokenFor(session.id);
-      if (token) rememberSession({ id: session.id, token, relay: RELAY, surface: request.name });
+      if (token) {
+        rememberSession({
+          id: session.id,
+          token,
+          relay: RELAY,
+          surface: request.name,
+          sealed: Boolean(session.info.verify),
+        });
+      }
       session.on('closed', forgetSession);
       modal.status('connected');
       setTimeout(() => modal.close(), 400);

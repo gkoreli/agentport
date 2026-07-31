@@ -229,8 +229,18 @@ export class AgentWallet extends Emitter<WalletEvents> {
     token: string;
     tools: SiteTool[];
     decide?: ApprovalDecider;
+    /**
+     * Refuse to come back unsealed. Set when the original session was sealed:
+     * a relay that "loses" the rekey answer must not be able to downgrade a
+     * private session to plaintext by omission.
+     */
+    requireSealed?: boolean;
   }): Promise<{ session: AgentSession; missed: number }> {
     const sealPair = generateSealKeyPair();
+    // Both replies race the round-trip, so both waiters exist BEFORE the send:
+    // the daemon's rekey answer can beat the relay's own session.resumed.
+    const resumedReply = this.#await('session.resumed', 'session.denied');
+    const rekeyedReply = this.#await('session.rekeyed');
     this.#sendRaw({
       t: 'session.resume',
       s: request.id,
@@ -238,15 +248,26 @@ export class AgentWallet extends Emitter<WalletEvents> {
       epk: sealPair.publicKey,
       epkSig: signEpk(this.#options.userSecretKey, request.id, sealPair.publicKey),
     });
-    const reply = await this.#await('session.resumed', 'session.denied');
+    const reply = await resumedReply;
     if (reply.t === 'session.denied') {
       throw new Error(`could not resume: ${(reply as { reason: string }).reason}`);
     }
     const resumed = reply as Extract<Frame, { t: 'session.resumed' }>;
-    // Every attachment gets a fresh key: wait for the agent's answering epk
-    // before returning, so the first history.request is already sealed.
-    const rekeyed = (await this.#await('session.rekeyed')) as Extract<Frame, { t: 'session.rekeyed' }>;
-    this.#establishSeal(request.id, sealPair, rekeyed, resumed.agent);
+    // Every attachment gets a fresh key: wait for the agent's answering epk so
+    // the first history.request is already sealed. Bounded, because a daemon
+    // running pre-sealing code will never answer — that degrades to plaintext
+    // (loudly) unless the caller forbade it.
+    const rekeyed = (await Promise.race([
+      rekeyedReply,
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 5000)),
+    ])) as Extract<Frame, { t: 'session.rekeyed' }> | null;
+    if (rekeyed) {
+      this.#establishSeal(request.id, sealPair, rekeyed, resumed.agent);
+    } else if (request.requireSealed) {
+      throw new Error('agent did not re-key within 5s — refusing to resume a sealed session in plaintext');
+    } else {
+      this.#log(`session ${request.id} resumed UNSEALED — the agent never re-keyed`);
+    }
     const session = this.#makeSession(
       resumed.s,
       resumed.surface,
