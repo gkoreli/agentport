@@ -39,6 +39,16 @@
       }
       .card small { color: #9a97a3; font-size: 11px; word-break: break-all; }
       code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+      .row-card { grid-template-columns: auto 1fr auto; display: grid; align-items: center; gap: 10px; }
+      .row-card .grow { display: grid; gap: 1px; }
+      .dot { width: 9px; height: 9px; border-radius: 50%; background: #3a3a44; }
+      .dot.on { background: #4ade80; box-shadow: 0 0 6px #4ade8066; }
+      .state { color: #9a97a3; font-size: 11px; }
+      button.icon { margin-left: 4px; padding: 4px 8px; background: none; border: none; color: #9a97a3; font-size: 14px; }
+      button.icon:hover { color: #e8e6e3; }
+      button.ghost { background: none; border: 1px dashed #33333c; width: 100%; color: #9a97a3; }
+      .footer { border-bottom: none; padding-top: 8px; }
+      .settings { background: #0f0f12; }
     </style>
   </head>
   <body>

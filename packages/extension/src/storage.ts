@@ -15,7 +15,7 @@ import { generateKeyPair, publicKeyOf, type Hex } from '@agentport/protocol';
 const KEY_SECRET = 'agentport.user.secretKey';
 const KEY_RELAY = 'agentport.relay.url';
 
-export const DEFAULT_RELAY_URL = 'ws://127.0.0.1:8787';
+export const DEFAULT_RELAY_URL = 'wss://agentport.gogakoreli.workers.dev/relay';
 
 async function read<T>(key: string): Promise<T | undefined> {
   const bag = await chrome.storage.local.get(key);
