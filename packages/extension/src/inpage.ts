@@ -78,13 +78,27 @@ class PageSession implements PageAgentSession {
     return this.#closed;
   }
 
+  /**
+   * The turn's full text comes back from the wallet, not from summing the
+   * deltas we happened to see: the page is not the authority on its own
+   * transcript. Prompt ids are minted wallet-side and surface on `delta` /
+   * `done`, which is where `cancel` gets its id from.
+   */
   prompt(text: string, context?: Record<string, unknown>): Promise<string> {
     if (this.#closed) return Promise.reject(new Error('session is closed'));
-    const promptId = rid('p_');
-    const turn = post<void>({ t: 'prompt', rid: rid('r_'), ref: this.id, promptId, text, ...(context ? { context } : {}) });
     return new Promise<string>((resolve, reject) => {
-      this.#turns.set(promptId, { text: '', resolve, reject });
-      turn.catch(reject);
+      const turn = { reject };
+      this.#turns.add(turn);
+      post<string>({ t: 'prompt', rid: rid('r_'), ref: this.id, text, ...(context ? { context } : {}) }).then(
+        (full) => {
+          this.#turns.delete(turn);
+          resolve(typeof full === 'string' ? full : '');
+        },
+        (err: unknown) => {
+          this.#turns.delete(turn);
+          reject(err instanceof Error ? err : new Error(String(err)));
+        },
+      );
     });
   }
 
@@ -113,26 +127,19 @@ class PageSession implements PageAgentSession {
   handle(event: string, payload: unknown): void {
     if (!isRecord(payload)) return;
     switch (event) {
-      case 'delta': {
-        const turn = this.#turns.get(String(payload['promptId']));
-        if (turn) turn.text += String(payload['text'] ?? '');
+      case 'delta':
         this.emit('delta', { promptId: String(payload['promptId']), text: String(payload['text'] ?? '') });
         return;
-      }
       case 'thought':
         this.emit('thought', { promptId: String(payload['promptId']), text: String(payload['text'] ?? '') });
         return;
-      case 'done': {
-        const promptId = String(payload['promptId']);
-        const turn = this.#turns.get(promptId);
-        this.#turns.delete(promptId);
-        const stopReason = String(payload['stopReason'] ?? 'end_turn');
-        this.emit('done', { promptId, stopReason, error: payload['error'] as string | undefined });
-        if (!turn) return;
-        if (stopReason === 'error') turn.reject(new Error(String(payload['error'] ?? 'agent error')));
-        else turn.resolve(turn.text);
+      case 'done':
+        this.emit('done', {
+          promptId: String(payload['promptId']),
+          stopReason: String(payload['stopReason'] ?? 'end_turn'),
+          error: payload['error'] as string | undefined,
+        });
         return;
-      }
       case 'tool':
         this.emit('tool', payload as PageSessionEvents['tool']);
         return;
@@ -147,7 +154,7 @@ class PageSession implements PageAgentSession {
   finish(reason: string): void {
     if (this.#closed) return;
     this.#closed = true;
-    for (const turn of this.#turns.values()) turn.reject(new Error(`session closed: ${reason}`));
+    for (const turn of this.#turns) turn.reject(new Error(`session closed: ${reason}`));
     this.#turns.clear();
     this.emit('closed', { reason });
   }

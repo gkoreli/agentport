@@ -57,9 +57,17 @@ packages/protocol/   wire types, Ed25519 helpers, canonical JSON. No I/O.
 packages/relay/      WebSocket relay + cert store. Node only.
 packages/daemon/     VPS-side agent host + AgentRuntime interface.
 packages/client/     wallet, session, navigator.agent provider. Isomorphic.
-examples/inkwell/    demo writing app: editor + agent panel + picker + consent.
+site/                the deployed demo: landing + two surfaces + CF Worker/DO.
+examples/inkwell/    the original local-only demo, kept as the minimal example.
 scripts/e2e.ts       the real test — relay + daemon + wallet over real sockets.
+scripts/acp-smoke.ts real-agent proof; run where the ACP agent is authed.
+scripts/remote-check.ts  pair + prompt against the deployed relay.
 ```
+
+Deployed at https://agentport.gogakoreli.workers.dev — one Worker serves the
+static surfaces and routes `/relay` to a Durable Object wrapping `RelayCore`.
+`run_worker_first = ["/relay"]` in wrangler.toml is load-bearing: the asset
+router 404s unknown paths before the Worker ever sees the upgrade.
 
 ## Invariants — do not regress these
 
@@ -95,10 +103,19 @@ Open the demo, hit **Pair a new agent**, paste the code, then **Connect
 agent**. The daemon's pairing link (`/pair#code=…`) auto-fills the dialog.
 
 ```bash
-npm run e2e        # full loop, no browser, ~1s
+npm run e2e        # full loop, no browser, ~1s, 18 checks
 npm run typecheck  # tsc -b over all packages
-npx tsc -p examples/inkwell/tsconfig.json   # the demo is checked separately
+npm run deploy     # build the site + wrangler deploy
+
+# these three are checked separately, outside the project references
+npx tsc -p examples/inkwell/tsconfig.json
+npx tsc -p site/tsconfig.json          # browser code (DOM lib)
+npx tsc -p site/tsconfig.worker.json   # worker code (workers-types)
 ```
+
+Browser and Worker type-check separately on purpose: `@cloudflare/workers-types`
+and the DOM lib define conflicting globals, so mixing them in one project
+produces nonsense errors.
 
 Env: `AGENTPORT_RELAY`, `AGENTPORT_IDENTITY`, `AGENTPORT_RUNTIME`,
 `AGENTPORT_NAME`, `AGENTPORT_LOCATION`, `AGENTPORT_RELAY_STORE`.
@@ -123,14 +140,13 @@ pass.
 
 Not built yet, in rough priority order:
 
-1. ~~Real runtime adapter.~~ **Done.** `packages/daemon/src/runtime.ts` defines
-   `AgentRuntime`; only `EchoRuntime` and `DemoWriterRuntime` implement it.
-   The target box (`ssh vps` → `ggsCloud`) has Claude Code 2.1.201 with
-   subscription credentials and supports
-   `claude -p --output-format stream-json --input-format stream-json`, so a
-   `ClaudeCodeRuntime` can stream turns and surface the session's `SiteTool`s
-   to it as an MCP server spawned per session. That closes the loop with a
-   real brain and is the single highest-value next commit.
+1. ~~Real runtime adapter.~~ **Done.** `AcpRuntime` makes the daemon an ACP
+   *client*, so any ACP agent can be the brain — Claude Code via
+   `@agentclientprotocol/claude-agent-acp`, and goose/codex/gemini by changing
+   two env vars. The session's grant is injected as a token-scoped,
+   loopback-only MCP server (`McpBridge`) passed in `session/new`'s
+   `mcpServers[]`, and withdrawn when the session closes. Verified end to end
+   on `ssh vps` (ggsCloud) — see `scripts/acp-smoke.ts`.
 2. **End-to-end encryption.** The relay currently reads session frames. It
    should only see routing metadata. Seal frame bodies to the peer's key.
 3. **Extension packaging.** The wallet lives in the page today, which is only
