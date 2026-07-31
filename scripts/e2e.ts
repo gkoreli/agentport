@@ -1,0 +1,183 @@
+/**
+ * End-to-end exercise of the whole loop:
+ *
+ *   pair -> discover -> grant -> prompt -> agent calls a site tool ->
+ *   approval round-trip -> document mutated in the "browser"
+ *
+ * Runs relay + daemon + wallet in one process over real WebSockets.
+ */
+
+import { WebSocket as NodeWebSocket } from 'ws';
+import { Relay } from '../packages/relay/src/relay.js';
+import { AgentDaemon } from '../packages/daemon/src/daemon.js';
+import { DemoWriterRuntime } from '../packages/daemon/src/runtime.js';
+import { AgentWallet, type SiteTool } from '../packages/client/src/index.js';
+import { Deferred, generateKeyPair, type Hex } from '../packages/protocol/src/index.js';
+
+let failures = 0;
+function check(label: string, condition: boolean, detail?: unknown): void {
+  if (condition) {
+    console.log(`  ok   ${label}`);
+  } else {
+    failures++;
+    console.log(`  FAIL ${label}${detail === undefined ? '' : ` — ${JSON.stringify(detail)}`}`);
+  }
+}
+
+const socketFactory = (url: string) => new NodeWebSocket(url) as never;
+
+// --- the "browser" document the site owns -----------------------------------
+
+const doc = { text: 'The sea was calm.' };
+
+function inkwellTools(): SiteTool[] {
+  return [
+    {
+      name: 'inkwell.document.read',
+      description: 'Read the current document',
+      inputSchema: { type: 'object', properties: {} },
+      handler: () => ({ text: doc.text }),
+    },
+    {
+      name: 'inkwell.document.replaceSelection',
+      description: "Replace the user's selected text",
+      inputSchema: {
+        type: 'object',
+        properties: { text: { type: 'string' } },
+        required: ['text'],
+      },
+      requiresApproval: true,
+      handler: (args) => {
+        doc.text = String(args.text ?? '');
+        return { ok: true, length: doc.text.length };
+      },
+    },
+  ];
+}
+
+// --- boot -------------------------------------------------------------------
+
+const relay = new Relay({ port: 0, log: () => {} });
+await relay.listening();
+const relayUrl = `ws://127.0.0.1:${relay.port}`;
+console.log(`relay on ${relayUrl}\n`);
+
+const user = generateKeyPair();
+const agentKeys = generateKeyPair();
+
+const pairingCode = new Deferred<string>();
+const daemon = new AgentDaemon({
+  relayUrl,
+  identity: {
+    secretKey: agentKeys.secretKey,
+    publicKey: agentKeys.publicKey,
+    name: "Goga's Writing Agent",
+    runtime: 'demo-writer',
+    location: 'Personal VPS',
+  },
+  createRuntime: () => new DemoWriterRuntime(),
+  onPairingCode: (code) => pairingCode.resolve(code),
+});
+
+console.log('1. pairing');
+const started = await daemon.start();
+check('daemon starts unbound', started.bound === false, started);
+
+const wallet = new AgentWallet({ relayUrl, userSecretKey: user.secretKey, socketFactory });
+await wallet.connect();
+
+const code = await pairingCode.promise;
+check('agent minted a pairing code', /^[A-Z2-9]{4}-[A-Z2-9]{4}$/.test(code), code);
+
+const offer = await wallet.claimPairing(code);
+check('wallet sees the agent announcement', offer.agent.name === "Goga's Writing Agent", offer.agent);
+
+const cert = await wallet.approvePairing(offer);
+check('cert binds agent to user', cert.user === user.publicKey && cert.agent === agentKeys.publicKey);
+
+console.log('\n2. discovery');
+const agents = await wallet.listAgents();
+check('agent appears in the picker', agents.length === 1 && agents[0]!.agent === agentKeys.publicKey);
+check('agent shows as online', agents[0]?.online === true, agents[0]);
+
+console.log('\n3. session + capability grant');
+const approvals: string[] = [];
+const session = await wallet.openSession({
+  agent: agentKeys.publicKey,
+  surface: { name: 'Inkwell', route: '/documents/doc_123', origin: 'https://inkwell.test' },
+  tools: inkwellTools(),
+  decide: async (prompt) => {
+    approvals.push(prompt.call?.name ?? prompt.summary);
+    return true;
+  },
+});
+check('session opened', session.info.agentName === "Goga's Writing Agent", session.info);
+check('grant carries exactly the site tools', session.grant.tools.length === 2);
+
+const toolEvents: string[] = [];
+session.on('tool', (event) => toolEvents.push(`${event.name}:${event.ok}`));
+
+console.log('\n4. prompt -> tool loop');
+const reply = await session.prompt('Then the wind rose.');
+check('agent read the document', toolEvents.includes('inkwell.document.read:true'), toolEvents);
+check('write was approved', approvals.length > 0, approvals);
+check('document was mutated in the page', doc.text.endsWith('Then the wind rose.'), doc.text);
+check('agent streamed a reply', reply.includes('Done.'), reply);
+
+console.log('\n5. refusal path');
+doc.text = 'Untouched.';
+const declining = await wallet.openSession({
+  agent: agentKeys.publicKey,
+  surface: { name: 'Inkwell', origin: 'https://inkwell.test' },
+  tools: inkwellTools(),
+  decide: async () => false,
+});
+await declining.prompt('Rewrite everything.');
+check('declined approval leaves the document alone', doc.text === 'Untouched.', doc.text);
+declining.close();
+
+console.log('\n6. grant is a real boundary');
+const readOnly = await wallet.openSession({
+  agent: agentKeys.publicKey,
+  surface: { name: 'Inkwell', origin: 'https://inkwell.test' },
+  tools: inkwellTools().filter((tool) => tool.name === 'inkwell.document.read'),
+  decide: async () => true,
+});
+const readOnlyReply = await readOnly.prompt('Rewrite everything.');
+check('agent cannot write without the tool', doc.text === 'Untouched.', doc.text);
+check('agent degrades gracefully', readOnlyReply.includes('suggestion'), readOnlyReply);
+readOnly.close();
+
+console.log('\n7. unowned agents are invisible');
+const stranger = new AgentWallet({
+  relayUrl,
+  userSecretKey: generateKeyPair().secretKey,
+  socketFactory,
+});
+await stranger.connect();
+const strangerAgents = await stranger.listAgents();
+check('a different user sees no agents', strangerAgents.length === 0, strangerAgents);
+
+let denied = '';
+await stranger
+  .openSession({
+    agent: agentKeys.publicKey as Hex,
+    surface: { name: 'Evil', origin: 'https://evil.test' },
+    tools: [],
+    decide: async () => true,
+  })
+  .catch((err: Error) => {
+    denied = err.message;
+  });
+check('relay refuses sessions to agents you do not own', denied.includes('not_your_agent'), denied);
+
+// --- teardown ---------------------------------------------------------------
+
+session.close();
+stranger.close();
+wallet.close();
+await daemon.stop();
+await relay.close();
+
+console.log(`\n${failures === 0 ? 'all checks passed' : `${failures} check(s) failed`}`);
+process.exit(failures === 0 ? 0 : 1);

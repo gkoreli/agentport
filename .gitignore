@@ -1,0 +1,7 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.DS_Store
+.env
+.agentport/
+examples/**/public/bundle.js

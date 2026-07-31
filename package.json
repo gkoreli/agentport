@@ -1,0 +1,33 @@
+{
+  "name": "agentport",
+  "version": "0.0.1",
+  "private": true,
+  "description": "NIP-07 for agents: bring your own agent to any website.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "examples/*"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b --force",
+    "relay": "tsx packages/relay/src/cli.ts",
+    "daemon": "tsx packages/daemon/src/cli.ts",
+    "demo": "tsx examples/inkwell/src/serve.ts",
+    "e2e": "tsx scripts/e2e.ts",
+    "clean": "rm -rf packages/*/dist examples/*/dist"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/ws": "^8.5.13",
+    "esbuild": "^0.24.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  },
+  "dependencies": {
+    "@noble/curves": "^1.7.0",
+    "@noble/hashes": "^1.6.1",
+    "ws": "^8.18.0"
+  }
+}
