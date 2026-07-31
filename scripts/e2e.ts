@@ -395,6 +395,43 @@ console.log('\n10. the relay is blind (ADR-003)');
   tap.close();
 }
 
+// --- 11. a relay redeploy does not strand the daemon --------------------------
+// Deploying the Worker kills the Durable Object and severs every socket. The
+// daemon must notice and come back on its own — no human restarting npx.
+console.log('\n11. relay restarts are survived');
+{
+  const { Relay: FreshRelay } = await import('../packages/relay/src/relay.js');
+  const bounce = new FreshRelay({ port: 0, log: () => {} });
+  await bounce.listening();
+  const bounceUrl = `ws://127.0.0.1:${bounce.port}`;
+  const port = bounce.port;
+
+  const keys = generateKeyPair();
+  const reDaemon = new AgentDaemon({
+    relayUrl: bounceUrl,
+    identity: { ...keys, name: 'Comeback Agent', runtime: 'demo-writer' },
+    createRuntime: () => new DemoWriterRuntime(),
+  });
+  await reDaemon.start();
+
+  const cameBack = new Deferred<boolean>();
+  reDaemon.on('ready', () => cameBack.resolve(true));
+
+  // The "deploy": the relay process dies and a new one takes the same port.
+  await bounce.close();
+  const revived = new FreshRelay({ port, log: () => {} });
+  await revived.listening();
+
+  const back = await Promise.race([
+    cameBack.promise,
+    new Promise<false>((resolve) => setTimeout(() => resolve(false), 8000)),
+  ]);
+  check('the daemon redialed and re-authenticated by itself', back === true);
+
+  await reDaemon.stop();
+  await revived.close();
+}
+
 // --- teardown ---------------------------------------------------------------
 
 session.close();

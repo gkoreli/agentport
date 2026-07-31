@@ -99,6 +99,9 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
   #offerSeals = new Map<string, KeyPair>();
   #log: (message: string) => void;
   #readyDeferred = new Deferred<{ bound: boolean }>();
+  #stopped = false;
+  #retryMs = 1000;
+  #heartbeat: ReturnType<typeof setInterval> | undefined;
 
   constructor(options: DaemonOptions) {
     super();
@@ -110,7 +113,19 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     return this.#options.identity;
   }
 
+  /**
+   * Connects, and STAYS connected: a relay redeploy (Durable Objects sever
+   * every socket when the Worker updates), an idle eviction, or any network
+   * blip is survived by redialing with backoff. Without this the daemon is a
+   * zombie after the first deploy — running, but reachable by nobody.
+   */
   async start(): Promise<{ bound: boolean }> {
+    this.#dial();
+    return this.#readyDeferred.promise;
+  }
+
+  #dial(): void {
+    if (this.#stopped) return;
     const socket = new WebSocket(this.#options.relayUrl);
     this.#socket = socket;
 
@@ -127,10 +142,43 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
       }
       void this.#onFrame(frame);
     });
-    socket.on('close', () => this.emit('closed', undefined));
-    socket.on('error', (err) => this.#readyDeferred.reject(err));
 
-    return this.#readyDeferred.promise;
+    // Half-open sockets (NAT timeouts, silent relay death) look connected
+    // forever without this. ws answers our ping with a pong; no pong within
+    // the next beat means the pipe is gone.
+    let alive = true;
+    socket.on('pong', () => (alive = true));
+    clearInterval(this.#heartbeat);
+    this.#heartbeat = setInterval(() => {
+      if (socket.readyState !== WebSocket.OPEN) return;
+      if (!alive) {
+        this.#log('heartbeat lost — terminating socket to force a redial');
+        socket.terminate();
+        return;
+      }
+      alive = false;
+      socket.ping();
+    }, 30_000);
+
+    socket.on('close', () => {
+      clearInterval(this.#heartbeat);
+      // The relay treats an agent drop as terminal for its sessions, so ours
+      // are dead too: clean up runtimes rather than leak agent processes.
+      for (const session of [...this.#sessions.values()]) {
+        void this.#closeSession(session, 'relay_disconnected', false);
+      }
+      this.emit('closed', undefined);
+      if (this.#stopped) return;
+      const delay = this.#retryMs;
+      this.#retryMs = Math.min(this.#retryMs * 2, 30_000);
+      this.#log(`relay connection lost — redialing in ${Math.round(delay / 1000)}s`);
+      setTimeout(() => this.#dial(), delay);
+    });
+    socket.on('error', (err) => {
+      // Before the first ready this is fatal to the caller; afterwards the
+      // close handler owns recovery.
+      this.#readyDeferred.reject(err);
+    });
   }
 
   /** Claim a connect code the user pasted here from a website's widget. */
@@ -139,6 +187,8 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
   }
 
   async stop(): Promise<void> {
+    this.#stopped = true;
+    clearInterval(this.#heartbeat);
     for (const session of this.#sessions.values()) await this.#closeSession(session, 'daemon_stopping');
     this.#socket?.close();
   }
@@ -174,6 +224,7 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
       }
 
       case 'ready': {
+        this.#retryMs = 1000;
         const bound = Boolean(frame.bound);
         this.emit('ready', { bound });
         this.#readyDeferred.resolve({ bound });
