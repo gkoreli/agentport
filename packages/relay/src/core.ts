@@ -36,8 +36,13 @@ const CONNECT_TTL_MS = 3 * 60 * 1000;
 /** Guess limits, per connection, for the two code/token lookups. */
 const MAX_CLAIM_ATTEMPTS = 20;
 const MAX_RESUME_ATTEMPTS = 10;
-/** How long a session survives its client so a refresh can re-attach. */
-const ORPHAN_GRACE_MS = 5 * 60 * 1000;
+/**
+ * How long a session survives its client so a re-attach can happen. Long,
+ * deliberately: this also covers a tab sitting on a sibling surface of the
+ * same site before coming back. Costs the relay a few hundred bytes of
+ * routing metadata per orphan — never conversation, which is dropped.
+ */
+const ORPHAN_GRACE_MS = 30 * 60 * 1000;
 /**
  * The relay does NOT hold conversation. When a client is away, agent output is
  * dropped and only counted — a number is routing metadata, the frames are the
