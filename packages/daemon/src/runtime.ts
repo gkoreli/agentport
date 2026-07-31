@@ -77,15 +77,20 @@ export class DemoWriterRuntime implements AgentRuntime {
     const body = doc?.text ?? '';
     ctx.say(`I read ${body.length} characters. `);
 
-    if (!has('inkwell.document.replaceSelection')) {
+    // Write through whichever mutation tool the surface granted.
+    const writer = has('inkwell.document.replaceSelection')
+      ? { name: 'inkwell.document.replaceSelection', args: (t: string) => ({ text: `${body.trim()}\n\n${t}`.trim() }) }
+      : has('inkwell.document.append')
+        ? { name: 'inkwell.document.append', args: (t: string) => ({ text: t }) }
+        : undefined;
+    if (!writer) {
       ctx.say('I have no way to write back, so here is a suggestion instead: tighten the opening sentence.');
       return;
     }
 
-    const replacement = body.trim().length > 0 ? `${body.trim()}\n\n${text}` : text;
-    const approved = await ctx.requestApproval('Append your instruction to the document', {
-      name: 'inkwell.document.replaceSelection',
-      arguments: { text: replacement },
+    const approved = await ctx.requestApproval('Write your instruction into the document', {
+      name: writer.name,
+      arguments: writer.args(text),
     });
 
     if (!approved) {
@@ -93,7 +98,7 @@ export class DemoWriterRuntime implements AgentRuntime {
       return;
     }
 
-    await ctx.callTool('inkwell.document.replaceSelection', { text: replacement });
+    await ctx.callTool(writer.name, writer.args(text));
     ctx.say('Done. The document now ends with your instruction.');
   }
 }

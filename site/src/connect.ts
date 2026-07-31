@@ -17,7 +17,7 @@
  * gated tool call — happens there. The widget renders; it never decides.
  */
 
-import {
+import { ResumeError,
   AgentWallet,
   type AgentConnectRequest,
   type AgentProvider,
@@ -126,10 +126,20 @@ const provider: AgentProvider & {
       resumed.session.on('closed', () => forgetSession(request.name));
       return resumed;
     } catch (err) {
-      console.info('[agentport] previous session is gone, starting fresh', err);
-      forgetSession(request.name);
       wallet.close();
-      return null;
+      // Only a denial that PROVES the session is dead may delete the record.
+      // Anything transient — a lost already_attached race, a rekey timeout, a
+      // network blip — keeps the token so the next load can try again;
+      // deleting it here is how a one-second race used to become a
+      // permanently lost session.
+      const reason = err instanceof ResumeError ? err.reason : '';
+      if (reason === 'not_resumable' || reason === 'grant_expired') {
+        console.info(`[agentport] previous session is gone (${reason}), starting fresh`);
+        forgetSession(request.name);
+        return null;
+      }
+      console.error('[agentport] resume failed (record kept for retry)', err);
+      throw err instanceof Error ? err : new Error(String(err));
     }
   },
 

@@ -152,23 +152,30 @@ console.log('\n4. refresh: drop the client, re-attach, restore from the agent');
 // appears, and it must pick the conversation back up.
 const token = page.resumeTokenFor(session.id);
 check('relay issued a resume token', typeof token === 'string' && token.length > 0);
-// Not close() — that would end the session politely. A refresh kills the
-// socket and nothing else.
-page.disconnect();
-await new Promise((resolve) => setTimeout(resolve, 600));
 
+// A REAL refresh starts the new page's resume while the old tab's socket is
+// still closing — the relay briefly answers already_attached and the wallet
+// must retry through it. Reproduce that: begin the resume first, and only
+// drop the old socket a moment later. (An earlier version of this test
+// politely disconnected and slept 600ms first, which is exactly why it
+// missed the bug that lost every real refresh.)
 const reloaded = new AgentWallet({
   relayUrl,
   userSecretKey: generateKeyPair().secretKey,
   socketFactory: (url) => new NodeWebSocket(url) as never,
 });
 await reloaded.connect();
-const { session: resumed } = await reloaded.resumeSession({
+const resuming = reloaded.resumeSession({
   id: session.id,
   token: token!,
   tools,
   decide: () => true,
+  // The original session was sealed; refuse a plaintext comeback.
+  requireSealed: Boolean(session.info.verify),
 });
+setTimeout(() => page.disconnect(), 1000);
+const { session: resumed } = await resuming;
+check('the resumed session is sealed again', Boolean(resumed.info.verify), resumed.info);
 check('session survived the refresh', resumed.info.agentName === 'Integration Agent', resumed.info);
 
 const history = await resumed.history();

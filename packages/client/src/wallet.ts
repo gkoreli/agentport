@@ -34,6 +34,19 @@ const DEFAULT_SESSION_TTL_MS = 60 * 60 * 1000;
 /** Frames an agent may legitimately put inside a sealed envelope. */
 const AGENT_SEALABLE = new Set<string>(['delta', 'thought', 'done', 'tool.call', 'approval.request', 'history']);
 
+/**
+ * A resume refusal with the relay's reason attached, so callers can tell a
+ * dead session ('not_resumable', 'grant_expired') from a transient race
+ * ('already_attached': the old tab's socket close has not reached the relay
+ * yet). Deleting a resume record over a transient reason turns a lost race
+ * into a permanently lost session — the exact bug this type exists to stop.
+ */
+export class ResumeError extends Error {
+  constructor(readonly reason: string) {
+    super(`could not resume: ${reason}`);
+  }
+}
+
 export interface WalletOptions {
   relayUrl: string;
   /** The user's root key. In production this is a passkey-backed or NIP-46 key. */
@@ -236,46 +249,79 @@ export class AgentWallet extends Emitter<WalletEvents> {
      */
     requireSealed?: boolean;
   }): Promise<{ session: AgentSession; missed: number }> {
+    // A real page refresh fires this while the OLD tab's socket close is
+    // still in flight to the relay, which then refuses with already_attached
+    // (correctly: a live session must not be stealable even with the token).
+    // That race resolves itself within a second, so retry it here — every
+    // caller (site, extension) gets refresh-resume without knowing why.
+    let last: unknown;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try {
+        return await this.#attemptResume(request);
+      } catch (err) {
+        if (err instanceof ResumeError && err.reason === 'already_attached') {
+          last = err;
+          await new Promise((resolve) => setTimeout(resolve, 700));
+          continue;
+        }
+        throw err;
+      }
+    }
+    throw last as Error;
+  }
+
+  async #attemptResume(request: {
+    id: string;
+    token: string;
+    tools: SiteTool[];
+    decide?: ApprovalDecider;
+    requireSealed?: boolean;
+  }): Promise<{ session: AgentSession; missed: number }> {
     const sealPair = generateSealKeyPair();
     // Both replies race the round-trip, so both waiters exist BEFORE the send:
     // the daemon's rekey answer can beat the relay's own session.resumed.
-    const resumedReply = this.#await('session.resumed', 'session.denied');
-    const rekeyedReply = this.#await('session.rekeyed');
-    this.#sendRaw({
-      t: 'session.resume',
-      s: request.id,
-      token: request.token,
-      epk: sealPair.publicKey,
-      epkSig: signEpk(this.#options.userSecretKey, request.id, sealPair.publicKey),
-    });
-    const reply = await resumedReply;
-    if (reply.t === 'session.denied') {
-      throw new Error(`could not resume: ${(reply as { reason: string }).reason}`);
-    }
-    const resumed = reply as Extract<Frame, { t: 'session.resumed' }>;
-    // Every attachment gets a fresh key: wait for the agent's answering epk so
-    // the first history.request is already sealed. Bounded, because a daemon
-    // running pre-sealing code will never answer — that degrades to plaintext
-    // (loudly) unless the caller forbade it.
-    const rekeyed = (await Promise.race([
-      rekeyedReply,
-      new Promise<null>((resolve) => setTimeout(() => resolve(null), 5000)),
-    ])) as Extract<Frame, { t: 'session.rekeyed' }> | null;
-    if (rekeyed) {
-      this.#establishSeal(request.id, sealPair, rekeyed, resumed.agent);
-    } else if (request.requireSealed) {
-      throw new Error('agent did not re-key within 5s — refusing to resume a sealed session in plaintext');
-    } else {
-      this.#log(`session ${request.id} resumed UNSEALED — the agent never re-keyed`);
-    }
-    const session = this.#makeSession(
+    const resumedReply = this.#request('session.resumed', 'session.denied');
+    const rekeyedReply = this.#request('session.rekeyed');
+    try {
+      this.#sendRaw({
+        t: 'session.resume',
+        s: request.id,
+        token: request.token,
+        epk: sealPair.publicKey,
+        epkSig: signEpk(this.#options.userSecretKey, request.id, sealPair.publicKey),
+      });
+      const reply = await resumedReply.promise;
+      if (reply.t === 'session.denied') {
+        throw new ResumeError((reply as { reason: string }).reason);
+      }
+      const resumed = reply as Extract<Frame, { t: 'session.resumed' }>;
+      // Every attachment gets a fresh key: wait for the agent's answering epk
+      // so the first history.request is already sealed. Bounded, because a
+      // daemon running pre-sealing code will never answer — that degrades to
+      // plaintext (loudly) unless the caller forbade it.
+      const rekeyed = (await Promise.race([
+        rekeyedReply.promise,
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), 5000)),
+      ])) as Extract<Frame, { t: 'session.rekeyed' }> | null;
+      if (rekeyed) {
+        this.#establishSeal(request.id, sealPair, rekeyed, resumed.agent);
+      } else if (request.requireSealed) {
+        throw new ResumeError('rekey_timeout');
+      } else {
+        this.#log(`session ${request.id} resumed UNSEALED — the agent never re-keyed`);
+      }
+      const session = this.#makeSession(
       resumed.s,
       resumed.surface,
       resumed.grant,
       { agentName: resumed.agentName, runtime: resumed.runtime },
       request,
-    );
-    return { session, missed: resumed.missed };
+      );
+      return { session, missed: resumed.missed };
+    } finally {
+      resumedReply.cancel();
+      rekeyedReply.cancel();
+    }
   }
 
   // --- sessions ------------------------------------------------------------
@@ -452,13 +498,25 @@ export class AgentWallet extends Emitter<WalletEvents> {
 
   /** Single-shot request/response correlation by frame type. */
   #await(...types: string[]): Promise<Frame> {
+    return this.#request(...types).promise;
+  }
+
+  /** Like #await, but cancellable: a failed attempt must withdraw its waiter
+   * or the leftover deferred swallows the reply meant for the retry. */
+  #request(...types: string[]): { promise: Promise<Frame>; cancel: () => void } {
     const deferred = new Deferred<Frame>();
     for (const type of types) {
       const list = this.#waiters.get(type) ?? [];
       list.push(deferred);
       this.#waiters.set(type, list);
     }
-    return deferred.promise;
+    const cancel = () => {
+      for (const [, list] of this.#waiters) {
+        const index = list.indexOf(deferred);
+        if (index >= 0) list.splice(index, 1);
+      }
+    };
+    return { promise: deferred.promise, cancel };
   }
 
   #resolve(frame: Frame): boolean {
