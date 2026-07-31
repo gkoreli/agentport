@@ -34,15 +34,91 @@ function relayUrl(): string {
 
 const RELAY = relayUrl();
 
+/**
+ * Where a resumable session is remembered.
+ *
+ * sessionStorage, not localStorage: it is per-tab and dies when the tab
+ * closes, which matches what the token grants — re-attaching to a session the
+ * user already approved, whose grant still expires on its own schedule. It is
+ * deliberately NOT the "remember my agents across sites" feature; that needs a
+ * persistent identity and its own opt-in.
+ */
+const RESUME_KEY = 'agentport.session';
+
+interface ResumeRecord {
+  id: string;
+  token: string;
+  relay: string;
+  surface: string;
+}
+
+function rememberSession(record: ResumeRecord): void {
+  try {
+    sessionStorage.setItem(RESUME_KEY, JSON.stringify(record));
+  } catch (err) {
+    console.warn('[agentport] could not persist session for resume', err);
+  }
+}
+
+function forgetSession(): void {
+  try {
+    sessionStorage.removeItem(RESUME_KEY);
+  } catch {
+    // storage disabled; resume simply will not be offered
+  }
+}
+
+function rememberedSession(surface: string): ResumeRecord | null {
+  try {
+    const raw = sessionStorage.getItem(RESUME_KEY);
+    if (!raw) return null;
+    const record = JSON.parse(raw) as ResumeRecord;
+    if (record.relay !== RELAY || record.surface !== surface) return null;
+    return record;
+  } catch {
+    return null;
+  }
+}
+
 // ---------------------------------------------------------------------------
 
-const provider: AgentProvider = {
+const provider: AgentProvider & {
+  resume(request: AgentConnectRequest): Promise<{ session: AgentSession; missed: number } | null>;
+} = {
   version: '0.0.1',
 
   // Never dials the relay: a page must not be able to learn anything about
   // the user before they have agreed to anything.
   async isAvailable() {
     return true;
+  },
+
+  /**
+   * Re-attach after a page refresh, if this tab left a live session behind.
+   * Returns null when there is nothing to resume — the caller then shows the
+   * normal Connect button, so a dead token is never a dead end.
+   */
+  async resume(request: AgentConnectRequest): Promise<{ session: AgentSession; missed: number } | null> {
+    const record = rememberedSession(request.name);
+    if (!record) return null;
+
+    const wallet = new AgentWallet({ relayUrl: RELAY, userSecretKey: generateKeyPair().secretKey });
+    try {
+      await wallet.connect();
+      const resumed = await wallet.resumeSession({
+        id: record.id,
+        token: record.token,
+        tools: request.tools,
+        decide: () => true,
+      });
+      resumed.session.on('closed', forgetSession);
+      return resumed;
+    } catch (err) {
+      console.info('[agentport] previous session is gone, starting fresh', err);
+      forgetSession();
+      wallet.close();
+      return null;
+    }
   },
 
   async connect(request: AgentConnectRequest): Promise<AgentSession> {
@@ -75,6 +151,9 @@ const provider: AgentProvider = {
     modal.setCode(code);
     try {
       const session = await Promise.race([accepted, modal.cancelled]);
+      const token = wallet.resumeTokenFor(session.id);
+      if (token) rememberSession({ id: session.id, token, relay: RELAY, surface: request.name });
+      session.on('closed', forgetSession);
       modal.status('connected');
       setTimeout(() => modal.close(), 400);
       return session;
@@ -101,6 +180,8 @@ const AgentPort = {
   provider,
   getProvider,
   connect: (request: AgentConnectRequest) => getProvider().connect(request),
+  /** Only the drop-in provider can resume; an extension manages its own. */
+  resume: (request: AgentConnectRequest) => provider.resume(request),
 };
 
 (globalThis as unknown as { AgentPort: typeof AgentPort }).AgentPort = AgentPort;

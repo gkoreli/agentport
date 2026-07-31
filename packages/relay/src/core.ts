@@ -22,6 +22,14 @@ import {
 const PAIRING_TTL_MS = 5 * 60 * 1000;
 /** Long enough to switch to a terminal or phone and read a code out loud. */
 const CONNECT_TTL_MS = 3 * 60 * 1000;
+/** How long a session survives its client so a refresh can re-attach. */
+const ORPHAN_GRACE_MS = 5 * 60 * 1000;
+/**
+ * The relay does NOT hold conversation. When a client is away, agent output is
+ * dropped and only counted — a number is routing metadata, the frames are the
+ * user's data and belong to their own agent. Replay on resume is the agent's
+ * job (ACP `session/load`), not ours.
+ */
 
 /** A connected socket, whatever the runtime's socket actually is. */
 export interface Peer {
@@ -79,8 +87,18 @@ interface Conn {
 
 interface Session {
   id: string;
-  client: Conn;
+  client: Conn | undefined;
   agent: Conn;
+  /** Bearer secret the client presents to re-attach after a reload. */
+  token: string;
+  surface: SurfaceDescriptor;
+  grant: CapabilityGrant;
+  agentName: string;
+  runtime: string;
+  /** Set when the client socket dropped; cleared on resume. */
+  orphanedAt?: number;
+  /** How many agent frames were dropped while nobody was listening. */
+  missedWhileAway: number;
 }
 
 interface Pending {
@@ -174,9 +192,19 @@ export class RelayCore {
     for (const id of conn.sessions) {
       const session = this.#sessions.get(id);
       if (!session) continue;
-      const other = session.client === conn ? session.agent : session.client;
-      other.sessions.delete(id);
-      other.peer.send({ t: 'session.close', s: id, reason: 'peer_disconnected' });
+
+      if (session.client === conn) {
+        // A page refresh looks exactly like this. Keep the agent side alive
+        // and hold its output so the reloaded tab can pick the thread back up.
+        session.client = undefined;
+        session.orphanedAt = this.#now();
+        this.#log(`session ${id} orphaned; holding ${ORPHAN_GRACE_MS / 1000}s for a resume`);
+        continue;
+      }
+
+      // The agent going away is terminal — there is nothing to resume to.
+      session.client?.sessions.delete(id);
+      session.client?.peer.send({ t: 'session.close', s: id, reason: 'agent_disconnected' });
       this.#sessions.delete(id);
     }
 
@@ -379,7 +407,17 @@ export class RelayCore {
     // synthesised session.open with session.opened, which routes back to the
     // widget through the normal path.
     const id = randomId('sess_');
-    this.#sessions.set(id, { id, client: connect.conn, agent: conn });
+    this.#sessions.set(id, {
+      id,
+      client: connect.conn,
+      agent: conn,
+      token: toHex(randomBytes(24)),
+      surface: connect.surface,
+      grant: connect.grant,
+      agentName: '',
+      runtime: '',
+      missedWhileAway: 0,
+    });
     connect.conn.sessions.add(id);
     conn.sessions.add(id);
 
@@ -427,6 +465,9 @@ export class RelayCore {
 
   #route(conn: Conn, frame: Extract<Frame, { s: string }>): void {
     if (frame.t === 'session.open') return this.#openSession(conn, frame);
+    if (frame.t === 'session.resume') return this.#resumeSession(conn, frame);
+
+    this.#sweepOrphans();
 
     const session = this.#sessions.get(frame.s);
     if (!session) return this.#fail(conn, 'no_session', 'unknown session', frame.s);
@@ -437,14 +478,73 @@ export class RelayCore {
       return this.#fail(conn, 'forbidden', `a ${conn.role} may not send ${frame.t}`, frame.s);
     }
 
-    const other = session.client === conn ? session.agent : session.client;
-    other.peer.send(frame);
+    if (session.agent === conn) {
+      let outbound: Frame = frame;
+      if (frame.t === 'session.opened') {
+        // Captured here so a resume can describe the session without asking
+        // the agent again, and the token reaches only this client.
+        session.agentName = frame.agentName;
+        session.runtime = frame.runtime;
+        outbound = { ...frame, resume: session.token };
+      }
+      if (session.client) session.client.peer.send(outbound);
+      else session.missedWhileAway++;
+    } else {
+      session.agent.peer.send(frame);
+    }
 
     if (frame.t === 'session.close') {
-      session.client.sessions.delete(session.id);
+      session.client?.sessions.delete(session.id);
       session.agent.sessions.delete(session.id);
       this.#sessions.delete(session.id);
     }
+  }
+
+  #sweepOrphans(): void {
+    const now = this.#now();
+    for (const [id, session] of this.#sessions) {
+      if (session.orphanedAt !== undefined && now - session.orphanedAt > ORPHAN_GRACE_MS) {
+        session.agent.sessions.delete(id);
+        session.agent.peer.send({ t: 'session.close', s: id, reason: 'client_never_returned' });
+        this.#sessions.delete(id);
+        this.#log(`session ${id} expired without a resume`);
+      }
+    }
+  }
+
+  #resumeSession(conn: Conn, frame: Extract<Frame, { t: 'session.resume' }>): void {
+    if (conn.role !== 'client') return this.#fail(conn, 'role', 'only clients resume', frame.s);
+    this.#sweepOrphans();
+
+    const session = this.#sessions.get(frame.s);
+    // One message for every failure: a wrong token must not be distinguishable
+    // from an unknown session.
+    if (!session || session.token !== frame.token) {
+      return conn.peer.send({ t: 'session.denied', s: frame.s, reason: 'not_resumable' });
+    }
+    if (session.client) {
+      return conn.peer.send({ t: 'session.denied', s: frame.s, reason: 'already_attached' });
+    }
+    if (session.grant.expiresAt <= this.#now()) {
+      return conn.peer.send({ t: 'session.denied', s: frame.s, reason: 'grant_expired' });
+    }
+
+    session.client = conn;
+    session.orphanedAt = undefined;
+    conn.sessions.add(session.id);
+
+    const missed = session.missedWhileAway;
+    session.missedWhileAway = 0;
+    conn.peer.send({
+      t: 'session.resumed',
+      s: session.id,
+      agentName: session.agentName,
+      runtime: session.runtime,
+      surface: session.surface,
+      grant: session.grant,
+      missed,
+    });
+    this.#log(`session ${session.id} resumed (${missed} frame(s) were dropped while away)`);
   }
 
   #openSession(conn: Conn, frame: Extract<Frame, { t: 'session.open' }>): void {
@@ -463,7 +563,17 @@ export class RelayCore {
       return conn.peer.send({ t: 'session.denied', s: frame.s, reason: 'grant_expired' });
     }
 
-    const session: Session = { id: frame.s, client: conn, agent: agentConn };
+    const session: Session = {
+      id: frame.s,
+      client: conn,
+      agent: agentConn,
+      token: toHex(randomBytes(24)),
+      surface: frame.surface,
+      grant: frame.grant,
+      agentName: '',
+      runtime: '',
+      missedWhileAway: 0,
+    };
     this.#sessions.set(frame.s, session);
     conn.sessions.add(frame.s);
     agentConn.sessions.add(frame.s);

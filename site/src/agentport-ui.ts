@@ -47,6 +47,12 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
   let session: AgentSession | null = null;
   let nextId = 0;
 
+  // PROVENANCE. The site stores no transcript at all — not in localStorage,
+  // not in sessionStorage, nowhere. On reload the panel re-attaches to the
+  // session and asks the AGENT for the conversation, which lives in the
+  // user's own agent session store on their own machine. The relay stores
+  // none of it either.
+
   const push = (kind: string, text: string): number => {
     const id = nextId++;
     lines.value = [...lines.value, { id, kind, text }];
@@ -90,6 +96,46 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
       session = null;
     });
   };
+
+  /**
+   * A refresh should not throw away a live agent. Restore what was on screen,
+   * then try to re-attach to the session itself; if the session is gone the
+   * panel falls back to the ordinary Connect button.
+   */
+  const restore = async () => {
+    try {
+      const resumed = await AgentPortConnect.resume({
+        name: config.name,
+        route: config.route,
+        context: config.context,
+        tools: config.tools,
+        alwaysAsk: config.alwaysAsk,
+      });
+      if (!resumed) return;
+      attach(resumed.session);
+
+      // Hydrate from the agent's own store rather than from anything we kept.
+      const history = await resumed.session.history();
+      const roles: Record<string, string> = {
+        user: 'user',
+        agent: 'agent',
+        thought: 'meta',
+        tool: 'tool ok',
+        approval: 'meta',
+      };
+      lines.value = history.map((entry, index) => ({
+        id: index,
+        kind: roles[entry.role] ?? 'meta',
+        text: entry.text,
+      }));
+      nextId = history.length;
+      push('meta', `reconnected · ${history.length} message(s) restored from your agent`);
+    } catch (err) {
+      console.error('[agentport] resume failed', err);
+      push('error', `could not reconnect: ${(err as Error).message}`);
+    }
+  };
+  void restore();
 
   const connect = () => {
     // [SURFACE] The entire integration. An installed wallet is used if present;

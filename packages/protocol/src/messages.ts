@@ -272,6 +272,31 @@ export interface SessionOpened {
   s: string;
   agentName: string;
   runtime: string;
+  /**
+   * Bearer secret stamped by the relay, letting THIS client re-attach to this
+   * session after a reload. Scoped to one session, dies with it, and grants
+   * nothing beyond a grant the user already approved and which still expires
+   * on its own schedule.
+   */
+  resume?: string;
+}
+
+/** Re-attach to a session whose client socket went away (a page refresh). */
+export interface SessionResume {
+  t: 'session.resume';
+  s: string;
+  token: string;
+}
+
+export interface SessionResumed {
+  t: 'session.resumed';
+  s: string;
+  agentName: string;
+  runtime: string;
+  surface: SurfaceDescriptor;
+  grant: CapabilityGrant;
+  /** Frames the agent sent while nobody was listening. */
+  missed: number;
 }
 
 export interface SessionDenied {
@@ -284,6 +309,33 @@ export interface SessionClose {
   t: 'session.close';
   s: string;
   reason?: string;
+}
+
+/**
+ * One line of conversation, as recorded by the user's own daemon.
+ *
+ * Provenance rule: the transcript lives on the user's machine, next to the
+ * agent that produced it. The relay never stores conversation, and the site
+ * keeps nothing across a reload — on resume it asks the agent for the history
+ * rather than trusting anything it cached itself.
+ */
+export interface HistoryEntry {
+  role: 'user' | 'agent' | 'thought' | 'tool' | 'approval';
+  text: string;
+  /** Unix ms, from the daemon's clock. */
+  at: number;
+}
+
+/** Client asks the agent to replay the conversation it already has. */
+export interface HistoryRequest {
+  t: 'history.request';
+  s: string;
+}
+
+export interface History {
+  t: 'history';
+  s: string;
+  entries: HistoryEntry[];
 }
 
 export interface Prompt {
@@ -385,7 +437,11 @@ export type ControlFrame =
 export type SessionFrame =
   | SessionOpen
   | SessionOpened
+  | SessionResume
+  | SessionResumed
   | SessionDenied
+  | HistoryRequest
+  | History
   | SessionClose
   | Prompt
   | PromptCancel
@@ -405,7 +461,11 @@ export type FrameType = Frame['t'];
 const SESSION_FRAME_TYPES = new Set<string>([
   'session.open',
   'session.opened',
+  'session.resume',
+  'session.resumed',
   'session.denied',
+  'history.request',
+  'history',
   'session.close',
   'prompt',
   'prompt.cancel',
@@ -425,7 +485,9 @@ export function isSessionFrame(frame: Frame): frame is SessionFrame {
 /** Frames a client is allowed to originate inside a session. */
 const CLIENT_ORIGINATED = new Set<string>([
   'session.open',
+  'session.resume',
   'session.close',
+  'history.request',
   'prompt',
   'prompt.cancel',
   'tool.result',
@@ -435,6 +497,7 @@ const CLIENT_ORIGINATED = new Set<string>([
 /** Frames an agent is allowed to originate inside a session. */
 const AGENT_ORIGINATED = new Set<string>([
   'session.opened',
+  'history',
   'session.denied',
   'session.close',
   'delta',

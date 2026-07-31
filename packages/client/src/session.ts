@@ -4,6 +4,7 @@ import {
   type ApprovalRequest,
   type CapabilityGrant,
   type Frame,
+  type HistoryEntry,
   type SessionFrame,
   type SurfaceDescriptor,
   type ToolDefinition,
@@ -54,6 +55,7 @@ export class AgentSession extends Emitter<SessionEvents> {
   #decide: ApprovalDecider;
   #send: (frame: SessionFrame) => void;
   #transcripts = new Map<string, { text: string; deferred: Deferred<string> }>();
+  #historyWaiters: Deferred<HistoryEntry[]>[] = [];
   #closed = false;
 
   constructor(init: {
@@ -90,6 +92,21 @@ export class AgentSession extends Emitter<SessionEvents> {
     return deferred.promise;
   }
 
+  /**
+   * Ask the agent for the conversation it already has.
+   *
+   * The site deliberately keeps no transcript of its own across reloads: the
+   * history lives on the user's machine, in their agent's session store, and
+   * is fetched from there.
+   */
+  history(): Promise<HistoryEntry[]> {
+    if (this.#closed) return Promise.reject(new Error('session is closed'));
+    const deferred = new Deferred<HistoryEntry[]>();
+    this.#historyWaiters.push(deferred);
+    this.#send({ t: 'history.request', s: this.id });
+    return deferred.promise;
+  }
+
   cancel(promptId: string): void {
     this.#send({ t: 'prompt.cancel', s: this.id, id: promptId });
   }
@@ -119,6 +136,10 @@ export class AgentSession extends Emitter<SessionEvents> {
         if (!turn) return;
         if (frame.stopReason === 'error') turn.deferred.reject(new Error(frame.error ?? 'agent error'));
         else turn.deferred.resolve(turn.text);
+        return;
+      }
+      case 'history': {
+        this.#historyWaiters.shift()?.resolve(frame.entries);
         return;
       }
       case 'tool.call':
@@ -177,6 +198,8 @@ export class AgentSession extends Emitter<SessionEvents> {
     this.#closed = true;
     for (const turn of this.#transcripts.values()) turn.deferred.reject(new Error(`session closed: ${reason}`));
     this.#transcripts.clear();
+    for (const waiter of this.#historyWaiters) waiter.reject(new Error(`session closed: ${reason}`));
+    this.#historyWaiters = [];
     this.emit('closed', { reason });
   }
 }

@@ -65,6 +65,7 @@ export class AgentWallet extends Emitter<WalletEvents> {
   #socket: WebSocketLike | undefined;
   #sessions = new Map<string, AgentSession>();
   #waiters = new Map<string, Deferred<Frame>[]>();
+  #resumeTokens = new Map<string, string>();
   #ready = new Deferred<void>();
   #log: (message: string) => void;
 
@@ -101,8 +102,18 @@ export class AgentWallet extends Emitter<WalletEvents> {
     return this.#ready.promise;
   }
 
+  /** Graceful shutdown: ends every session, then disconnects. */
   close(): void {
     for (const session of this.#sessions.values()) session.close('wallet_closed');
+    this.#socket?.close();
+  }
+
+  /**
+   * Drop the socket WITHOUT ending sessions — what a page refresh or a killed
+   * tab actually looks like. The relay holds the session open for a grace
+   * period so the reloaded page can resume it.
+   */
+  disconnect(): void {
     this.#socket?.close();
   }
 
@@ -173,10 +184,37 @@ export class AgentWallet extends Emitter<WalletEvents> {
         throw new Error(`connection declined: ${(reply as { reason: string }).reason}`);
       }
       const opened = reply as Extract<Frame, { t: 'session.opened' }>;
+      if (opened.resume) this.#resumeTokens.set(opened.s, opened.resume);
       return this.#makeSession(opened.s, surface, grant, opened, request);
     })();
 
     return { code: pending.code, expiresAt: pending.expiresAt, accepted };
+  }
+
+  /**
+   * Re-attach to a session this origin already established — the page-refresh
+   * path. The token was issued to this client alone and dies with the session.
+   */
+  async resumeSession(request: {
+    id: string;
+    token: string;
+    tools: SiteTool[];
+    decide?: ApprovalDecider;
+  }): Promise<{ session: AgentSession; missed: number }> {
+    this.#sendRaw({ t: 'session.resume', s: request.id, token: request.token });
+    const reply = await this.#await('session.resumed', 'session.denied');
+    if (reply.t === 'session.denied') {
+      throw new Error(`could not resume: ${(reply as { reason: string }).reason}`);
+    }
+    const resumed = reply as Extract<Frame, { t: 'session.resumed' }>;
+    const session = this.#makeSession(
+      resumed.s,
+      resumed.surface,
+      resumed.grant,
+      { agentName: resumed.agentName, runtime: resumed.runtime },
+      request,
+    );
+    return { session, missed: resumed.missed };
   }
 
   // --- sessions ------------------------------------------------------------
@@ -199,8 +237,17 @@ export class AgentWallet extends Emitter<WalletEvents> {
       throw new Error(`agent refused the session: ${(reply as { reason: string }).reason}`);
     }
     const opened = reply as Extract<Frame, { t: 'session.opened' }>;
+    if (opened.resume) this.#resumeTokens.set(id, opened.resume);
 
     return this.#makeSession(id, surface, grant, opened, request);
+  }
+
+  /**
+   * The resume token the relay issued for a session, if any. Held in memory
+   * only — deciding whether to persist it, and where, is the caller's call.
+   */
+  resumeTokenFor(sessionId: string): string | undefined {
+    return this.#resumeTokens.get(sessionId);
   }
 
   #makeSession(
@@ -249,7 +296,11 @@ export class AgentWallet extends Emitter<WalletEvents> {
       return;
     }
 
-    if (isSessionFrame(frame) && frame.t !== 'session.opened' && frame.t !== 'session.denied') {
+    // These three answer a pending request rather than an existing session —
+    // routing them by session id drops them, because the session does not
+    // exist on this side yet.
+    const ANSWERS_A_REQUEST = frame.t === 'session.opened' || frame.t === 'session.denied' || frame.t === 'session.resumed';
+    if (isSessionFrame(frame) && !ANSWERS_A_REQUEST) {
       await this.#sessions.get(frame.s)?.handle(frame);
       return;
     }

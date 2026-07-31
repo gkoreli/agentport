@@ -179,6 +179,35 @@ Not built yet, in rough priority order:
 5. **Revocation UI.** `CertStore.remove` exists; nothing calls it.
 6. **Reconnect + session resume.** Sockets are assumed stable; they aren't.
 
+## Provenance — where the user's data lives
+
+One rule: **conversation belongs to the user's own machine.**
+
+| what | where | who can read it |
+|---|---|---|
+| transcript | the agent's own session store (Claude Code's, on the user's disk) | the user |
+| resume token | sessionStorage on the site origin, per tab | that tab |
+| ownership certs | the relay, and the wallet | relay sees public keys only |
+| conversation frames | in flight only | relay forwards, never stores |
+
+The site keeps **no** transcript across a reload — not in localStorage, not in
+sessionStorage. On resume the panel asks the agent for the history via
+`history.request`, and the daemon answers by calling ACP `loadSession`, which
+replays from the agent's own store. `claude-agent-acp` advertises
+`loadSession: true` (verified), so this is the same history the user sees in
+their own client.
+
+The daemon keeps an in-memory transcript too, but only as a fallback for
+runtimes that persist nothing — `replayHistory()` on the runtime wins whenever
+it returns non-null.
+
+The relay holds sessions open for `ORPHAN_GRACE_MS` after a client drops so a
+refresh can re-attach, but it does **not** buffer the agent output that
+arrives meanwhile — it counts the frames and drops them. A count is routing
+metadata; the frames are the user's data. An earlier version of this buffered
+500 frames in the Durable Object; that was a privacy regression and was
+removed.
+
 ## Prompt injection
 
 Document text flows into an agent that holds tools over that same document.

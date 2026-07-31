@@ -1,4 +1,4 @@
-import type { CapabilityGrant, SurfaceDescriptor, ToolDefinition } from '@agentport/protocol';
+import type { CapabilityGrant, HistoryEntry, SurfaceDescriptor, ToolDefinition } from '@agentport/protocol';
 
 /**
  * Everything a runtime is handed for one turn.
@@ -26,6 +26,16 @@ export interface TurnContext {
 
 export interface AgentRuntime {
   readonly name: string;
+  /**
+   * Replay the conversation from the runtime's OWN store, if it keeps one.
+   *
+   * This is the provenance answer: ACP agents already persist sessions on the
+   * user's disk (claude-agent-acp advertises `loadSession`), so history is
+   * read back from there rather than duplicated into the relay, the website,
+   * or a second transcript of ours. Return null when the runtime has no store
+   * and the daemon should fall back to what it observed.
+   */
+  replayHistory?(): Promise<HistoryEntry[] | null>;
   /** Called once per session before the first prompt. */
   openSession?(context: Omit<TurnContext, 'say' | 'think' | 'callTool' | 'requestApproval' | 'signal'>): Promise<void> | void;
   closeSession?(): Promise<void> | void;

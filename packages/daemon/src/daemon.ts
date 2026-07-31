@@ -11,6 +11,7 @@ import {
   type AgentCert,
   type CapabilityGrant,
   type Frame,
+  type HistoryEntry,
   type SurfaceDescriptor,
   type ToolDefinition,
 } from '@agentport/protocol';
@@ -25,6 +26,12 @@ interface SessionState {
   grant: CapabilityGrant;
   tools: ToolDefinition[];
   runtime: AgentRuntime;
+  /**
+   * The conversation, recorded on the user's own machine. This is the
+   * authoritative transcript: the relay stores none of it, and the website is
+   * expected to keep none of it across a reload.
+   */
+  transcript: HistoryEntry[];
   toolCalls: Map<string, Deferred<unknown>>;
   approvals: Map<string, Deferred<boolean>>;
   prompts: Map<string, AbortController>;
@@ -166,6 +173,20 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
         return;
       }
 
+      case 'history.request': {
+        const session = this.#sessions.get(frame.s);
+        if (!session) return;
+        // The runtime's own store is authoritative — it is the same history
+        // the user sees in their agent, on their disk. Ours is only a
+        // fallback for runtimes that persist nothing.
+        const replayed = await session.runtime.replayHistory?.().catch((err: unknown) => {
+          this.#log(`history replay failed: ${err instanceof Error ? err.message : String(err)}`);
+          return null;
+        });
+        this.#send({ t: 'history', s: frame.s, entries: replayed ?? session.transcript });
+        return;
+      }
+
       case 'prompt':
         return this.#onPrompt(frame);
 
@@ -217,6 +238,7 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
       grant: frame.grant,
       tools: frame.grant.tools,
       runtime,
+      transcript: [],
       toolCalls: new Map(),
       approvals: new Map(),
       prompts: new Map(),
@@ -242,15 +264,44 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     const controller = new AbortController();
     session.prompts.set(frame.id, controller);
 
+    const record = (role: HistoryEntry['role'], text: string) => {
+      const last = session.transcript[session.transcript.length - 1];
+      // Streamed deltas arrive token by token; coalesce them into one line so
+      // a replay reads like the conversation rather than like the wire.
+      if (last && last.role === role && role === 'agent') last.text += text;
+      else session.transcript.push({ role, text, at: Date.now() });
+    };
+
+    record('user', frame.text);
+
     const ctx: TurnContext = {
       surface: session.surface,
       grant: session.grant,
       tools: session.tools,
       signal: controller.signal,
-      say: (text) => this.#send({ t: 'delta', s: session.id, promptId: frame.id, text }),
-      think: (text) => this.#send({ t: 'thought', s: session.id, promptId: frame.id, text }),
-      callTool: (name, args) => this.#callTool(session, name, args),
-      requestApproval: (summary, call) => this.#requestApproval(session, summary, call),
+      say: (text) => {
+        record('agent', text);
+        this.#send({ t: 'delta', s: session.id, promptId: frame.id, text });
+      },
+      think: (text) => {
+        record('thought', text);
+        this.#send({ t: 'thought', s: session.id, promptId: frame.id, text });
+      },
+      callTool: async (name, args) => {
+        try {
+          const result = await this.#callTool(session, name, args);
+          record('tool', name);
+          return result;
+        } catch (err) {
+          record('tool', `${name} — ${err instanceof Error ? err.message : String(err)}`);
+          throw err;
+        }
+      },
+      requestApproval: async (summary, call) => {
+        const granted = await this.#requestApproval(session, summary, call);
+        record('approval', `${summary} — ${granted ? 'allowed' : 'declined'}`);
+        return granted;
+      },
     };
 
     try {

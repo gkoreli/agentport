@@ -9,8 +9,10 @@ import {
   type PermissionOption,
   type RequestPermissionRequest,
   type RequestPermissionResponse,
+  type McpServer,
   type SessionNotification,
 } from '@agentclientprotocol/sdk';
+import type { HistoryEntry } from '@agentport/protocol';
 import type { AgentRuntime, TurnContext } from '../runtime.js';
 import { McpBridge, mcpToolName } from '../mcp-bridge.js';
 
@@ -54,8 +56,14 @@ export class AcpRuntime implements AgentRuntime {
   /** Set for the duration of a turn so MCP callbacks can reach the surface. */
   #turn: TurnContext | undefined;
   #log: (message: string) => void;
+  /** Whether the agent keeps its own session store we can replay from. */
+  #supportsLoad = false;
   /** Tool calls the agent has announced, so updates can be labelled. */
   #toolTitles = new Map<string, string>();
+  /** Set while `loadSession` is streaming history back at us. */
+  #replay: HistoryEntry[] | undefined;
+  /** Kept so a replay can re-declare the same MCP servers. */
+  #mcpServers: McpServer[] = [];
 
   constructor(options: AcpRuntimeOptions) {
     this.#options = options;
@@ -84,13 +92,14 @@ export class AcpRuntime implements AgentRuntime {
     const connection = new ClientSideConnection(() => this.#client(), stream);
     this.#connection = connection;
 
-    await connection.initialize({
+    const init = await connection.initialize({
       protocolVersion: PROTOCOL_VERSION,
       clientInfo: { name: 'agentport', version: '0.0.1' },
       // We expose no filesystem and no terminal. The only capabilities this
       // agent gains from us are the site's tools, over MCP, below.
       clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
     });
+    this.#supportsLoad = init.agentCapabilities?.loadSession === true;
 
     // Register the surface's tools and hand the agent their endpoint.
     await this.#options.bridge.start();
@@ -105,16 +114,18 @@ export class AcpRuntime implements AgentRuntime {
       },
     );
 
+    this.#mcpServers = [
+      {
+        type: 'http',
+        name: 'agentport',
+        url,
+        headers: [{ name: 'Authorization', value: `Bearer ${token}` }],
+      },
+    ];
+
     const session = await connection.newSession({
       cwd: this.#options.cwd ?? process.cwd(),
-      mcpServers: [
-        {
-          type: 'http',
-          name: 'agentport',
-          url,
-          headers: [{ name: 'Authorization', value: `Bearer ${token}` }],
-        },
-      ],
+      mcpServers: this.#mcpServers,
     });
     this.#sessionId = session.sessionId;
     this.#log(
@@ -148,6 +159,37 @@ export class AcpRuntime implements AgentRuntime {
     }
   }
 
+  /**
+   * Ask the agent to replay its own session. `loadSession` streams the whole
+   * conversation back through the normal notification channel, so we simply
+   * divert those notifications into a list instead of into a live turn.
+   */
+  async replayHistory(): Promise<HistoryEntry[] | null> {
+    const connection = this.#connection;
+    const sessionId = this.#sessionId;
+    if (!connection || !sessionId || !this.#supportsLoad) return null;
+    // `loadSession` is optional in ACP; only agents that advertise the
+    // capability implement it.
+    const loadSession = connection.loadSession?.bind(connection);
+    if (!loadSession) return null;
+
+    const collected: HistoryEntry[] = [];
+    this.#replay = collected;
+    try {
+      await loadSession({
+        sessionId,
+        cwd: this.#options.cwd ?? process.cwd(),
+        mcpServers: this.#mcpServers,
+      });
+      return collected;
+    } catch (err) {
+      this.#log(`loadSession failed, falling back to observed history: ${err instanceof Error ? err.message : String(err)}`);
+      return null;
+    } finally {
+      this.#replay = undefined;
+    }
+  }
+
   async closeSession(): Promise<void> {
     if (this.#bridgeSessionId) this.#options.bridge.unregister(this.#bridgeSessionId);
     this.#child?.kill();
@@ -161,9 +203,24 @@ export class AcpRuntime implements AgentRuntime {
   #client(): Client {
     return {
       sessionUpdate: (params: SessionNotification) => {
+        const update = params.update;
+
+        // During a replay there is no live turn; collect instead of stream.
+        if (this.#replay) {
+          if (update.sessionUpdate === 'user_message_chunk' && update.content.type === 'text') {
+            this.#replay.push({ role: 'user', text: update.content.text, at: 0 });
+          } else if (update.sessionUpdate === 'agent_message_chunk' && update.content.type === 'text') {
+            const last = this.#replay[this.#replay.length - 1];
+            if (last?.role === 'agent') last.text += update.content.text;
+            else this.#replay.push({ role: 'agent', text: update.content.text, at: 0 });
+          } else if (update.sessionUpdate === 'tool_call') {
+            this.#replay.push({ role: 'tool', text: update.title, at: 0 });
+          }
+          return;
+        }
+
         const turn = this.#turn;
         if (!turn) return;
-        const update = params.update;
 
         switch (update.sessionUpdate) {
           case 'agent_message_chunk':

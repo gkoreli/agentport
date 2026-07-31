@@ -147,12 +147,49 @@ check('it read the document', called.includes('read'), called);
 check('it wrote through the site tool', called.includes('append'), called);
 check('the document changed', doc.text.split('\n\n').length > 1, doc.text);
 
+console.log('\n4. refresh: drop the client, re-attach, restore from the agent');
+// Simulate a page reload: the tab's socket dies, a brand-new ephemeral client
+// appears, and it must pick the conversation back up.
+const token = page.resumeTokenFor(session.id);
+check('relay issued a resume token', typeof token === 'string' && token.length > 0);
+// Not close() — that would end the session politely. A refresh kills the
+// socket and nothing else.
+page.disconnect();
+await new Promise((resolve) => setTimeout(resolve, 600));
+
+const reloaded = new AgentWallet({
+  relayUrl,
+  userSecretKey: generateKeyPair().secretKey,
+  socketFactory: (url) => new NodeWebSocket(url) as never,
+});
+await reloaded.connect();
+const { session: resumed } = await reloaded.resumeSession({
+  id: session.id,
+  token: token!,
+  tools,
+  decide: () => true,
+});
+check('session survived the refresh', resumed.info.agentName === 'Integration Agent', resumed.info);
+
+const history = await resumed.history();
+check('history came back from the agent', history.length > 0, history.length);
+check(
+  'it contains the actual conversation',
+  history.some((entry) => entry.role === 'agent' && entry.text.trim().length > 0),
+  history.slice(0, 3),
+);
+console.log(`      restored ${history.length} entries from the agent's own store`);
+
+const second = await resumed.prompt('In one short sentence, what did you just append?');
+check('the agent still remembers the thread', second.trim().length > 0, second.slice(0, 160));
+console.log(`      follow-up: ${second.trim().slice(0, 160)}`);
+
 console.log(`\n--- reply ---\n${reply.trim().slice(0, 400)}`);
 console.log(`\n--- document ---\n${doc.text}`);
 
 clearTimeout(timer);
-session.close();
-page.close();
+resumed.close();
+reloaded.close();
 await daemon.stop();
 await bridge.stop();
 
