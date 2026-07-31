@@ -10,7 +10,7 @@
  * safe here; the injected modal deliberately avoids it (see modal.ts).
  */
 
-import { component, each, html, signal, when, type ReadonlySignal } from '@nisli/core';
+import { component, computed, each, html, signal, when, type ReadonlySignal } from '@nisli/core';
 import AgentPortConnect from './connect.js';
 import type { AgentSession, SiteTool } from '@agentport/client';
 
@@ -130,7 +130,7 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
     </div>
 
     ${when(
-      () => !live.value,
+      computed(() => !live.value),
       () => html`
         <div class="ap-empty">
           <p class="ap-pitch">
@@ -142,11 +142,14 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
       `,
     )}
 
-    <div class="ap-log" class:live=${() => live.value || lines.value.length > 0}>
+    <div class="ap-log" class:live=${computed(() => live.value || lines.value.length > 0)}>
       ${each(
         lines as ReadonlySignal<Line[]>,
         (line) => line.id,
-        (line) => html`<div class="ap-msg ${() => line.value.kind}">${() => line.value.text}</div>`,
+        (line) =>
+          html`<div class=${computed(() => `ap-msg ${line.value.kind}`)}>
+            ${computed(() => line.value.text)}
+          </div>`,
       )}
     </div>
 

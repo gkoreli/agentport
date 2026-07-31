@@ -83,6 +83,10 @@ class FakeRelay {
     if (frame.t === 'identify') this.#reply({ t: 'ready', role: 'client', pubkey: 'x' });
     if (frame.t === 'connect.begin') {
       this.#reply({ t: 'connect.pending', code: 'TEST-CODE', expiresAt: Date.now() + 60_000 });
+      // Complete the session too, so the panel actually renders messages —
+      // without this the render assertions below inspect an empty log and
+      // pass vacuously.
+      this.#reply({ t: 'session.opened', s: 'sess_test', agentName: 'Test Agent', runtime: 'demo' });
     }
   }
   close() {}
@@ -122,6 +126,19 @@ check(
 const panelText = (clickMount as unknown as { textContent: string }).textContent ?? '';
 check('no error surfaced in the panel', !panelText.includes('connect failed'), panelText.slice(0, 140));
 check('a code came back', FakeRelay.frames.filter((f) => f === 'connect.begin').length === 1, FakeRelay.frames);
+
+console.log('\n4. message rendering');
+// The panel showed the literal source of an arrow function where the message
+// text should have been, and kept the empty state visible while connected.
+// Both were bare arrows used where nisli wants a signal.
+await new Promise((resolve) => setTimeout(resolve, 250));
+flush();
+const render = clickMount as unknown as { textContent: string };
+const rendered = () => render.textContent ?? '';
+
+check('a session message actually rendered', /tools lent/.test(rendered()), rendered().slice(0, 200));
+check('no function source leaked into the DOM', !/=>/.test(rendered()), rendered().slice(0, 200));
+check('empty state is gone once connected', !/Bring your own agent/.test(rendered()), rendered().slice(0, 200));
 
 console.log(failures === 0 ? '\nUI smoke passed' : `\n${failures} failed`);
 process.exit(failures === 0 ? 0 : 1);
