@@ -162,7 +162,10 @@ export function genericPageTools(): SiteTool[] {
     },
     {
       name: 'page.fill',
-      description: 'Type a value into a field identified by a handle from page.listElements.',
+      description:
+        'Type a value into a field identified by a handle from page.listElements. ' +
+        'If the site granted its own editing tools (e.g. document.replaceRange), prefer those — ' +
+        'they are more precise than filling a rich editor wholesale.',
       requiresApproval: true,
       inputSchema: objectSchema({ element: { type: 'string' }, value: { type: 'string' } }, ['element', 'value']),
       handler: (args) => {
@@ -176,9 +179,27 @@ export function genericPageTools(): SiteTool[] {
           el.dispatchEvent(new Event('input', { bubbles: true }));
           el.dispatchEvent(new Event('change', { bubbles: true }));
         } else if (el instanceof HTMLElement && el.isContentEditable) {
+          // Editors built on contenteditable (CodeMirror, ProseMirror, Monaco,
+          // Lexical) own their DOM: writing textContent gets reverted by the
+          // editor's MutationObserver a frame later. The one channel they all
+          // handle is the input-events path — select the content, then let
+          // `insertText` arrive as a `beforeinput` the editor interprets.
           el.focus();
-          el.textContent = value;
-          el.dispatchEvent(new Event('input', { bubbles: true }));
+          const selection = el.ownerDocument.getSelection();
+          if (selection) {
+            const range = el.ownerDocument.createRange();
+            range.selectNodeContents(el);
+            selection.removeAllRanges();
+            selection.addRange(range);
+          }
+          const inserted = el.ownerDocument.execCommand('insertText', false, value);
+          if (!inserted) {
+            // No execCommand support: fall back to a synthetic paste, which
+            // rich editors also handle natively.
+            const data = new DataTransfer();
+            data.setData('text/plain', value);
+            el.dispatchEvent(new ClipboardEvent('paste', { clipboardData: data, bubbles: true, cancelable: true }));
+          }
         } else {
           throw new Error('that element is not a text field');
         }
