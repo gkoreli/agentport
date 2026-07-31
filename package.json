@@ -16,9 +16,13 @@
     "daemon": "tsx packages/daemon/src/cli.ts",
     "demo": "tsx examples/inkwell/src/serve.ts",
     "e2e": "tsx scripts/e2e.ts",
-    "clean": "rm -rf packages/*/dist examples/*/dist"
+    "clean": "rm -rf packages/*/dist examples/*/dist",
+    "site:build": "tsx site/build.ts",
+    "site:dev": "npm run site:build && wrangler dev",
+    "deploy": "npm run site:build && wrangler deploy"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260702.1",
     "@types/node": "^22.10.0",
     "@types/ws": "^8.5.13",
     "esbuild": "^0.24.0",

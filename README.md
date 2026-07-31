@@ -41,7 +41,24 @@ The gap AgentPort fills is narrow and real: NIP-46 grants *signing* scopes,
 WebMCP hands tools to *the browser's* agent. Nobody grants a **user-chosen
 remote agent** a **site-defined toolset**. That's this.
 
-## Try it
+## Live
+
+**https://agentport.gogakoreli.workers.dev** — one Cloudflare Worker serving both
+demo surfaces and the relay they connect to.
+
+Point your own agent at it:
+
+```bash
+AGENTPORT_RELAY=wss://agentport.gogakoreli.workers.dev/relay \
+AGENTPORT_RUNTIME=claude-code \
+npm run daemon
+```
+
+Paste the pairing code it prints into either surface, and the panel is talking
+to your machine. Connect on Inkwell, then open Tasker: same agent, entirely
+different hands.
+
+## Try it locally
 
 ```bash
 npm install
@@ -58,7 +75,11 @@ writing panel whose brain is the process in terminal 2.
 No browser needed to verify the protocol:
 
 ```bash
-npm run e2e
+npm run e2e            # local, mock runtime, 18 checks
+npm run site:build     # bundle the demo surfaces
+npm run deploy         # build + wrangler deploy
+npx tsx scripts/remote-check.ts   # pair + prompt against the deployed relay
+npx tsx scripts/acp-smoke.ts      # real ACP agent; run where it is authenticated
 ```
 
 ## Status
@@ -67,8 +88,9 @@ Early but real. Pairing, ownership certs, directory, presence, capability
 grants, streaming, tool calls, approvals, and teardown all work and are
 covered by `scripts/e2e.ts`.
 
-The daemon currently ships demo runtimes rather than a real one — wiring
-Claude Code in behind the `AgentRuntime` interface is the next commit. See
+Verified against a real agent: Claude Code over ACP on a VPS reads and writes
+through the site's lent tools, with every gated write approved in the browser.
+See
 [AGENTS.md](./AGENTS.md) for architecture, security invariants, and the
 roadmap.
 

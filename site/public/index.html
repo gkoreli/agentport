@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>AgentPort — bring your own agent to any website</title>
+<link rel="stylesheet" href="/styles.css"/></head><body>
+<div class="topbar"><div class="brand">AgentPort <span>· navigator.agent</span></div>
+<nav><a href="/" aria-current="page">Home</a><a href="/inkwell">Inkwell</a><a href="/tasker">Tasker</a>
+<a href="https://github.com/agentclientprotocol/claude-agent-acp">ACP</a></nav></div>
+
+<div class="hero">
+<h1>Bring your own agent to any website.</h1>
+<p class="lede">Today every app ships its own chatbot and pays for its own inference. AgentPort inverts that: you own one agent — on your machine, your subscription, your memory — and carry it between applications. The site lends it a few tools for one session and never learns anything else about it.</p>
+<pre>const session = await navigator.agent.connect({
+  name: 'Inkwell',
+  tools: [{
+    name: 'inkwell.document.read',
+    description: 'Read the current document',
+    inputSchema: { type: 'object', properties: {} },
+    handler: () =&gt; ({ text: editor.value }),
+  }],
+  alwaysAsk: ['inkwell.document.replaceSelection'],
+});
+
+await session.prompt('Tighten the opening paragraph.');</pre>
+<p class="lede" style="margin-top:24px;font-size:15px">That is the whole integration. No API key, no model choice, no inference bill.</p>
+</div>
+
+<div class="cards">
+<a class="card" href="/inkwell"><h3>Inkwell →</h3><p>A writing app. Lends the agent four document tools; writes are gated behind approval.</p></a>
+<a class="card" href="/tasker"><h3>Tasker →</h3><p>A task board. Completely different tools, same agent, same session flow — that's the point.</p></a>
+</div>
+
+<div class="note">
+<p><strong>Two surfaces, one agent.</strong> Connect on Inkwell, then open Tasker and connect again. It's the same agent both times, but each site's grant contains only its own tools, and closing a tab takes those capabilities away.</p>
+<p><strong>To try it you need an agent.</strong> Run the daemon on your own machine — <code>npm run daemon</code> with <code>AGENTPORT_RELAY=wss://&lt;this host&gt;/relay</code> — then paste the pairing code it prints. Your agent connects outbound; nothing listens on your machine.</p>
+<p><strong>Demo caveat:</strong> the wallet runs in the page and keeps a throwaway key in localStorage, so this page can reach it. In a real deployment the wallet is a browser extension and the page can only ask.</p>
+</div>
+</body></html>

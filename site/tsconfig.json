@@ -1,0 +1,9 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "types": ["node"],
+    "composite": false, "declaration": false, "declarationMap": false, "noEmit": true
+  },
+  "include": ["src/agentport-ui.ts", "src/inkwell.ts", "src/tasker.ts", "build.ts"]
+}

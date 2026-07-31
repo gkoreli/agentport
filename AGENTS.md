@@ -123,7 +123,7 @@ pass.
 
 Not built yet, in rough priority order:
 
-1. **Real runtime adapter.** `packages/daemon/src/runtime.ts` defines
+1. ~~Real runtime adapter.~~ **Done.** `packages/daemon/src/runtime.ts` defines
    `AgentRuntime`; only `EchoRuntime` and `DemoWriterRuntime` implement it.
    The target box (`ssh vps` → `ggsCloud`) has Claude Code 2.1.201 with
    subscription credentials and supports

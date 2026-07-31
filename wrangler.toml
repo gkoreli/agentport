@@ -1,0 +1,18 @@
+name = "agentport"
+main = "site/src/worker.ts"
+compatibility_date = "2026-07-01"
+
+[assets]
+directory = "site/public"
+binding = "ASSETS"
+# The asset router 404s unknown paths before the Worker sees them, so the
+# relay upgrade must be routed to the Worker explicitly.
+run_worker_first = ["/relay"]
+
+[[durable_objects.bindings]]
+name = "RELAY"
+class_name = "RelayDurableObject"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["RelayDurableObject"]

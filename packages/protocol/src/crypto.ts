@@ -34,9 +34,14 @@ export function fromHex(hex: Hex): Uint8Array {
   return out;
 }
 
+/** Structural, so this file compiles under DOM, Node and Workers lib sets alike. */
+const webcrypto = globalThis as unknown as {
+  crypto: { getRandomValues<T extends ArrayBufferView>(array: T): T };
+};
+
 export function randomBytes(n: number): Uint8Array {
   const out = new Uint8Array(n);
-  globalThis.crypto.getRandomValues(out);
+  webcrypto.crypto.getRandomValues(out);
   return out;
 }
 
