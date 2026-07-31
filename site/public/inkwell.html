@@ -6,8 +6,14 @@
 <div class="topbar"><div class="brand">AgentPort <span>· navigator.agent</span></div>
 <nav><a href="/">Home</a><a href="/inkwell" aria-current="page">Inkwell</a><a href="/tasker">Tasker</a></nav></div>
 <div class="shell">
-<div class="work"><div class="work-head"><h1>Inkwell</h1><span>doc_123 · Draft</span></div>
-<textarea id="editor" spellcheck="false">The sea was calm that morning, which everyone later agreed was the strangest part.</textarea></div>
+<div class="work"><div class="work-head"><h1>Inkwell</h1><span>doc_123 · The Calm Sea</span></div>
+<div class="editor-wrap"><div id="editor"></div><button id="annotate-btn" hidden>✎ Annotate</button></div>
+<div class="notes">
+  <div class="notes-head"><span>Annotations <b id="note-count">0</b></span>
+    <button id="send-notes" hidden>Send to agent</button></div>
+  <p id="note-hint" class="notes-hint">Select a passage, hit <b>✎ Annotate</b>, and write an instruction — then send the batch to your agent.</p>
+  <div id="note-list"></div>
+</div></div>
 <aside class="agent-panel" id="agent-panel"></aside>
 </div>
 <script type="module" src="/inkwell.js"></script>

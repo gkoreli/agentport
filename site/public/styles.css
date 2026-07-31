@@ -37,11 +37,28 @@ a { color: var(--accent); }
 .work-head h1 { margin: 0; font-size: 15px; font-weight: 600; }
 .work-head span { color: var(--muted); font-size: 13px; }
 
-#editor {
-  flex: 1; border: 0; outline: 0; resize: none; padding: 30px 46px;
-  background: transparent; color: var(--text);
-  font: 17px/1.8 ui-serif, Georgia, serif;
+.editor-wrap { position: relative; flex: 1; min-height: 0; overflow: hidden; }
+#editor { height: 100%; }
+#annotate-btn {
+  position: absolute; z-index: 5;
+  background: var(--accent); color: #0b0d10; border: 0; border-radius: 7px;
+  font-size: 12px; font-weight: 650; padding: 4px 10px; cursor: pointer;
+  box-shadow: 0 4px 14px rgba(0,0,0,.45);
 }
+.ink-note { background: rgba(124, 156, 255, .16); border-bottom: 1px dashed var(--accent); }
+
+/* ---- annotations tray ---- */
+.notes { border-top: 1px solid var(--line); padding: 10px 18px 14px; max-height: 200px; overflow-y: auto; }
+.notes-head { display: flex; align-items: center; justify-content: space-between; font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+.notes-head b { color: var(--text); }
+.notes-head button { font-size: 12px; padding: 5px 12px; }
+.notes-hint { margin: 0; color: var(--muted); font-size: 12px; }
+.note-row { display: flex; gap: 10px; align-items: baseline; padding: 5px 0; font-size: 13px; cursor: default; }
+.note-row:hover { background: rgba(124, 156, 255, .05); }
+.note-quote { color: var(--muted); font-style: italic; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.note-text { flex: 1; min-width: 0; }
+.note-remove { background: transparent; border: 0; color: var(--muted); cursor: pointer; padding: 0 4px; font-size: 12px; }
+.note-remove:hover { color: var(--text); }
 
 /* ---- agent panel ---- */
 .agent-panel { border-left: 1px solid var(--line); background: var(--panel); display: flex; flex-direction: column; min-height: 0; }

@@ -38,6 +38,17 @@ export interface SurfaceConfig {
   alwaysAsk?: string[];
   placeholder?: string;
   suggestions?: string[];
+  /**
+   * Receives the panel's API once it exists, so the page can send prompts it
+   * composed itself (e.g. inkwell's annotations). Returns false when no
+   * session is live — the caller should tell the user to connect first.
+   */
+  bind?: (panel: PanelApi) => void;
+}
+
+export interface PanelApi {
+  send(text: string): boolean;
+  get live(): boolean;
 }
 
 const text = (t: string) => ({ type: 'text' as const, text: t });
@@ -223,8 +234,8 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
       });
   };
 
-  const onPrompt = (prompt: string) => {
-    if (!session) return;
+  const onPrompt = (prompt: string): boolean => {
+    if (!session) return false;
     transcript.apply({ sessionUpdate: 'user_message_chunk', content: text(prompt) });
     transcript.endTurn();
     busy.value = true;
@@ -234,7 +245,15 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
       busy.value = false;
       notice.value = err.message;
     });
+    return true;
   };
+
+  config.bind?.({
+    send: (prompt) => onPrompt(prompt),
+    get live() {
+      return live.value;
+    },
+  });
 
   const onCancel = () => {
     if (session && currentPromptId) session.cancel(currentPromptId);
