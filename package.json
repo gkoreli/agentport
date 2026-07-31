@@ -22,7 +22,8 @@
     "site:dev": "npm run site:build && wrangler dev",
     "deploy": "npm run site:build && wrangler deploy",
     "connect": "tsx packages/daemon/src/connect-cli.ts",
-    "ui:smoke": "tsx scripts/ui-smoke.ts"
+    "ui:smoke": "tsx scripts/ui-smoke.ts",
+    "integration": "tsx scripts/integration.ts"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260702.1",

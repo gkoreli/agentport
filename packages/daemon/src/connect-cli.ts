@@ -22,6 +22,9 @@ if (!/^[A-Z2-9]{4}-[A-Z2-9]{4}$/.test(code)) {
   process.exit(1);
 }
 
+const dim = (text: string) => `\u001b[2m${text}\u001b[0m`;
+const bold = (text: string) => `\u001b[1m${text}\u001b[0m`;
+
 const relayUrl = process.env.AGENTPORT_RELAY ?? 'wss://agentport.gogakoreli.workers.dev/relay';
 const identityPath = process.env.AGENTPORT_IDENTITY ?? join(homedir(), '.agentport', 'agent.json');
 const runtimeName = process.env.AGENTPORT_RUNTIME ?? 'claude-code';
@@ -38,7 +41,9 @@ for (const name of ['claude-code', 'acp']) {
           .filter(Boolean),
         cwd: process.env.AGENTPORT_AGENT_CWD ?? process.cwd(),
         bridge,
-        log: () => {},
+        // Never silence the agent. If Claude fails to start, its stderr is
+        // the only thing that will tell you why.
+        log: (m) => console.error(dim(`  [agent] ${m}`)),
       }),
   );
 }
@@ -72,8 +77,6 @@ const ask = (question: string) =>
     }
   });
 
-const dim = (text: string) => `[2m${text}[0m`;
-const bold = (text: string) => `[1m${text}[0m`;
 
 /** Did the relay find the code at all? Separate from whether you said yes. */
 let offerReceived = false;
@@ -82,7 +85,7 @@ const daemon = new AgentDaemon({
   relayUrl,
   identity,
   createRuntime,
-  log: () => {},
+  log: (m) => console.error(dim(`  [agentport] ${m}`)),
 
   onConnectOffer: async ({ surface, grant }) => {
     offerReceived = true;
