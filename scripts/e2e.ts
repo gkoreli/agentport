@@ -171,6 +171,77 @@ await stranger
   });
 check('relay refuses sessions to agents you do not own', denied.includes('not_your_agent'), denied);
 
+console.log('\n8. drop-in connect (no wallet in the page)');
+doc.text = 'Before.';
+let offered: { surface: string; tools: number } | null = null;
+const localApprovals: string[] = [];
+
+const dropInAgentKeys = generateKeyPair();
+const dropInDaemon = new AgentDaemon({
+  relayUrl,
+  identity: {
+    secretKey: dropInAgentKeys.secretKey,
+    publicKey: dropInAgentKeys.publicKey,
+    name: 'Terminal Agent',
+    runtime: 'demo-writer',
+  },
+  createRuntime: () => new DemoWriterRuntime(),
+  // The consent moment lives here, with the key — not in the page.
+  onConnectOffer: async (offer) => {
+    offered = { surface: offer.surface.name, tools: offer.grant.tools.length };
+    return true;
+  },
+  onLocalApproval: async (summary) => {
+    localApprovals.push(summary);
+    return true;
+  },
+});
+await dropInDaemon.start();
+
+// The "page": an ephemeral key with no certs at all.
+const ephemeral = new AgentWallet({
+  relayUrl,
+  userSecretKey: generateKeyPair().secretKey,
+  socketFactory,
+});
+await ephemeral.connect();
+
+check('a keyless page sees no agents', (await ephemeral.listAgents()).length === 0);
+
+const requested = await ephemeral.beginConnect({
+  surface: { name: 'Inkwell', origin: 'https://inkwell.test' },
+  tools: inkwellTools(),
+  decide: () => true,
+});
+check('widget gets a connect code', /^[A-Z2-9]{4}-[A-Z2-9]{4}$/.test(requested.code), requested.code);
+
+dropInDaemon.claimConnect(requested.code);
+const dropInSession = await requested.accepted;
+check('owner saw what was being asked for', offered?.surface === 'Inkwell' && offered?.tools === 2, offered);
+check('session opened without any cert', dropInSession.info.agentName === 'Terminal Agent', dropInSession.info);
+
+await dropInSession.prompt('Add a line.');
+check('gated write was approved by the owner, not the page', localApprovals.length > 0, localApprovals);
+check('document changed', doc.text.endsWith('Add a line.'), doc.text);
+
+// The important negative: the page still cannot reach that agent directly.
+let directDenied = '';
+await ephemeral
+  .openSession({
+    agent: dropInAgentKeys.publicKey,
+    surface: { name: 'Inkwell', origin: 'https://inkwell.test' },
+    tools: inkwellTools(),
+    decide: () => true,
+  })
+  .catch((err: Error) => {
+    directDenied = err.message;
+  });
+check('a connected page still cannot open its own session', directDenied.includes('not_your_agent'), directDenied);
+
+dropInSession.close();
+ephemeral.close();
+await dropInDaemon.stop();
+
 // --- teardown ---------------------------------------------------------------
 
 session.close();

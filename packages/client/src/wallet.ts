@@ -12,6 +12,7 @@ import {
   signCert,
   type AgentCert,
   type AgentSummary,
+  type CapabilityGrant,
   type Frame,
   type Hex,
   type SessionFrame,
@@ -134,6 +135,47 @@ export class AgentWallet extends Emitter<WalletEvents> {
     return cert;
   }
 
+  // --- drop-in connect -----------------------------------------------------
+
+  /**
+   * Ask *some* agent for a session, without holding a key that names one.
+   *
+   * This is what `connect.js` uses. The wallet here is ephemeral and has no
+   * certs, so it cannot list agents and cannot open a session directly — it
+   * publishes a request and waits for its owner to accept it somewhere the
+   * key actually lives. That asymmetry is the entire security argument for
+   * letting a random site embed this.
+   */
+  async beginConnect(request: Omit<SessionRequest, 'agent'>): Promise<{
+    code: string;
+    expiresAt: number;
+    accepted: Promise<AgentSession>;
+  }> {
+    const surface: SurfaceDescriptor = {
+      ...request.surface,
+      origin: request.surface.origin ?? globalThis.location?.origin ?? 'app://local',
+    };
+    const grant = {
+      tools: request.tools.map(({ handler: _handler, ...definition }) => definition),
+      alwaysAsk: request.alwaysAsk ?? [],
+      expiresAt: Date.now() + (request.ttlMs ?? DEFAULT_SESSION_TTL_MS),
+    };
+
+    this.#sendRaw({ t: 'connect.begin', surface, grant });
+    const pending = (await this.#await('connect.pending')) as Extract<Frame, { t: 'connect.pending' }>;
+
+    const accepted = (async () => {
+      const reply = await this.#await('session.opened', 'connect.denied');
+      if (reply.t === 'connect.denied') {
+        throw new Error(`connection declined: ${(reply as { reason: string }).reason}`);
+      }
+      const opened = reply as Extract<Frame, { t: 'session.opened' }>;
+      return this.#makeSession(opened.s, surface, grant, opened, request);
+    })();
+
+    return { code: pending.code, expiresAt: pending.expiresAt, accepted };
+  }
+
   // --- sessions ------------------------------------------------------------
 
   async openSession(request: SessionRequest): Promise<AgentSession> {
@@ -155,6 +197,16 @@ export class AgentWallet extends Emitter<WalletEvents> {
     }
     const opened = reply as Extract<Frame, { t: 'session.opened' }>;
 
+    return this.#makeSession(id, surface, grant, opened, request);
+  }
+
+  #makeSession(
+    id: string,
+    surface: SurfaceDescriptor,
+    grant: CapabilityGrant,
+    opened: { agentName: string; runtime: string },
+    request: { tools: SiteTool[]; decide?: ApprovalDecider },
+  ): AgentSession {
     const session = new AgentSession({
       id,
       surface,

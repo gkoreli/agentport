@@ -19,6 +19,8 @@ import type { AgentRuntime, TurnContext } from './runtime.js';
 
 interface SessionState {
   id: string;
+  /** Came from a drop-in widget, so approvals belong here, not in the page. */
+  viaConnect: boolean;
   surface: SurfaceDescriptor;
   grant: CapabilityGrant;
   tools: ToolDefinition[];
@@ -36,6 +38,17 @@ export interface DaemonOptions {
   onPairingCode?: (code: string, expiresAt: number) => void;
   /** Called once the user has signed a cert for this agent. */
   onBound?: (cert: AgentCert) => void;
+  /**
+   * A drop-in widget somewhere is asking this agent for a session. This is the
+   * consent moment for the connect.js flow, and it happens *here* — where the
+   * key is — rather than in a browser the site controls.
+   */
+  onConnectOffer?: (offer: { code: string; surface: SurfaceDescriptor; grant: CapabilityGrant }) => Promise<boolean>;
+  /**
+   * Approval for a single gated tool call in a connect.js session. Same
+   * reasoning: the requesting page must not be the one saying yes.
+   */
+  onLocalApproval?: (summary: string, call?: { name: string; arguments: Record<string, unknown> }) => Promise<boolean>;
   log?: (message: string) => void;
 }
 
@@ -85,6 +98,11 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     return this.#readyDeferred.promise;
   }
 
+  /** Claim a connect code the user pasted here from a website's widget. */
+  claimConnect(code: string): void {
+    this.#send({ t: 'connect.claim', code });
+  }
+
   async stop(): Promise<void> {
     for (const session of this.#sessions.values()) await this.#closeSession(session, 'daemon_stopping');
     this.#socket?.close();
@@ -121,6 +139,16 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
       case 'pair.pending':
         this.#options.onPairingCode?.(frame.code, frame.expiresAt);
         return;
+
+      case 'connect.offer': {
+        const accepted = (await this.#options.onConnectOffer?.(frame)) ?? false;
+        this.#send(
+          accepted
+            ? { t: 'connect.accept', code: frame.code }
+            : { t: 'connect.reject', code: frame.code, reason: 'declined_by_owner' },
+        );
+        return;
+      }
 
       case 'pair.bound':
         this.#options.identity.cert = frame.cert;
@@ -183,6 +211,7 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     const runtime = this.#options.createRuntime();
     const session: SessionState = {
       id: frame.s,
+      viaConnect: Boolean(frame.viaConnect),
       surface: frame.surface,
       grant: frame.grant,
       tools: frame.grant.tools,
@@ -244,10 +273,19 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     }
   }
 
-  #callTool(session: SessionState, name: string, args: Record<string, unknown>): Promise<unknown> {
-    const granted = session.tools.some((tool) => tool.name === name);
-    if (!granted) return Promise.reject(new Error(`tool "${name}" is not in this session's grant`));
-    if (session.grant.expiresAt <= Date.now()) return Promise.reject(new Error('capability grant expired'));
+  async #callTool(session: SessionState, name: string, args: Record<string, unknown>): Promise<unknown> {
+    const tool = session.tools.find((candidate) => candidate.name === name);
+    if (!tool) throw new Error(`tool "${name}" is not in this session's grant`);
+    if (session.grant.expiresAt <= Date.now()) throw new Error('capability grant expired');
+
+    // In a wallet session the browser enforces the site's `requiresApproval`
+    // flag. In a connect.js session there is no wallet in the browser, so the
+    // gate moves here — to the owner — rather than being silently dropped.
+    if (session.viaConnect && (tool.requiresApproval || session.grant.alwaysAsk.includes(name))) {
+      const approved = await (this.#options.onLocalApproval?.(`Run ${name}`, { name, arguments: args }) ??
+        Promise.resolve(false));
+      if (!approved) throw new Error('declined by owner');
+    }
 
     const id = randomId('call_');
     const deferred = new Deferred<unknown>();
@@ -261,6 +299,15 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     summary: string,
     call?: { name: string; arguments: Record<string, unknown> },
   ): Promise<boolean> {
+    // In a connect.js session the browser side is an ephemeral key belonging to
+    // the site. Asking it for approval would be asking the requester for
+    // permission, so the question goes to the owner instead.
+    if (session.viaConnect) {
+      const ask = this.#options.onLocalApproval;
+      if (!ask) return Promise.resolve(false);
+      return ask(summary, call);
+    }
+
     const id = randomId('appr_');
     const deferred = new Deferred<boolean>();
     session.approvals.set(id, deferred);

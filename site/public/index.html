@@ -10,7 +10,9 @@
 <div class="hero">
 <h1>Bring your own agent to any website.</h1>
 <p class="lede">Today every app ships its own chatbot and pays for its own inference. AgentPort inverts that: you own one agent — on your machine, your subscription, your memory — and carry it between applications. The site lends it a few tools for one session and never learns anything else about it.</p>
-<pre>const session = await navigator.agent.connect({
+<pre>&lt;script src="https://agentport.gogakoreli.workers.dev/connect.js"&gt;&lt;/script&gt;
+
+const session = await AgentPort.connect({
   name: 'Inkwell',
   tools: [{
     name: 'inkwell.document.read',
@@ -22,7 +24,7 @@
 });
 
 await session.prompt('Tighten the opening paragraph.');</pre>
-<p class="lede" style="margin-top:24px;font-size:15px">That is the whole integration. No API key, no model choice, no inference bill.</p>
+<p class="lede" style="margin-top:24px;font-size:15px">That is the whole integration — one script tag, like adding a payment button. No API key, no model choice, no inference bill, nothing for your users to install.</p>
 </div>
 
 <div class="cards">
@@ -32,7 +34,8 @@ await session.prompt('Tighten the opening paragraph.');</pre>
 
 <div class="note">
 <p><strong>Two surfaces, one agent.</strong> Connect on Inkwell, then open Tasker and connect again. It's the same agent both times, but each site's grant contains only its own tools, and closing a tab takes those capabilities away.</p>
-<p><strong>To try it you need an agent.</strong> Run the daemon on your own machine — <code>npm run daemon</code> with <code>AGENTPORT_RELAY=wss://&lt;this host&gt;/relay</code> — then paste the pairing code it prints. Your agent connects outbound; nothing listens on your machine.</p>
+<p><strong>To try it you need an agent.</strong> Run <code>npm run daemon</code> on your own machine with <code>AGENTPORT_RELAY=wss://agentport.gogakoreli.workers.dev/relay</code>. Hit <strong>Connect agent</strong> on either surface, paste the code into that terminal, and approve. Your agent dials out; nothing listens on your machine.</p>
+<p><strong>The widget renders, it never decides.</strong> The page holds an ephemeral key with no authority — it cannot list your agents, cannot open a session, cannot approve a tool call. Connection consent and every gated write are answered where your key actually is.</p>
 <p><strong>Demo caveat:</strong> the wallet runs in the page and keeps a throwaway key in localStorage, so this page can reach it. In a real deployment the wallet is a browser extension and the page can only ask.</p>
 </div>
 </body></html>

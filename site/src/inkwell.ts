@@ -55,7 +55,7 @@ const tools: SiteTool[] = [
   },
 ];
 
-void mountPanel(document.getElementById('agent-panel') as HTMLElement, {
+mountPanel(document.getElementById('agent-panel') as HTMLElement, {
   name: 'Inkwell',
   route: '/documents/doc_123',
   context: { documentId: 'doc_123', title: 'Draft' },

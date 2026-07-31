@@ -1,5 +1,6 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { createInterface } from 'node:readline';
 import { AgentDaemon } from './daemon.js';
 import { loadIdentity, saveIdentity } from './identity.js';
 import { RUNTIMES, registerRuntime } from './runtime.js';
@@ -53,6 +54,14 @@ const identity = loadIdentity(identityPath, {
   location: process.env.AGENTPORT_LOCATION ?? 'Personal VPS',
 });
 
+const rl = createInterface({ input: process.stdin, output: process.stdout });
+
+function ask(question: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    rl.question(`${question} [y/N] `, (answer) => resolve(/^y(es)?$/i.test(answer.trim())));
+  });
+}
+
 const daemon = new AgentDaemon({
   relayUrl,
   identity,
@@ -67,6 +76,30 @@ const daemon = new AgentDaemon({
     console.log(`  Code: ${code}`);
     console.log('');
   },
+  // The consent moment for drop-in sites. It happens here, in your terminal,
+  // because this is where your key is — the website asking is holding an
+  // ephemeral keypair with no authority whatsoever.
+  onConnectOffer: async ({ surface, grant }) => {
+    const gated = new Set([...grant.alwaysAsk, ...grant.tools.filter((t) => t.requiresApproval).map((t) => t.name)]);
+    console.log('');
+    console.log(`  ${surface.name} (${surface.origin}${surface.route ?? ''}) wants your agent.`);
+    console.log('');
+    for (const tool of grant.tools) {
+      console.log(`    ${gated.has(tool.name) ? '!' : '✓'} ${tool.description}`);
+    }
+    console.log('');
+    console.log(`    grant expires ${new Date(grant.expiresAt).toLocaleTimeString()}`);
+    console.log('');
+    return ask('  Allow?');
+  },
+
+  onLocalApproval: async (summary, call) => {
+    console.log('');
+    console.log(`  ${summary}`);
+    if (call) console.log(`    ${call.name}(${JSON.stringify(call.arguments).slice(0, 200)})`);
+    return ask('  Approve?');
+  },
+
   onBound: (cert) => {
     saveIdentity(identityPath, { ...identity, cert });
     console.log(`[agent] paired with user ${cert.user.slice(0, 16)}… — this agent is now selectable in the picker`);
@@ -76,6 +109,16 @@ const daemon = new AgentDaemon({
 const { bound } = await daemon.start();
 console.log(`[agent] ${identity.name} (${identity.publicKey.slice(0, 16)}…) connected to ${relayUrl}`);
 if (bound) console.log('[agent] already paired — waiting for sessions');
+
+console.log('');
+console.log('  Paste a connect code from any site using the AgentPort widget:');
+console.log('');
+
+rl.on('line', (line) => {
+  const code = line.trim().toUpperCase();
+  if (/^[A-Z2-9]{4}-[A-Z2-9]{4}$/.test(code)) daemon.claimConnect(code);
+  else if (code) console.log(`  "${code}" is not a connect code (expected AAAA-BBBB)`);
+});
 
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   process.on(signal, () => {

@@ -108,7 +108,7 @@ const tools: SiteTool[] = [
   },
 ];
 
-void mountPanel(document.getElementById('agent-panel') as HTMLElement, {
+mountPanel(document.getElementById('agent-panel') as HTMLElement, {
   name: 'Tasker',
   route: '/boards/sprint',
   context: { boardId: 'sprint' },

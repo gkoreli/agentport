@@ -11,12 +11,17 @@ import {
   verifyCert,
   type AgentCert,
   type AgentSummary,
+  randomId,
+  type CapabilityGrant,
   type Frame,
   type Hex,
   type Role,
+  type SurfaceDescriptor,
 } from '@agentport/protocol';
 
 const PAIRING_TTL_MS = 5 * 60 * 1000;
+/** Long enough to switch to a terminal or phone and read a code out loud. */
+const CONNECT_TTL_MS = 3 * 60 * 1000;
 
 /** A connected socket, whatever the runtime's socket actually is. */
 export interface Peer {
@@ -85,6 +90,15 @@ interface Pending {
   expiresAt: number;
 }
 
+/** A drop-in widget waiting for some agent's owner to accept it. */
+interface PendingConnect {
+  code: string;
+  conn: Conn;
+  surface: SurfaceDescriptor;
+  grant: CapabilityGrant;
+  expiresAt: number;
+}
+
 export interface RelayCoreOptions {
   certs: CertIndex;
   /** Called after a cert is accepted, so the host can persist it. */
@@ -109,6 +123,7 @@ export class RelayCore {
   #agents = new Map<Hex, Conn>();
   #sessions = new Map<string, Session>();
   #pending = new Map<string, Pending>();
+  #connects = new Map<string, PendingConnect>();
   #log: (message: string) => void;
   #now: () => number;
   #onCertStored: ((cert: AgentCert) => void) | undefined;
@@ -168,6 +183,9 @@ export class RelayCore {
     for (const [code, pending] of this.#pending) {
       if (pending.conn === conn) this.#pending.delete(code);
     }
+    for (const [code, connect] of this.#connects) {
+      if (connect.conn === conn) this.#connects.delete(code);
+    }
 
     if (conn.role === 'agent' && conn.pubkey && this.#agents.get(conn.pubkey) === conn) {
       this.#agents.delete(conn.pubkey);
@@ -207,6 +225,14 @@ export class RelayCore {
         return this.#onPairClaim(conn, frame.code);
       case 'pair.complete':
         return this.#onPairComplete(conn, frame.code, frame.cert);
+      case 'connect.begin':
+        return this.#onConnectBegin(conn, frame.surface, frame.grant);
+      case 'connect.claim':
+        return this.#onConnectClaim(conn, frame.code);
+      case 'connect.accept':
+        return this.#onConnectAccept(conn, frame.code);
+      case 'connect.reject':
+        return this.#onConnectReject(conn, frame.code, frame.reason);
       case 'agents.list':
         return conn.peer.send({ t: 'agents', agents: this.#agentsFor(conn.pubkey) });
       default:
@@ -306,6 +332,75 @@ export class RelayCore {
     for (const [code, pending] of this.#pending) {
       if (pending.expiresAt <= now) this.#pending.delete(code);
     }
+  }
+
+  // --- drop-in connect -----------------------------------------------------
+
+  #sweepConnects(): void {
+    const now = this.#now();
+    for (const [code, connect] of this.#connects) {
+      if (connect.expiresAt <= now) {
+        connect.conn.peer.send({ t: 'connect.denied', code, reason: 'expired' });
+        this.#connects.delete(code);
+      }
+    }
+  }
+
+  #onConnectBegin(conn: Conn, surface: SurfaceDescriptor, grant: CapabilityGrant): void {
+    if (conn.role !== 'client') return this.#fail(conn, 'role', 'only clients may request a connection');
+    this.#sweepConnects();
+    const code = pairingCode();
+    const expiresAt = this.#now() + CONNECT_TTL_MS;
+    this.#connects.set(code, { code, conn, surface, grant, expiresAt });
+    conn.peer.send({ t: 'connect.pending', code, expiresAt });
+  }
+
+  #onConnectClaim(conn: Conn, code: string): void {
+    if (conn.role !== 'agent') return this.#fail(conn, 'role', 'only agents may claim a connect code');
+    this.#sweepConnects();
+    const connect = this.#connects.get(code);
+    if (!connect) return this.#fail(conn, 'connect_unknown', 'unknown or expired connect code', code);
+    // Show the agent exactly what is being asked for, before anyone consents.
+    conn.peer.send({ t: 'connect.offer', code, surface: connect.surface, grant: connect.grant });
+  }
+
+  #onConnectAccept(conn: Conn, code: string): void {
+    if (conn.role !== 'agent') return this.#fail(conn, 'role', 'only agents may accept a connection');
+    this.#sweepConnects();
+    const connect = this.#connects.get(code);
+    if (!connect) return this.#fail(conn, 'connect_unknown', 'unknown or expired connect code', code);
+    this.#connects.delete(code);
+
+    if (connect.grant.expiresAt <= this.#now()) {
+      return connect.conn.peer.send({ t: 'connect.denied', code, reason: 'grant_expired' });
+    }
+
+    // From here it is an ordinary session: the agent will answer the
+    // synthesised session.open with session.opened, which routes back to the
+    // widget through the normal path.
+    const id = randomId('sess_');
+    this.#sessions.set(id, { id, client: connect.conn, agent: conn });
+    connect.conn.sessions.add(id);
+    conn.sessions.add(id);
+
+    conn.peer.send({
+      t: 'session.open',
+      s: id,
+      agent: conn.pubkey!,
+      surface: connect.surface,
+      grant: connect.grant,
+      client: connect.conn.pubkey!,
+      viaConnect: true,
+    });
+    this.#log(`connect ${code} accepted by ${conn.pubkey!.slice(0, 8)} as session ${id}`);
+  }
+
+  #onConnectReject(conn: Conn, code: string, reason: string): void {
+    if (conn.role !== 'agent') return this.#fail(conn, 'role', 'only agents may reject a connection');
+    const connect = this.#connects.get(code);
+    if (!connect) return;
+    this.#connects.delete(code);
+    connect.conn.peer.send({ t: 'connect.denied', code, reason });
   }
 
   // --- directory -----------------------------------------------------------

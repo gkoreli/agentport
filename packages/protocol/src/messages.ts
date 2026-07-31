@@ -170,6 +170,66 @@ export interface PairBound {
   cert: AgentCert;
 }
 
+// --- drop-in connect (no wallet in the page) -------------------------------
+
+/**
+ * The WalletConnect shape.
+ *
+ * A site that only embeds `connect.js` has no key, no agent list, and no way
+ * to consent on the user's behalf — it holds an ephemeral keypair with zero
+ * authority. So it cannot *open* a session; it can only *ask* for one.
+ *
+ *   widget  --connect.begin-->  relay        (surface + requested grant)
+ *   widget  <-connect.pending-  relay        (a short code to carry by hand)
+ *   agent   --connect.claim-->  relay        (user pastes the code where their key is)
+ *   agent   <-connect.offer---  relay        (here is who is asking, and for what)
+ *   agent   --connect.accept->  relay        (user said yes, in their own terminal)
+ *
+ * The relay then synthesises the normal `session.open` toward the agent, so
+ * everything downstream is the same code path as the extension flow.
+ */
+export interface ConnectBegin {
+  t: 'connect.begin';
+  surface: SurfaceDescriptor;
+  grant: CapabilityGrant;
+}
+
+export interface ConnectPending {
+  t: 'connect.pending';
+  code: string;
+  expiresAt: number;
+}
+
+export interface ConnectClaim {
+  t: 'connect.claim';
+  code: string;
+}
+
+export interface ConnectOffer {
+  t: 'connect.offer';
+  code: string;
+  surface: SurfaceDescriptor;
+  grant: CapabilityGrant;
+}
+
+export interface ConnectAccept {
+  t: 'connect.accept';
+  code: string;
+}
+
+export interface ConnectReject {
+  t: 'connect.reject';
+  code: string;
+  reason: string;
+}
+
+/** Delivered to the waiting widget when the user declines or the code dies. */
+export interface ConnectDenied {
+  t: 'connect.denied';
+  code: string;
+  reason: string;
+}
+
 // --- directory / presence --------------------------------------------------
 
 export interface AgentsList {
@@ -199,6 +259,12 @@ export interface SessionOpen {
   grant: CapabilityGrant;
   /** Filled in by the relay before forwarding; ignored if sent by a client. */
   client?: Hex;
+  /**
+   * Set by the relay when this session came from a drop-in widget rather than
+   * a wallet. The requesting page has no key and no agent list, so approvals
+   * must be answered where the user's key actually is — not in the browser.
+   */
+  viaConnect?: boolean;
 }
 
 export interface SessionOpened {
@@ -305,6 +371,13 @@ export type ControlFrame =
   | PairOffer
   | PairComplete
   | PairBound
+  | ConnectBegin
+  | ConnectPending
+  | ConnectClaim
+  | ConnectOffer
+  | ConnectAccept
+  | ConnectReject
+  | ConnectDenied
   | AgentsList
   | Agents
   | AgentsPresence;

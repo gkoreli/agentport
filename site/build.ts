@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 const here = dirname(fileURLToPath(import.meta.url));
 
 await esbuild.build({
-  entryPoints: [join(here, 'src/inkwell.ts'), join(here, 'src/tasker.ts')],
+  entryPoints: [join(here, 'src/connect.ts'), join(here, 'src/inkwell.ts'), join(here, 'src/tasker.ts')],
   outdir: join(here, 'public'),
   bundle: true,
   format: 'esm',
