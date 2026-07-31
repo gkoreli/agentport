@@ -5,3 +5,6 @@ dist/
 .env
 .agentport/
 examples/**/public/bundle.js
+site/public/connect.js
+site/public/inkwell.js
+site/public/tasker.js
