@@ -55,10 +55,19 @@ const identity = loadIdentity(identityPath, {
 });
 
 const rl = createInterface({ input: process.stdin, output: process.stdout });
+let stdinClosed = false;
+rl.on('close', () => (stdinClosed = true));
 
 function ask(question: string): Promise<boolean> {
   return new Promise((resolve) => {
-    rl.question(`${question} [y/N] `, (answer) => resolve(/^y(es)?$/i.test(answer.trim())));
+    // Fail shut: a closed or non-interactive stdin is a decline, not a crash.
+    if (stdinClosed) return resolve(false);
+    rl.once('close', () => resolve(false));
+    try {
+      rl.question(`${question} [y/N] `, (answer) => resolve(/^y(es)?$/i.test(answer.trim())));
+    } catch {
+      resolve(false);
+    }
   });
 }
 

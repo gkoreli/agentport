@@ -20,9 +20,12 @@ const CSS = `
 .body { padding: 24px; text-align: center; }
 h3 { margin: 0 0 6px; font-size: 16px; font-weight: 650; }
 p { margin: 0 0 18px; color: #8b94a3; font-size: 13px; line-height: 1.55; }
-.code { font-family: ui-monospace, monospace; font-size: 30px; letter-spacing: 5px; font-weight: 600; background: #0d0f12; border: 1px solid #262c36; border-radius: 12px; padding: 16px; cursor: pointer; user-select: all; }
+.code { font-family: ui-monospace, monospace; font-size: 15px; font-weight: 500; background: #0d0f12; border: 1px solid #262c36; border-radius: 10px; padding: 14px 16px; cursor: pointer; user-select: all; text-align: left; color: #cfe0ff; white-space: nowrap; overflow-x: auto; }
+.code::before { content: "$ "; color: #4a5464; }
 .code:hover { border-color: #7c9cff; }
-.hint { font-size: 12px; margin: 12px 0 0; color: #6f7889; }
+.hint { font-size: 12px; margin: 11px 0 0; color: #6f7889; line-height: 1.5; }
+.hint.alt { margin-top: 8px; padding-top: 9px; border-top: 1px solid #1c222b; color: #59616f; }
+.hint b { color: #8b94a3; font-family: ui-monospace, monospace; }
 .status { margin: 16px 0 0; font-size: 13px; color: #8b94a3; min-height: 18px; }
 .status.err { color: #ff8080; }
 .foot { display: flex; justify-content: space-between; align-items: center; padding: 13px 20px; border-top: 1px solid #222831; background: #101318; }
@@ -39,6 +42,11 @@ export interface ConnectModal {
   cancelled: Promise<never>;
 }
 
+/** What a visitor should literally type. Kept in one place so it can't drift. */
+export function connectCommand(code: string): string {
+  return `npm run connect ${code}`;
+}
+
 export function openConnectModal(code: string, surfaceName: string, host: HTMLElement = document.body): ConnectModal {
   const mountHost = document.createElement('div');
   host.append(mountHost);
@@ -49,7 +57,8 @@ export function openConnectModal(code: string, surfaceName: string, host: HTMLEl
   const target = document.createElement('div');
   root.append(style, target);
 
-  const label = signal(code);
+  const command = connectCommand(code);
+  const label = signal(command);
   const status = signal('waiting for you to approve…');
   const failed = signal(false);
   const pending = signal(true);
@@ -60,9 +69,9 @@ export function openConnectModal(code: string, surfaceName: string, host: HTMLEl
   });
 
   const copy = () => {
-    void navigator.clipboard?.writeText(code).then(() => {
-      label.value = 'copied';
-      setTimeout(() => (label.value = code), 700);
+    void navigator.clipboard?.writeText(command).then(() => {
+      label.value = 'copied to clipboard';
+      setTimeout(() => (label.value = command), 900);
     });
   };
 
@@ -76,12 +85,13 @@ export function openConnectModal(code: string, surfaceName: string, host: HTMLEl
       <div class="card">
         <div class="body">
           <h3>Connect your agent</h3>
-          <p>
-            Paste this code where your agent is running. ${surfaceName} never sees your key, your
-            model, or anything else your agent can do.
-          </p>
+          <p>Run this in your terminal, then approve there.</p>
           <div class="code" title="click to copy" @click=${copy}>${label}</div>
-          <p class="hint">In your terminal, at the <b>Paste a connect code</b> prompt.</p>
+          <p class="hint">
+            Click to copy. Your agent stays on your machine — ${surfaceName} never sees your key,
+            your model, or anything else it can do.
+          </p>
+          <p class="hint alt">Already have an agent running? Paste <b>${code}</b> at its prompt.</p>
           <div class="status" class:err=${failed}>
             ${when(pending, () => html`<span class="spin"></span>`)}${status}
           </div>
