@@ -19,9 +19,23 @@ import {
   type SurfaceDescriptor,
 } from '@agentport/protocol';
 
+/**
+ * Compares two hex secrets without leaking length or content through timing.
+ * Small, but this is the one place a secret is checked, so it is worth doing.
+ */
+function timingSafeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
 const PAIRING_TTL_MS = 5 * 60 * 1000;
 /** Long enough to switch to a terminal or phone and read a code out loud. */
 const CONNECT_TTL_MS = 3 * 60 * 1000;
+/** Guess limits, per connection, for the two code/token lookups. */
+const MAX_CLAIM_ATTEMPTS = 20;
+const MAX_RESUME_ATTEMPTS = 10;
 /** How long a session survives its client so a refresh can re-attach. */
 const ORPHAN_GRACE_MS = 5 * 60 * 1000;
 /**
@@ -83,6 +97,9 @@ interface Conn {
   bound: boolean;
   announce?: { name: string; runtime: string; location?: string };
   sessions: Set<string>;
+  /** Failed guesses, so a socket cannot brute-force a code or a token. */
+  claimAttempts: number;
+  resumeAttempts: number;
 }
 
 interface Session {
@@ -162,6 +179,8 @@ export class RelayCore {
       authed: false,
       bound: false,
       sessions: new Set(),
+      claimAttempts: 0,
+      resumeAttempts: 0,
     };
     this.#conns.add(conn);
     this.#byPeer.set(peer, conn);
@@ -386,8 +405,12 @@ export class RelayCore {
   #onConnectClaim(conn: Conn, code: string): void {
     if (conn.role !== 'agent') return this.#fail(conn, 'role', 'only agents may claim a connect code');
     this.#sweepConnects();
+    if (++conn.claimAttempts > MAX_CLAIM_ATTEMPTS) {
+      return this.#fail(conn, 'rate_limited', 'too many connect-code attempts', code);
+    }
     const connect = this.#connects.get(code);
     if (!connect) return this.#fail(conn, 'connect_unknown', 'unknown or expired connect code', code);
+    conn.claimAttempts = 0;
     // Show the agent exactly what is being asked for, before anyone consents.
     conn.peer.send({ t: 'connect.offer', code, surface: connect.surface, grant: connect.grant });
   }
@@ -516,12 +539,18 @@ export class RelayCore {
     if (conn.role !== 'client') return this.#fail(conn, 'role', 'only clients resume', frame.s);
     this.#sweepOrphans();
 
+    if (++conn.resumeAttempts > MAX_RESUME_ATTEMPTS) {
+      return this.#fail(conn, 'rate_limited', 'too many resume attempts', frame.s);
+    }
+
     const session = this.#sessions.get(frame.s);
     // One message for every failure: a wrong token must not be distinguishable
-    // from an unknown session.
-    if (!session || session.token !== frame.token) {
+    // from an unknown session. The compare is constant-time so the answer
+    // cannot be teased out by timing either.
+    if (!session || !timingSafeEqual(session.token, frame.token)) {
       return conn.peer.send({ t: 'session.denied', s: frame.s, reason: 'not_resumable' });
     }
+    conn.resumeAttempts = 0;
     if (session.client) {
       return conn.peer.send({ t: 'session.denied', s: frame.s, reason: 'already_attached' });
     }

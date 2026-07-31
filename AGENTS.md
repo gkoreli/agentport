@@ -179,6 +179,36 @@ Not built yet, in rough priority order:
 5. **Revocation UI.** `CertStore.remove` exists; nothing calls it.
 6. **Reconnect + session resume.** Sockets are assumed stable; they aren't.
 
+## Transport, and why not Tailscale
+
+Both legs are `wss://` — browser→relay and daemon→relay — so everything is
+TLS-encrypted in transit, and the daemon dials OUT (no inbound port, no
+firewall rule, nothing listening on the user's machine).
+
+The relay terminates TLS, which means **it can currently read session frames**.
+That is the one unresolved privacy gap in the system; see the E2E encryption
+item below. Ownership certs and public keys are all it is supposed to hold.
+
+Tailscale would not help here and is deliberately not used: a website running
+in someone's browser cannot join a tailnet, and the whole point is that any
+site can attach. For the paranoid case the answer is not a VPN but
+self-hosting — `AGENTPORT_RELAY=wss://your-own-host/relay` runs the identical
+`RelayCore`, so no third party is in the path at all.
+
+**Planned:** seal frame bodies to the peer's key (X25519 + AEAD), leaving only
+`t` and `s` readable by the relay. Both ends already have Ed25519 identities;
+the relay would hand each side the other's public key at session open. After
+that the relay is a dumb pipe by construction rather than by policy.
+
+## Always-on agents
+
+`deploy/agentport.service` runs the daemon under systemd. Paired with a wallet
+that remembers agents, the browser flow becomes: open site → Connect → pick
+your agent → approve in the browser. No terminal, no VPS access.
+
+The terminal step in the drop-in flow is not inherent to the design — it is
+what happens when the page has no wallet and therefore nobody to ask.
+
 ## Provenance — where the user's data lives
 
 One rule: **conversation belongs to the user's own machine.**

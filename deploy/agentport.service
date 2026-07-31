@@ -1,0 +1,55 @@
+# Always-on agent.
+#
+# The terminal step in the drop-in flow exists only because a keyless website
+# has nobody to ask. Once this is running and paired with a wallet, connecting
+# from a browser needs no VPS access at all: the site asks, your wallet shows
+# the picker, you approve in the browser, and this process serves the session.
+#
+#   sudo cp deploy/agentport.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now agentport
+#   journalctl -u agentport -f          # watch it, including approval prompts
+#
+# Note it dials OUT. Nothing listens on this machine, no port is opened, and
+# no inbound firewall rule is needed.
+
+[Unit]
+Description=AgentPort agent daemon
+Documentation=https://github.com/gkoreli/agentport
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/agentport
+ExecStart=/usr/bin/env npx tsx packages/daemon/src/cli.ts
+
+Environment=AGENTPORT_RELAY=wss://agentport.gogakoreli.workers.dev/relay
+Environment=AGENTPORT_RUNTIME=claude-code
+Environment=AGENTPORT_NAME=Goga's VPS Agent
+Environment=AGENTPORT_LOCATION=Personal VPS
+Environment=AGENTPORT_IDENTITY=/root/.agentport/agent.json
+Environment=AGENTPORT_AGENT_CWD=/root
+
+# The agent's device key lives here and must not be world-readable.
+UMask=0077
+
+Restart=always
+RestartSec=5
+
+# The agent runs a coding assistant with real tools; keep the blast radius
+# to its own state rather than the whole filesystem.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=false
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

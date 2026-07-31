@@ -242,6 +242,92 @@ dropInSession.close();
 ephemeral.close();
 await dropInDaemon.stop();
 
+console.log('\n9. resume tokens are a real boundary');
+const resumeAgentKeys = generateKeyPair();
+const resumeDaemon = new AgentDaemon({
+  relayUrl,
+  identity: { ...resumeAgentKeys, name: 'Resume Agent', runtime: 'demo-writer' },
+  createRuntime: () => new DemoWriterRuntime(),
+  onConnectOffer: async () => true,
+  onLocalApproval: async () => true,
+});
+await resumeDaemon.start();
+
+const tab = new AgentWallet({ relayUrl, userSecretKey: generateKeyPair().secretKey, socketFactory });
+await tab.connect();
+const req = await tab.beginConnect({
+  surface: { name: 'Inkwell', origin: 'https://inkwell.test' },
+  tools: inkwellTools(),
+  decide: () => true,
+});
+resumeDaemon.claimConnect(req.code);
+const liveSession = await req.accepted;
+const resumeToken = tab.resumeTokenFor(liveSession.id)!;
+check('a resume token was issued', typeof resumeToken === 'string' && resumeToken.length >= 32);
+
+// Say something, so there is a conversation worth restoring.
+doc.text = 'Resume test.';
+await liveSession.prompt('Add a line.');
+
+// While the original tab is still attached, nobody else may take the session.
+const thief = new AgentWallet({ relayUrl, userSecretKey: generateKeyPair().secretKey, socketFactory });
+await thief.connect();
+let hijack = '';
+await thief
+  .resumeSession({ id: liveSession.id, token: resumeToken, tools: inkwellTools(), decide: () => true })
+  .catch((err: Error) => {
+    hijack = err.message;
+  });
+check('a live session cannot be stolen even with the token', hijack.includes('already_attached'), hijack);
+
+// Now the tab "refreshes" — the socket drops without ending the session.
+tab.disconnect();
+await new Promise((resolve) => setTimeout(resolve, 150));
+
+let wrongToken = '';
+await thief
+  .resumeSession({ id: liveSession.id, token: 'f'.repeat(48), tools: inkwellTools(), decide: () => true })
+  .catch((err: Error) => {
+    wrongToken = err.message;
+  });
+check('a wrong token is refused', wrongToken.includes('not_resumable'), wrongToken);
+
+let unknownSession = '';
+await thief
+  .resumeSession({ id: 'sess_does_not_exist', token: resumeToken, tools: inkwellTools(), decide: () => true })
+  .catch((err: Error) => {
+    unknownSession = err.message;
+  });
+check(
+  'an unknown session is indistinguishable from a wrong token',
+  unknownSession === wrongToken,
+  { unknownSession, wrongToken },
+);
+
+// The legitimate tab comes back.
+const reopened = new AgentWallet({ relayUrl, userSecretKey: generateKeyPair().secretKey, socketFactory });
+await reopened.connect();
+const { session: back } = await reopened.resumeSession({
+  id: liveSession.id,
+  token: resumeToken,
+  tools: inkwellTools(),
+  decide: () => true,
+});
+check('the real tab resumes', back.info.agentName === 'Resume Agent', back.info);
+
+const restored = await back.history();
+check('the conversation is restored after a refresh', restored.length > 0, restored.length);
+check(
+  'it came from the agent side, not from anything the page kept',
+  restored.some((entry) => entry.role === 'user' && entry.text.includes('Add a line')),
+  restored.slice(0, 4),
+);
+
+back.close();
+thief.close();
+reopened.close();
+await resumeDaemon.stop();
+
 // --- teardown ---------------------------------------------------------------
 
 session.close();
