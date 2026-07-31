@@ -14,11 +14,12 @@
  * follows are the user's annotations — document text stays data.
  */
 
-import { EditorView, keymap, lineNumbers, highlightActiveLine, Decoration, type DecorationSet } from '@codemirror/view';
+import { EditorView, keymap, Decoration, type DecorationSet } from '@codemirror/view';
 import { EditorState, StateEffect, StateField, type ChangeDesc } from '@codemirror/state';
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
 import { markdown } from '@codemirror/lang-markdown';
-import { syntaxHighlighting, defaultHighlightStyle } from '@codemirror/language';
+import { syntaxHighlighting, HighlightStyle } from '@codemirror/language';
+import { tags } from '@lezer/highlight';
 import { mountPanel, type PanelApi, type SiteTool } from './agentport-ui.js';
 
 // ── Annotations ──────────────────────────────────────────────────────
@@ -80,17 +81,52 @@ function mapNotes(changes: ChangeDesc): void {
 
 const theme = EditorView.theme(
   {
-    '&': { backgroundColor: 'transparent', color: 'var(--text)', fontSize: '15px', height: '100%' },
-    '.cm-content': { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', lineHeight: '1.7', padding: '18px 0' },
-    '.cm-line': { padding: '0 18px' },
+    '&': { backgroundColor: 'transparent', color: 'var(--text)', fontSize: '16px', height: '100%' },
+    '.cm-content': {
+      fontFamily: 'ui-serif, Georgia, Cambria, serif',
+      lineHeight: '1.75',
+      padding: '26px 0 60px',
+      maxWidth: '46rem',
+    },
+    '.cm-line': { padding: '0 40px' },
     '&.cm-focused': { outline: 'none' },
-    '.cm-gutters': { backgroundColor: 'transparent', color: '#3d4654', border: 'none' },
-    '.cm-activeLine': { backgroundColor: 'rgba(124, 156, 255, .05)' },
+    '.cm-activeLine': { backgroundColor: 'transparent' },
     '.cm-selectionBackground': { backgroundColor: 'rgba(124, 156, 255, .22) !important' },
     '.cm-cursor': { borderLeftColor: 'var(--text)' },
   },
   { dark: true },
 );
+
+/**
+ * Live markdown typography — the Obsidian/iA-Writer hybrid. The document
+ * renders as prose (real heading sizes, bold, italics, quotes) while staying
+ * plain markdown underneath, so every character offset the annotation system
+ * and the replaceRange tool depend on remains exact. A ProseMirror-style
+ * WYSIWYG would look glossier and silently break that contract.
+ */
+const prose = HighlightStyle.define([
+  { tag: tags.heading1, fontSize: '1.65em', fontWeight: '700', lineHeight: '1.3' },
+  { tag: tags.heading2, fontSize: '1.35em', fontWeight: '650', lineHeight: '1.35' },
+  { tag: tags.heading3, fontSize: '1.15em', fontWeight: '650' },
+  { tag: tags.heading4, fontWeight: '650' },
+  { tag: tags.strong, fontWeight: '700' },
+  { tag: tags.emphasis, fontStyle: 'italic' },
+  { tag: tags.strikethrough, textDecoration: 'line-through', opacity: '0.7' },
+  { tag: tags.link, color: 'var(--accent)', textDecoration: 'underline' },
+  { tag: tags.url, color: 'var(--accent)' },
+  {
+    tag: tags.monospace,
+    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+    fontSize: '0.9em',
+    backgroundColor: 'rgba(124, 156, 255, .09)',
+    borderRadius: '3px',
+  },
+  { tag: tags.quote, color: 'var(--muted)', fontStyle: 'italic' },
+  // The markdown syntax itself — #, *, >, ``` — recedes instead of shouting.
+  { tag: tags.processingInstruction, color: '#4a5568', fontWeight: '400' },
+  { tag: tags.meta, color: '#4a5568' },
+  { tag: tags.contentSeparator, color: '#4a5568' },
+]);
 
 const seed = `# The Calm Sea
 
@@ -112,12 +148,10 @@ const view = new EditorView({
   state: EditorState.create({
     doc: seed,
     extensions: [
-      lineNumbers(),
       history(),
-      highlightActiveLine(),
       keymap.of([...defaultKeymap, ...historyKeymap]),
       markdown(),
-      syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
+      syntaxHighlighting(prose),
       theme,
       markField,
       EditorView.lineWrapping,
@@ -138,6 +172,8 @@ const sendNotes = document.getElementById('send-notes') as HTMLButtonElement;
 const noteHint = document.getElementById('note-hint') as HTMLElement;
 
 function placeAnnotateButton(): void {
+  // Any selection movement invalidates an open popover's anchor.
+  if (!pop.hidden) closePopover();
   const { from, to } = view.state.selection.main;
   if (from === to) {
     annotateBtn.hidden = true;
@@ -164,17 +200,63 @@ function placeAnnotateButton(): void {
   true,
 );
 
+// ── The annotation popover ───────────────────────────────────────────
+
+const pop = document.getElementById('annotate-pop') as HTMLElement;
+const popInput = document.getElementById('annotate-input') as HTMLTextAreaElement;
+const popAdd = document.getElementById('annotate-add') as HTMLButtonElement;
+const popCancel = document.getElementById('annotate-cancel') as HTMLButtonElement;
+/** The range being annotated — captured when the popover opens, because the
+ *  selection itself collapses the moment the input takes focus. */
+let popRange: { from: number; to: number } | null = null;
+
+function openPopover(): void {
+  const { from, to } = view.state.selection.main;
+  if (from === to) return;
+  popRange = { from, to };
+  pop.hidden = false;
+  pop.style.top = annotateBtn.style.top;
+  pop.style.left = annotateBtn.style.left;
+  annotateBtn.hidden = true;
+  popInput.value = '';
+  popInput.focus();
+}
+
+function closePopover(): void {
+  pop.hidden = true;
+  popRange = null;
+}
+
+function confirmPopover(): void {
+  const note = popInput.value.trim();
+  const range = popRange;
+  closePopover();
+  if (!note || !range) return;
+  const id = `n${++noteSeq}`;
+  notes.push({ id, from: range.from, to: range.to, note });
+  view.dispatch({ effects: addMark.of({ id, from: range.from, to: range.to }), selection: { anchor: range.to } });
+  renderNotes();
+  view.focus();
+}
+
 annotateBtn.addEventListener('mousedown', (event) => {
   // mousedown, not click: a click would first collapse the selection.
   event.preventDefault();
-  const { from, to } = view.state.selection.main;
-  if (from === to) return;
-  const note = window.prompt('Instruction for your agent about this passage:');
-  if (!note || !note.trim()) return;
-  const id = `n${++noteSeq}`;
-  notes.push({ id, from, to, note: note.trim() });
-  view.dispatch({ effects: addMark.of({ id, from, to }), selection: { anchor: to } });
-  renderNotes();
+  openPopover();
+});
+popAdd.addEventListener('click', confirmPopover);
+popCancel.addEventListener('click', () => {
+  closePopover();
+  view.focus();
+});
+popInput.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter' && !event.shiftKey) {
+    event.preventDefault();
+    confirmPopover();
+  } else if (event.key === 'Escape') {
+    closePopover();
+    view.focus();
+  }
 });
 
 function excerpt(from: number, to: number, limit = 70): string {

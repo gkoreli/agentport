@@ -7,7 +7,11 @@
 <nav><a href="/">Home</a><a href="/inkwell" aria-current="page">Inkwell</a><a href="/tasker">Tasker</a></nav></div>
 <div class="shell">
 <div class="work"><div class="work-head"><h1>Inkwell</h1><span>doc_123 · The Calm Sea</span></div>
-<div class="editor-wrap"><div id="editor"></div><button id="annotate-btn" hidden>✎ Annotate</button></div>
+<div class="editor-wrap"><div id="editor"></div><button id="annotate-btn" hidden>✎ Annotate</button>
+<div id="annotate-pop" hidden>
+  <textarea id="annotate-input" rows="2" placeholder="Instruction for your agent — “tighten this”, “needs a source”…"></textarea>
+  <div class="pop-actions"><button id="annotate-cancel" class="ghost">Cancel</button><button id="annotate-add">Add</button></div>
+</div></div>
 <div class="notes">
   <div class="notes-head"><span>Annotations <b id="note-count">0</b></span>
     <button id="send-notes" hidden>Send to agent</button></div>

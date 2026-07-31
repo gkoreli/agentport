@@ -46,6 +46,19 @@ a { color: var(--accent); }
   box-shadow: 0 4px 14px rgba(0,0,0,.45);
 }
 .ink-note { background: rgba(124, 156, 255, .16); border-bottom: 1px dashed var(--accent); }
+#annotate-pop {
+  position: absolute; z-index: 6; width: min(340px, 80%);
+  background: var(--panel); border: 1px solid #2b3442; border-radius: 10px;
+  padding: 10px; box-shadow: 0 12px 34px rgba(0,0,0,.5);
+}
+#annotate-pop textarea {
+  width: 100%; background: #0b0d10; border: 1px solid var(--line); border-radius: 7px;
+  color: var(--text); font: inherit; font-size: 13px; padding: 7px 9px; resize: none; outline: none;
+}
+#annotate-pop textarea:focus { border-color: var(--accent); }
+.pop-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
+.pop-actions button { font-size: 12px; padding: 5px 12px; }
+.pop-actions .ghost { background: transparent; border: 1px solid var(--line); color: var(--muted); }
 
 /* ---- annotations tray ---- */
 .notes { border-top: 1px solid var(--line); padding: 10px 18px 14px; max-height: 200px; overflow-y: auto; }
