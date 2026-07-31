@@ -330,3 +330,31 @@ Recorded so nobody mistakes silence for safety:
 | 3 | Extension one-tap: detect wallet, pairwise identity, chrome approvals | 008, 009 | ~2–3 days |
 | 4 | WebMCP harvesting + repositioning | 006 | ~1 day |
 | 5 | Direct mode (Caddy listener; optionally tailnet) | 011 | ~1–2 days |
+
+---
+
+## ADR-015: Open-source product, not a standards protocol; name stays AgentPort — accepted
+
+**Context.** Three claimants on the name surfaced: npm `agentport` +
+`agentport-cli` (an unrelated skills framework) and agentport.dev (YC W26,
+MCP-tools-for-merchants — supply side of our thesis, complementary product,
+colliding brand). A rename to AgentWallet was fully executed, then reverted
+(crypto connotations); portcall/callport were explored and dropped
+(portcall.com is an active maritime software company; the good English words
+are all partially claimed).
+
+**Decision.** Two-part identity call:
+
+- **Open-source product, not a standards-track protocol.** Protocols evolve at
+  committee speed; products become de-facto standards by shipping (the
+  WalletConnect path — never went through a standards body). Packaging
+  existing pieces well — ACP, WebMCP, WalletConnect patterns, systemd,
+  Cloudflare — *is* the product, the way Tailscale packaged WireGuard. Code is
+  the spec; MIT it; hosted defaults that just work; self-host if paranoid.
+- **The name stays AgentPort.** The collision only bites at npm publish and
+  public launch; revisit then. Publish options when the time comes:
+  `@agentport/cli` (scope appears free) or `@gkoreli/agentport`.
+
+**Consequences.** No standards-body dependency on our own layer (we still
+*consume* WebMCP, ADR-006). `navigator.agent` remains the API name regardless
+of brand.
