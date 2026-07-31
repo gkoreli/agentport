@@ -120,6 +120,28 @@ produces nonsense errors.
 Env: `AGENTPORT_RELAY`, `AGENTPORT_IDENTITY`, `AGENTPORT_RUNTIME`,
 `AGENTPORT_NAME`, `AGENTPORT_LOCATION`, `AGENTPORT_RELAY_STORE`.
 
+## UI framework
+
+Everything user-facing is built with **nisli** (`@nisli/core`, Goga's own
+signals + `html` template + custom-element framework; local checkout at
+`/Users/goga/Documents/goga/nisli`). No VDOM, no compiler, no runtime deps —
+which matters most for `connect.js`, since that ships into other people's
+pages.
+
+One deliberate split, in both the extension and the site:
+
+- **Our own pages** use `component()`. Idiomatic, and registry collisions are
+  not a threat on a page we control.
+- **Anything injected into a third-party page** — the connect modal, the
+  extension overlay — uses the `html` template layer only, never
+  `component()`. A custom-element tag name lives in a registry the embedding
+  page can also reach, and a tag it could pre-empt is a tag that could
+  impersonate a consent dialog. The template layer owns its DOM outright, so
+  the trust story doesn't depend on registry isolation.
+
+`scripts/ui-smoke.ts` renders both under happy-dom and asserts the shadow root
+stays unreachable via `.shadowRoot`.
+
 ## Conventions
 
 - ESM everywhere, `.js` extensions in relative imports (TS `Bundler`
