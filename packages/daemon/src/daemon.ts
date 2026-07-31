@@ -87,7 +87,8 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
       let frame: Frame;
       try {
         frame = decodeFrame(data.toString());
-      } catch {
+      } catch (err) {
+        this.#log(`dropped undecodable frame: ${err instanceof Error ? err.message : String(err)}`);
         return;
       }
       void this.#onFrame(frame);

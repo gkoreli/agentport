@@ -36,6 +36,8 @@ button { font: inherit; font-size: 13px; font-weight: 500; border: 1px solid #2b
 `;
 
 export interface ConnectModal {
+  /** Called once the relay hands back a code. */
+  setCode(code: string): void;
   status(text: string, error?: boolean): void;
   close(): void;
   /** Rejects if the user dismisses the dialog. */
@@ -47,7 +49,13 @@ export function connectCommand(code: string): string {
   return `npm run connect ${code}`;
 }
 
-export function openConnectModal(code: string, surfaceName: string, host: HTMLElement = document.body): ConnectModal {
+/**
+ * Opened *immediately* on click, before the relay is even dialled. Anything
+ * that goes wrong after this point has somewhere visible to be reported —
+ * the previous version only appeared once a code existed, so a failure on the
+ * way there looked exactly like the button doing nothing.
+ */
+export function openConnectModal(surfaceName: string, host: HTMLElement = document.body): ConnectModal {
   const mountHost = document.createElement('div');
   host.append(mountHost);
   const root = mountHost.attachShadow({ mode: 'closed' });
@@ -57,11 +65,13 @@ export function openConnectModal(code: string, surfaceName: string, host: HTMLEl
   const target = document.createElement('div');
   root.append(style, target);
 
-  const command = connectCommand(code);
-  const label = signal(command);
-  const status = signal('waiting for you to approve…');
+  let command = '';
+  const label = signal('…');
+  const rawCode = signal('');
+  const status = signal('contacting relay…');
   const failed = signal(false);
   const pending = signal(true);
+  const ready = signal(false);
 
   let reject: (reason: Error) => void = () => {};
   const cancelled = new Promise<never>((_, rejectFn) => {
@@ -69,6 +79,7 @@ export function openConnectModal(code: string, surfaceName: string, host: HTMLEl
   });
 
   const copy = () => {
+    if (!command) return;
     void navigator.clipboard?.writeText(command).then(() => {
       label.value = 'copied to clipboard';
       setTimeout(() => (label.value = command), 900);
@@ -87,11 +98,14 @@ export function openConnectModal(code: string, surfaceName: string, host: HTMLEl
           <h3>Connect your agent</h3>
           <p>Run this in your terminal, then approve there.</p>
           <div class="code" title="click to copy" @click=${copy}>${label}</div>
-          <p class="hint">
-            Click to copy. Your agent stays on your machine — ${surfaceName} never sees your key,
-            your model, or anything else it can do.
-          </p>
-          <p class="hint alt">Already have an agent running? Paste <b>${code}</b> at its prompt.</p>
+          ${when(
+            ready,
+            () => html`<p class="hint">
+                Click to copy. Your agent stays on your machine — ${surfaceName} never sees your
+                key, your model, or anything else it can do.
+              </p>
+              <p class="hint alt">Already have an agent running? Paste <b>${rawCode}</b> at its prompt.</p>`,
+          )}
           <div class="status" class:err=${failed}>
             ${when(pending, () => html`<span class="spin"></span>`)}${status}
           </div>
@@ -105,6 +119,13 @@ export function openConnectModal(code: string, surfaceName: string, host: HTMLEl
   `.mount(target);
 
   return {
+    setCode: (code) => {
+      command = connectCommand(code);
+      label.value = command;
+      rawCode.value = code;
+      ready.value = true;
+      status.value = 'waiting for you to approve…';
+    },
     status: (text, error) => {
       status.value = text;
       failed.value = Boolean(error);

@@ -87,7 +87,10 @@ export class AgentWallet extends Emitter<WalletEvents> {
       let frame: Frame;
       try {
         frame = decodeFrame(String(event.data));
-      } catch {
+      } catch (err) {
+        // Never silent: an undecodable frame means the peer and we disagree
+        // about the protocol, which is exactly when you need to be told.
+        this.#log(`dropped undecodable frame: ${err instanceof Error ? err.message : String(err)}`);
         return;
       }
       void this.#onFrame(frame);

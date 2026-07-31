@@ -33,7 +33,10 @@ interface Line {
 }
 
 const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) => {
-  const config = props.config as unknown as SurfaceConfig;
+  // nisli props are signals — `props.config` is Signal<SurfaceConfig>, not the
+  // object. Casting instead of reading `.value` silently yields undefined
+  // fields, which is exactly how the connect button died quietly once already.
+  const config = props.config.value;
 
   const lines = signal<Line[]>([]);
   const status = signal('not connected');
@@ -100,17 +103,25 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
     })
       .then(attach)
       .catch((err: Error) => {
-        if (!/cancelled/i.test(err.message)) push('meta', `connect failed: ${err.message}`);
+        // A user dismissing the dialog is not an error. Anything else is, and
+        // it goes both on screen and to the console — the previous version put
+        // it in a hidden element, which is how a thrown TypeError looked
+        // exactly like the button doing nothing.
+        if (/cancelled/i.test(err.message)) return;
+        console.error('[agentport] connect failed', err);
+        push('error', `connect failed: ${err.message}`);
       });
   };
 
-  const send = (event: Event) => {
-    event.preventDefault();
+  const send = () => {
     const text = draft.value.trim();
     if (!text || !session) return;
     draft.value = '';
     push('user', text);
-    session.prompt(text).catch((err: Error) => push('meta', `error: ${err.message}`));
+    session.prompt(text).catch((err: Error) => {
+      console.error('[agentport] prompt failed', err);
+      push('error', err.message);
+    });
   };
 
   return html`
@@ -131,7 +142,7 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
       `,
     )}
 
-    <div class="ap-log" class:live=${live}>
+    <div class="ap-log" class:live=${() => live.value || lines.value.length > 0}>
       ${each(
         lines as ReadonlySignal<Line[]>,
         (line) => line.id,
@@ -139,7 +150,7 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
       )}
     </div>
 
-    <form class="ap-form" class:live=${live} @submit=${send}>
+    <form class="ap-form" class:live=${live} @submit.prevent=${send}>
       <input
         placeholder=${config.placeholder ?? 'Ask your agent…'}
         autocomplete="off"

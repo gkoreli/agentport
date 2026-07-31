@@ -46,12 +46,21 @@ const provider: AgentProvider = {
   },
 
   async connect(request: AgentConnectRequest): Promise<AgentSession> {
+    // Open first, so every later failure is visible to the user.
+    const modal = openConnectModal(request.name);
+
     const wallet = new AgentWallet({
       relayUrl: RELAY,
       // Ephemeral and authority-free. Discarded when the tab goes away.
       userSecretKey: generateKeyPair().secretKey,
     });
-    await wallet.connect();
+    try {
+      await wallet.connect();
+    } catch (err) {
+      console.error('[agentport] relay unreachable', err);
+      modal.status(`could not reach the relay: ${(err as Error).message ?? err}`, true);
+      throw err;
+    }
 
     const { code, accepted } = await wallet.beginConnect({
       surface: { name: request.name, route: request.route, context: request.context },
@@ -63,13 +72,14 @@ const provider: AgentProvider = {
       decide: () => true,
     });
 
-    const modal = openConnectModal(code, request.name);
+    modal.setCode(code);
     try {
       const session = await Promise.race([accepted, modal.cancelled]);
       modal.status('connected');
       setTimeout(() => modal.close(), 400);
       return session;
     } catch (err) {
+      if (!/cancelled/i.test((err as Error).message)) console.error('[agentport] connect failed', err);
       modal.status((err as Error).message, true);
       setTimeout(() => modal.close(), 2200);
       wallet.close();

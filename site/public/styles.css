@@ -58,6 +58,7 @@ a { color: var(--accent); }
 .ap-msg.meta, .ap-msg.tool { color: var(--muted); font-size: 12px; font-family: ui-monospace, monospace; }
 .ap-msg.tool.ok::before { content: "✓ "; color: var(--ok); }
 .ap-msg.tool.err::before { content: "✕ "; color: #ff6b6b; }
+.ap-msg.error { color: #ff8f8f; font-size: 13px; border-left: 2px solid #ff6b6b; padding-left: 10px; }
 .ap-form { display: none; border-top: 1px solid var(--line); padding: 12px; gap: 8px; }
 .ap-form.live { display: flex; }
 .ap-form input {
