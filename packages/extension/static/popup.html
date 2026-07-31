@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>AgentPort</title>
+    <style>
+      :root { color-scheme: dark; }
+      body {
+        width: 340px; margin: 0; padding: 0 0 12px;
+        background: #121215; color: #e8e6e3;
+        font: 13px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+      }
+      main { display: grid; gap: 2px; }
+      header {
+        display: flex; align-items: center; gap: 8px;
+        padding: 12px 14px; border-bottom: 1px solid #26262c; position: sticky; top: 0; background: #121215;
+      }
+      header span { margin-left: auto; color: #9a97a3; font-size: 11px; }
+      section { padding: 12px 14px; border-bottom: 1px solid #1e1e24; }
+      h2 { margin: 0 0 8px; font-size: 11px; text-transform: uppercase; letter-spacing: .07em; color: #9a97a3; }
+      .head { display: flex; align-items: center; justify-content: space-between; }
+      .head h2 { margin: 0; }
+      p { margin: 0 0 8px; }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; word-break: break-all; color: #cfcbd6; }
+      .hint { color: #9a97a3; font-size: 11px; }
+      .row { display: flex; gap: 6px; }
+      input[type=text] {
+        flex: 1; min-width: 0; background: #0f0f12; border: 1px solid #2c2c33; border-radius: 8px;
+        padding: 7px 9px; color: inherit; font: inherit;
+      }
+      button {
+        background: #24242b; border: 1px solid #33333c; border-radius: 8px;
+        padding: 7px 12px; color: inherit; font: inherit; cursor: pointer;
+      }
+      button.primary { background: #7c6cff; border-color: #7c6cff; color: #fff; }
+      .card {
+        display: grid; gap: 2px; padding: 8px 10px; margin-top: 6px;
+        background: #1a1a1f; border: 1px solid #26262c; border-radius: 10px;
+      }
+      .card small { color: #9a97a3; font-size: 11px; word-break: break-all; }
+      code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    </style>
+  </head>
+  <body>
+    <script src="popup.js"></script>
+  </body>
+</html>

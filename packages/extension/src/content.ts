@@ -1,0 +1,422 @@
+/**
+ * The mediator.
+ *
+ * Runs in the extension's isolated world: it can see the page's DOM but the
+ * page cannot see it, and it holds the only channel to the service worker. Two
+ * kinds of traffic pass through here and they are kept strictly apart:
+ *
+ *   page traffic    — requests, always re-validated, never trusted about
+ *                     identity, session ownership or tool ownership;
+ *   widget traffic  — the extension acting as the surface for sites that do not
+ *                     speak `navigator.agent` (Job 2).
+ *
+ * The page cannot address a widget session and the widget cannot be driven by
+ * the page: both are keyed by references minted in the service worker, and each
+ * reference is recorded here with the owner it was created for.
+ */
+
+import type { SiteTool } from '@agentport/client';
+import type { ToolDefinition } from '@agentport/protocol';
+import {
+  ENVELOPE,
+  LIMITS,
+  TO_PAGE,
+  TO_WALLET,
+  isRecord,
+  mintId,
+  readPageOutbound,
+  sanitizeTools,
+  type ContentToWorker,
+  type Origin,
+  type PageConnectRequest,
+  type PageInbound,
+  type WorkerToContent,
+} from './bridge.js';
+import { createOverlay, type Overlay } from './overlay.js';
+import { describeCall, genericPageTools } from './pagetools.js';
+
+const CHANNEL = mintId('ch_');
+const TOOL_CALL_TIMEOUT_MS = 30_000;
+
+type ToolRoute = 'page' | ((args: Record<string, unknown>) => unknown | Promise<unknown>);
+
+interface SessionRecord {
+  ref: string;
+  owner: Origin;
+  routes: Map<string, ToolRoute>;
+}
+
+const records = new Map<string, SessionRecord>();
+const pageCalls = new Map<string, { ref: string; settle: (outcome: { ok: boolean; result?: unknown; error?: string }) => void }>();
+const waiters = new Map<string, { resolve: (value: unknown) => void; reject: (err: Error) => void }>();
+
+/** WebMCP tools the page has registered, harvested by the in-page script. */
+let webmcpTools: ToolDefinition[] = [];
+
+// --- service worker port ---------------------------------------------------
+
+let port: chrome.runtime.Port | undefined;
+
+function workerPort(): chrome.runtime.Port {
+  if (port) return port;
+  const next = chrome.runtime.connect({ name: 'agentport.content' });
+  next.onMessage.addListener((raw: unknown) => {
+    if (isRecord(raw)) onWorkerMessage(raw as WorkerToContent);
+  });
+  next.onDisconnect.addListener(() => {
+    port = undefined;
+    for (const waiter of waiters.values()) waiter.reject(new Error('wallet disconnected'));
+    waiters.clear();
+    for (const record of records.values()) closeRecord(record, 'wallet_disconnected');
+  });
+  port = next;
+  return next;
+}
+
+function tell(message: ContentToWorker): void {
+  try {
+    workerPort().postMessage(message);
+  } catch {
+    port = undefined;
+  }
+}
+
+function request<T>(build: (rid: string) => ContentToWorker): Promise<T> {
+  const rid = mintId('q_');
+  return new Promise<T>((resolve, reject) => {
+    waiters.set(rid, { resolve: resolve as (value: unknown) => void, reject });
+    tell(build(rid));
+  });
+}
+
+function closeRecord(record: SessionRecord, reason: string): void {
+  records.delete(record.ref);
+  if (record.owner === 'page') toPage({ t: 'event', ref: record.ref, event: 'closed', payload: { reason } });
+  else onWidgetClosed(reason);
+}
+
+// --- page boundary ---------------------------------------------------------
+
+function toPage(body: PageInbound): void {
+  window.postMessage({ e: ENVELOPE, dir: TO_PAGE, channel: CHANNEL, body }, window.origin === 'null' ? '*' : window.origin);
+}
+
+function injectProvider(): void {
+  const script = document.createElement('script');
+  script.src = chrome.runtime.getURL('inpage.js');
+  // Not a secret — the page can read this attribute. It separates our traffic
+  // from every other postMessage on the page; authority never derives from it.
+  script.dataset.channel = CHANNEL;
+  script.async = false;
+  script.addEventListener('load', () => script.remove());
+  (document.head ?? document.documentElement).append(script);
+}
+
+window.addEventListener('message', (event: MessageEvent) => {
+  if (event.source !== window) return;
+  const data: unknown = event.data;
+  if (!isRecord(data) || data['e'] !== ENVELOPE || data['dir'] !== TO_WALLET || data['channel'] !== CHANNEL) return;
+
+  // Everything below this line came from a hostile context. `readPageOutbound`
+  // rebuilds it; anything it cannot rebuild is dropped without a reply, because
+  // a parse error is not something the page is owed an answer about.
+  const body = readPageOutbound(data['body']);
+  if (!body) return;
+
+  switch (body.t) {
+    case 'available': {
+      // Deliberately *not* a relay round-trip. Answering "do you have agents?"
+      // by dialing the relay would let any page force a socket and leak the
+      // fact that this user has agents at all before consent.
+      request<{ hasIdentity: boolean }>((rid) => ({ t: 'status', rid })).then(
+        (status) => toPage({ t: 'ok', rid: body.rid, value: status.hasIdentity === true }),
+        () => toPage({ t: 'ok', rid: body.rid, value: false }),
+      );
+      return;
+    }
+    case 'connect': {
+      void connectForPage(body.rid, body.request);
+      return;
+    }
+    case 'prompt': {
+      const record = ownedBy(body.ref, 'page');
+      if (!record) return void toPage({ t: 'err', rid: body.rid, reason: 'denied', message: 'unknown session' });
+      request<string>((rid) => ({ t: 'prompt', rid, ref: record.ref, text: body.text, context: body.context })).then(
+        (text) => toPage({ t: 'ok', rid: body.rid, value: text }),
+        (err: Error) => toPage({ t: 'err', rid: body.rid, reason: 'error', message: err.message }),
+      );
+      return;
+    }
+    case 'prompt.cancel': {
+      const record = ownedBy(body.ref, 'page');
+      if (record) tell({ t: 'prompt.cancel', ref: record.ref, promptId: body.promptId });
+      return;
+    }
+    case 'tool.result': {
+      // The page may only answer a call we dispatched to it, exactly once. The
+      // session reference comes from our own table, never from the message.
+      const call = pageCalls.get(body.callId);
+      if (!call) return;
+      pageCalls.delete(body.callId);
+      call.settle(body.ok ? { ok: true, result: body.result } : { ok: false, error: body.error });
+      return;
+    }
+    case 'close': {
+      const record = ownedBy(body.ref, 'page');
+      if (record) {
+        records.delete(record.ref);
+        tell({ t: 'close', ref: record.ref, reason: body.reason });
+      }
+      return;
+    }
+    case 'webmcp.tools': {
+      webmcpTools = sanitizeTools(body.tools);
+      if (webmcpTools.length > 0) overlay().widget.show();
+      return;
+    }
+    default:
+      return;
+  }
+});
+
+function ownedBy(ref: string, owner: Origin): SessionRecord | undefined {
+  const record = records.get(ref);
+  return record && record.owner === owner ? record : undefined;
+}
+
+async function connectForPage(pageRid: string, request_: PageConnectRequest): Promise<void> {
+  try {
+    const value = await request<{ ref: string; info: unknown; grant: unknown }>((rid) => ({
+      t: 'connect',
+      rid,
+      from: 'page',
+      request: request_,
+    }));
+    records.set(value.ref, {
+      ref: value.ref,
+      owner: 'page',
+      routes: new Map(request_.tools.map((tool) => [tool.name, 'page' as ToolRoute])),
+    });
+    toPage({ t: 'ok', rid: pageRid, value });
+  } catch (err) {
+    const reason = err instanceof Error && 'reason' in err ? String((err as { reason: unknown }).reason) : 'denied';
+    toPage({ t: 'err', rid: pageRid, reason, message: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+// --- worker → here ---------------------------------------------------------
+
+function onWorkerMessage(message: WorkerToContent): void {
+  switch (message.t) {
+    case 'ok': {
+      const waiter = waiters.get(message.rid);
+      waiters.delete(message.rid);
+      waiter?.resolve(message.value);
+      return;
+    }
+    case 'err': {
+      const waiter = waiters.get(message.rid);
+      waiters.delete(message.rid);
+      const error = Object.assign(new Error(message.message), { reason: message.reason });
+      waiter?.reject(error);
+      return;
+    }
+    case 'tool.call': {
+      void runToolCall(message);
+      return;
+    }
+    case 'ui.pick': {
+      void overlay()
+        .pick(message.agents, message.request)
+        .then((value) => tell({ t: 'ui.result', id: message.id, value }));
+      return;
+    }
+    case 'ui.consent': {
+      void overlay()
+        .consent(message.agent, message.request)
+        .then((value) => tell({ t: 'ui.result', id: message.id, value }));
+      return;
+    }
+    case 'ui.approve': {
+      const detail = message.call ? describeCall(message.call.name, message.call.arguments) : undefined;
+      void overlay()
+        .approve({ summary: message.summary, ...(message.call ? { call: message.call } : {}), ...(detail ? { detail } : {}) })
+        .then((value) => tell({ t: 'ui.result', id: message.id, value }));
+      return;
+    }
+    case 'event': {
+      const record = records.get(message.ref);
+      if (!record) return;
+      if (record.owner === 'page') toPage({ t: 'event', ref: message.ref, event: message.event, payload: message.payload });
+      else onWidgetEvent(message.event, message.payload);
+      if (message.event === 'closed') records.delete(message.ref);
+      return;
+    }
+    default:
+      return;
+  }
+}
+
+async function runToolCall(call: Extract<WorkerToContent, { t: 'tool.call' }>): Promise<void> {
+  const record = records.get(call.ref);
+  const route = record?.routes.get(call.name);
+  if (!record || !route) {
+    tell({ t: 'tool.result', ref: call.ref, callId: call.callId, ok: false, error: `unknown tool ${call.name}` });
+    return;
+  }
+
+  if (route === 'page') {
+    if (pageCalls.size >= LIMITS.pendingCallsPerSession) {
+      tell({ t: 'tool.result', ref: call.ref, callId: call.callId, ok: false, error: 'too many tool calls in flight' });
+      return;
+    }
+    // A page that simply never answers must not wedge the agent's turn.
+    const timer = setTimeout(() => {
+      if (!pageCalls.delete(call.callId)) return;
+      tell({ t: 'tool.result', ref: call.ref, callId: call.callId, ok: false, error: 'the page did not answer in time' });
+    }, TOOL_CALL_TIMEOUT_MS);
+    pageCalls.set(call.callId, {
+      ref: call.ref,
+      settle: (outcome) => {
+        clearTimeout(timer);
+        tell({ t: 'tool.result', ref: call.ref, callId: call.callId, ...outcome });
+      },
+    });
+    toPage({ t: 'tool.call', callId: call.callId, ref: call.ref, name: call.name, arguments: call.arguments });
+    return;
+  }
+
+  try {
+    const result = await route(call.arguments ?? {});
+    tell({ t: 'tool.result', ref: call.ref, callId: call.callId, ok: true, result });
+  } catch (err) {
+    tell({
+      t: 'tool.result',
+      ref: call.ref,
+      callId: call.callId,
+      ok: false,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Job 2 — the fallback surface
+//
+// When the site does not speak `navigator.agent`, the extension becomes the
+// surface. Preference order for what the agent gets:
+//
+//   1. the site's own WebMCP tools, if it registered any — those carry intent;
+//   2. otherwise the generic `page.*` DOM toolset.
+//
+// Either way the grant goes through the same consent screen and the same
+// per-call approvals as a site-declared grant.
+// ---------------------------------------------------------------------------
+
+let overlayInstance: Overlay | undefined;
+let widgetRef: string | undefined;
+let streamingMessage: string | undefined;
+
+function overlay(): Overlay {
+  if (!overlayInstance) {
+    overlayInstance = createOverlay({
+      attach: () => void attachWidget(),
+      detach: () => {
+        if (widgetRef) tell({ t: 'close', ref: widgetRef, reason: 'user_detached' });
+        widgetRef = undefined;
+        overlay().widget.reset();
+      },
+      send: (text) => void sendFromWidget(text),
+    });
+  }
+  return overlayInstance;
+}
+
+async function attachWidget(): Promise<void> {
+  const ui = overlay();
+  if (widgetRef) return;
+  ui.widget.phase.value = 'attaching';
+
+  const usingWebMcp = webmcpTools.length > 0;
+  const local: SiteTool[] = usingWebMcp ? [] : genericPageTools();
+  const definitions: ToolDefinition[] = usingWebMcp
+    ? webmcpTools
+    : local.map(({ handler: _handler, ...definition }) => definition);
+
+  try {
+    const value = await request<{ ref: string; info: { agentName: string } }>((rid) => ({
+      t: 'connect',
+      rid,
+      from: 'widget',
+      request: {
+        name: document.title || location.hostname,
+        route: location.pathname,
+        context: { url: location.href, title: document.title, source: usingWebMcp ? 'webmcp' : 'page-dom' },
+        tools: definitions,
+        alwaysAsk: [],
+      },
+    }));
+
+    const routes = new Map<string, ToolRoute>();
+    if (usingWebMcp) for (const tool of webmcpTools) routes.set(tool.name, 'page');
+    else for (const tool of local) routes.set(tool.name, tool.handler);
+
+    records.set(value.ref, { ref: value.ref, owner: 'widget', routes });
+    widgetRef = value.ref;
+    ui.widget.agentName.value = value.info.agentName;
+    ui.widget.phase.value = 'attached';
+    ui.widget.note(
+      usingWebMcp
+        ? `Attached with ${webmcpTools.length} tool(s) this site published via navigator.modelContext.`
+        : `Attached with the generic page toolset. Reads are free; anything that changes the page asks first.`,
+    );
+  } catch (err) {
+    ui.widget.phase.value = 'idle';
+    ui.widget.note(err instanceof Error ? err.message : String(err));
+  }
+}
+
+async function sendFromWidget(text: string): Promise<void> {
+  const ui = overlay();
+  const ref = widgetRef;
+  if (!ref) return;
+  ui.widget.say('user', text);
+  streamingMessage = ui.widget.say('agent', '');
+  try {
+    const full = await request<string>((rid) => ({ t: 'prompt', rid, ref, text }));
+    // Deltas already painted the bubble; the returned text is only used to
+    // notice a turn that produced nothing at all.
+    if (!full) ui.widget.note('(no output)');
+  } catch (err) {
+    ui.widget.note(err instanceof Error ? err.message : String(err));
+  } finally {
+    streamingMessage = undefined;
+  }
+}
+
+function onWidgetEvent(event: string, payload: unknown): void {
+  const ui = overlay();
+  if (!isRecord(payload)) return;
+  if (event === 'delta' && streamingMessage) ui.widget.appendTo(streamingMessage, String(payload['text'] ?? ''));
+  else if (event === 'tool') ui.widget.note(`${payload['ok'] ? '✓' : '✗'} ${String(payload['name'])}`);
+  else if (event === 'closed') onWidgetClosed(String(payload['reason'] ?? 'closed'));
+}
+
+function onWidgetClosed(reason: string): void {
+  widgetRef = undefined;
+  const ui = overlay();
+  ui.widget.reset();
+  ui.widget.note(`Detached: ${reason}`);
+}
+
+// --- boot ------------------------------------------------------------------
+
+injectProvider();
+
+// Only the top frame gets a widget: a floating panel per iframe would be noise,
+// and an iframe is not where a user expects to grant page-wide capabilities.
+if (window.top === window) {
+  const start = () => overlay().widget.show();
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, { once: true });
+  else start();
+}

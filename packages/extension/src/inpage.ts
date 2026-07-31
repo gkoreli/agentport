@@ -25,9 +25,9 @@ import {
   type PageOutbound,
 } from './bridge.js';
 
-// The content script replaces this token before injecting. Same-document
-// scoping only — see the note on `channel` in bridge.ts.
-const CHANNEL = '__AGENTPORT_CHANNEL__';
+// Handed over on the injecting <script> tag. Same-document scoping only — the
+// page can read it, and reading it buys nothing: see the note in bridge.ts.
+const CHANNEL = (document.currentScript as HTMLScriptElement | null)?.dataset['channel'] ?? '';
 
 type Listener = (payload: never) => void;
 
@@ -170,6 +170,7 @@ function rid(prefix: string): string {
 }
 
 function send(body: PageOutbound): void {
+  if (!CHANNEL) throw new Error('AgentPort provider was loaded without a channel');
   const envelope: PageEnvelope<PageOutbound> = { e: ENVELOPE, dir: TO_WALLET, channel: CHANNEL, body };
   window.postMessage(envelope, window.origin === 'null' ? '*' : window.origin);
 }
@@ -314,7 +315,8 @@ function adoptWebMcpTools(list: unknown): void {
   for (const entry of list as WebMcpToolLike[]) {
     if (!isRecord(entry) || typeof entry.name !== 'string' || typeof entry.execute !== 'function') continue;
     const execute = entry.execute as (args: Record<string, unknown>) => unknown;
-    const readOnly = entry.annotations?.readOnlyHint === true;
+    const annotations = isRecord(entry.annotations) ? entry.annotations : {};
+    const readOnly = annotations['readOnlyHint'] === true;
     webmcpTools.set(entry.name, {
       name: entry.name,
       description: typeof entry.description === 'string' ? entry.description : entry.name,
