@@ -196,17 +196,53 @@ export function getProvider(): AgentProvider {
   return (navigator as unknown as { agent?: AgentProvider }).agent ?? provider;
 }
 
+type InstalledProvider = AgentProvider & {
+  resume?: (request: AgentConnectRequest) => Promise<AgentSession | null>;
+};
+
+/**
+ * An extension injects its provider with an async <script>, so at module time
+ * `navigator.agent` may simply not exist YET — deciding on a single synchronous
+ * read is how a refresh lands on the drop-in path and shows Connect for a
+ * session the wallet still holds. Wait for `agent#initialized` (the NIP-07
+ * idiom) with a short deadline before concluding no wallet is installed.
+ */
+function installedProvider(timeoutMs = 400): Promise<InstalledProvider | undefined> {
+  const read = () => (navigator as unknown as { agent?: InstalledProvider }).agent;
+  const now = read();
+  if (now) return Promise.resolve(now);
+  // An extension injects at document_start; once the document has fully
+  // loaded, a provider that hasn't appeared never will — don't tax the
+  // no-extension path with the deadline.
+  if (document.readyState === 'complete') return Promise.resolve(undefined);
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      window.removeEventListener('agent#initialized', onReady);
+      resolve(read());
+    }, timeoutMs);
+    const onReady = () => {
+      clearTimeout(timer);
+      window.removeEventListener('agent#initialized', onReady);
+      resolve(read());
+    };
+    window.addEventListener('agent#initialized', onReady);
+  });
+}
+
 const AgentPort = {
   provider,
   getProvider,
-  connect: (request: AgentConnectRequest) => getProvider().connect(request),
+  connect: async (request: AgentConnectRequest) => {
+    const installed = await installedProvider();
+    return (installed ?? provider).connect(request);
+  },
   /**
    * Resume follows the same discovery as connect: an installed wallet keeps
    * sessions alive across navigations and hands the reclaimed one back; the
    * drop-in falls back to its per-tab sessionStorage token.
    */
   resume: async (request: AgentConnectRequest) => {
-    const installed = (navigator as unknown as { agent?: AgentProvider & { resume?: (r: AgentConnectRequest) => Promise<AgentSession | null> } }).agent;
+    const installed = await installedProvider();
     if (installed?.resume) {
       const session = await installed.resume(request);
       return session ? { session, missed: 0 } : null;

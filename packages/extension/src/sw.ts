@@ -79,6 +79,8 @@ interface SessionEntry {
   port: chrome.runtime.Port | null;
   from: Origin;
   origin: string;
+  /** The tab the binding lives in — same-tab reclaim beats the disconnect race. */
+  tabId: number | undefined;
   /** The surface name from the connect request — the reclaim key with origin. */
   name: string;
   session: AgentSession;
@@ -130,13 +132,21 @@ function orphanSession(entry: SessionEntry): void {
 }
 
 function reclaimSession(port: chrome.runtime.Port, origin: string, request: PageConnectRequest): SessionEntry | undefined {
+  const tabId = port.sender?.tab?.id;
   for (const entry of sessions.values()) {
-    if (entry.port !== null) continue;
     if (entry.origin !== origin || entry.name !== request.name || entry.from !== 'page') continue;
     if (entry.session.closed || entry.session.grant.expiresAt <= Date.now()) continue;
+    // Orphaned is the ordinary case. A refresh, though, can deliver the new
+    // document's resume BEFORE the old port's onDisconnect — the entry still
+    // looks bound. Same tab means the old document is gone by definition, so
+    // stealing the binding is safe; a different live tab is not touched.
+    const sameTabRefresh = entry.port !== null && tabId !== undefined && entry.tabId === tabId && entry.port !== port;
+    if (entry.port !== null && !sameTabRefresh) continue;
+    if (entry.port) refsOf(entry.port).delete(entry.ref);
     clearTimeout(entry.orphanTimer);
     entry.orphanTimer = undefined;
     entry.port = port;
+    entry.tabId = tabId;
     // The new document re-declared its tools; the dispatch allowlist follows
     // the live declaration, still bounded by the original grant on the wire.
     entry.toolNames = new Set(request.tools.map((tool) => tool.name));
@@ -238,6 +248,7 @@ async function openSession(
     port,
     from,
     origin,
+    tabId: port.sender?.tab?.id,
     name: request.name,
     session,
     toolNames: new Set(request.tools.map((tool) => tool.name)),
