@@ -14,6 +14,8 @@ import { generateKeyPair, publicKeyOf, type Hex } from '@agentport/protocol';
 
 const KEY_SECRET = 'agentport.user.secretKey';
 const KEY_RELAY = 'agentport.relay.url';
+const KEY_ALIAS_SEED = 'agentport.alias.seed';
+const KEY_RESUME = 'agentport.resume.v1';
 
 export const DEFAULT_RELAY_URL = 'wss://agentport.gogakoreli.workers.dev/relay';
 
@@ -59,4 +61,85 @@ export async function setRelayUrl(url: string): Promise<string> {
   if (!/^wss?:\/\/[^\s]+$/.test(url)) throw new Error('relay must be a ws:// or wss:// url');
   await chrome.storage.local.set({ [KEY_RELAY]: url });
   return url;
+}
+
+// --- per-origin aliases (ADR-009) ------------------------------------------
+//
+// What a page may learn about the user's agent is a label that is stable for
+// THAT origin and meaningless everywhere else. The alias is a one-way hash of
+// a random per-install seed and the origin — deterministic per origin, so the
+// site keeps its UX continuity across visits, and uncorrelatable across
+// origins, so two sites comparing notes learn nothing. The seed is NOT the
+// user key: even a full break of the hash would expose a random number.
+
+function toHexString(bytes: Uint8Array): string {
+  let hex = '';
+  for (const b of bytes) hex += b.toString(16).padStart(2, '0');
+  return hex;
+}
+
+async function aliasSeed(): Promise<string> {
+  const existing = await read<string>(KEY_ALIAS_SEED);
+  if (typeof existing === 'string' && existing.length >= 32) return existing;
+  const seed = toHexString(crypto.getRandomValues(new Uint8Array(32)));
+  await chrome.storage.local.set({ [KEY_ALIAS_SEED]: seed });
+  return seed;
+}
+
+/** Stable within one origin, uncorrelatable across origins. */
+export async function originAlias(origin: string): Promise<string> {
+  const seed = await aliasSeed();
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`${seed}|${origin}`));
+  return `a_${toHexString(new Uint8Array(digest)).slice(0, 16)}`;
+}
+
+// --- resume records --------------------------------------------------------
+//
+// The service worker's in-memory session table dies with the worker (MV3
+// evicts idle workers); the relay-side session does not. These records carry
+// just enough to re-attach — session id, resume token, and whether the
+// session was sealed (so a resume can refuse to come back as plaintext).
+// `chrome.storage.session` on purpose: extension-contexts only, page JS can
+// never reach it, and it dies with the browser session exactly like the
+// grant-scoped token it holds.
+
+export interface StoredResume {
+  id: string;
+  token: string;
+  origin: string;
+  name: string;
+  sealed: boolean;
+  expiresAt: number;
+}
+
+type ResumeBag = Record<string, StoredResume>;
+
+function resumeKey(origin: string, name: string): string {
+  return `${origin}\n${name}`;
+}
+
+async function resumeBag(): Promise<ResumeBag> {
+  const bag = await chrome.storage.session.get(KEY_RESUME);
+  const value = bag[KEY_RESUME];
+  return typeof value === 'object' && value !== null ? (value as ResumeBag) : {};
+}
+
+export async function saveResume(record: StoredResume): Promise<void> {
+  const bag = await resumeBag();
+  bag[resumeKey(record.origin, record.name)] = record;
+  await chrome.storage.session.set({ [KEY_RESUME]: bag });
+}
+
+export async function loadResume(origin: string, name: string): Promise<StoredResume | undefined> {
+  return (await resumeBag())[resumeKey(origin, name)];
+}
+
+/** Only the caller who knows the session id may erase a record — a stale
+ *  close for a session that was already replaced must not delete its heir. */
+export async function clearResume(origin: string, name: string, sessionId: string): Promise<void> {
+  const bag = await resumeBag();
+  const key = resumeKey(origin, name);
+  if (bag[key]?.id !== sessionId) return;
+  delete bag[key];
+  await chrome.storage.session.set({ [KEY_RESUME]: bag });
 }

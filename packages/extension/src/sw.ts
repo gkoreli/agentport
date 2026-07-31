@@ -14,27 +14,55 @@
  *     3: never trust a self-reported identity in a frame);
  *   - session references are minted here and scoped to the port that opened
  *     them, so a frame cannot address a session it did not open.
+ *
+ * Three ADR-009 properties are enforced here and nowhere weaker:
+ *
+ *   - consent and approvals render in extension chrome (a popup window on the
+ *     extension origin, or a browser notification), never in page DOM;
+ *   - what a page learns about the agent is a generic label plus a per-origin
+ *     alias — real names, pubkeys and cert contents stay in extension chrome;
+ *   - the page's session survives navigation and worker eviction without any
+ *     re-consent, because the grant never lapsed: first by re-binding the
+ *     worker-held session, then by resuming through the relay with a stored
+ *     token (sealed sessions refuse to come back unsealed).
  */
 
-import { AgentWallet, type AgentSession, type SiteTool } from '@agentport/client';
-import { Deferred, type AgentSummary } from '@agentport/protocol';
+import { AgentWallet, ResumeError, type AgentSession, type SiteTool } from '@agentport/client';
+import { Deferred, type AgentSummary, type ToolDefinition } from '@agentport/protocol';
 import {
   LIMITS,
   mintId,
   sanitizeConnectRequest,
   isRecord,
   type AgentRow,
+  type ConsentPayload,
+  type ConsentToWorker,
   type ContentToWorker,
   type Origin,
   type PageConnectRequest,
   type PopupToWorker,
+  type WorkerToConsent,
   type WorkerToContent,
 } from './bridge.js';
-import { DEFAULT_RELAY_URL, ensureUserKey, importUserKey, relayUrl, setRelayUrl, userPublicKey, userSecretKey } from './storage.js';
+import {
+  DEFAULT_RELAY_URL,
+  clearResume,
+  ensureUserKey,
+  importUserKey,
+  loadResume,
+  originAlias,
+  relayUrl,
+  saveResume,
+  setRelayUrl,
+  userPublicKey,
+  userSecretKey,
+} from './storage.js';
 
 // --- relay connection ------------------------------------------------------
 
 let walletPromise: Promise<AgentWallet> | undefined;
+let redialTimer: ReturnType<typeof setTimeout> | undefined;
+let redialMs = 1000;
 
 async function getWallet(): Promise<AgentWallet> {
   if (walletPromise) return walletPromise;
@@ -46,11 +74,11 @@ async function getWallet(): Promise<AgentWallet> {
       userSecretKey: secret,
       log: (message) => console.debug('[agentport]', message),
     });
-    // A dropped socket must not leave a wallet that silently never resolves.
-    // Reconnect is lazy: the next request builds a fresh one.
+    // A dropped socket is not a goodbye for the sessions it carried: the relay
+    // holds them for a grace period. Redial with backoff and re-attach them.
     wallet.on('closed', () => {
       if (walletPromise) walletPromise = undefined;
-      for (const entry of [...sessions.values()]) dropSession(entry, 'relay_closed');
+      scheduleRedial();
     });
     await wallet.connect();
     return wallet;
@@ -61,15 +89,84 @@ async function getWallet(): Promise<AgentWallet> {
   return walletPromise;
 }
 
-/** Chrome stops an idle MV3 worker after 30s. Socket traffic resets that timer,
- *  but a session that is merely *open* and quiet would not — so hold a port
- *  alive while any session exists. */
+function scheduleRedial(): void {
+  if (redialTimer || sessions.size === 0) return;
+  const delay = redialMs;
+  redialMs = Math.min(redialMs * 2, 30_000);
+  redialTimer = setTimeout(() => {
+    redialTimer = undefined;
+    void reconnect();
+  }, delay);
+}
+
+/** Redial the relay and re-attach every session the worker still holds. */
+async function reconnect(): Promise<void> {
+  if (sessions.size === 0) return;
+  let wallet: AgentWallet;
+  try {
+    wallet = await getWallet();
+  } catch {
+    scheduleRedial();
+    return;
+  }
+  redialMs = 1000;
+  for (const entry of [...sessions.values()]) {
+    if (!sessions.has(entry.ref)) continue; // dropped while we awaited
+    try {
+      await resumeEntry(wallet, entry);
+    } catch (err) {
+      const reason = err instanceof ResumeError ? err.reason : '';
+      if (reason === 'not_resumable' || reason === 'grant_expired') dropSession(entry, `resume_failed:${reason}`);
+      // Transient failures keep the entry; the next redial or the page's own
+      // resume retries with the same token.
+    }
+  }
+}
+
+/** Re-attach one worker-held session over a fresh socket, in place: the page
+ *  keeps its ref and never notices the relay blinked. */
+async function resumeEntry(wallet: AgentWallet, entry: SessionEntry): Promise<void> {
+  if (!entry.token) throw new ResumeError('not_resumable');
+  const definitions = entry.session.grant.tools;
+  const tools: SiteTool[] = definitions.map((definition) => ({
+    ...definition,
+    handler: (args) => dispatchToolCall(entry.ref, definition.name, args),
+  }));
+  const { session } = await wallet.resumeSession({
+    id: entry.session.id,
+    token: entry.token,
+    tools,
+    requireSealed: Boolean(entry.session.info.verify),
+    decide: (prompt) => askApproval(entry.origin, entry.who, prompt),
+  });
+  const old = entry.session;
+  entry.session = session;
+  entry.who.name = session.info.agentName;
+  wireSession(entry);
+  // Prompts that were mid-flight when the socket died are answered by nobody;
+  // finish the old object so they reject instead of hanging. The swap above
+  // makes the 'closed' this emits a no-op in wireSession, and the old socket
+  // is gone, so no frame leaves.
+  old.close('socket_resumed');
+}
+
+/** Chrome stops an idle MV3 worker after 30s. Socket traffic resets that timer
+ *  (Chrome 116+), but a session that is merely *open* and quiet would not — so
+ *  touch storage while any session exists, and let an alarm re-wake the worker
+ *  so a killed socket gets redialed even after an eviction. */
 function keepAlive(): void {
   void chrome.storage.local.get('agentport.keepalive');
 }
 setInterval(() => {
   if (sessions.size > 0) keepAlive();
 }, 20_000);
+
+chrome.alarms?.create('agentport.keepalive', { periodInMinutes: 1 });
+chrome.alarms?.onAlarm.addListener((alarm) => {
+  if (alarm.name !== 'agentport.keepalive') return;
+  keepAlive();
+  if (sessions.size > 0 && !walletPromise) void reconnect();
+});
 
 // --- session registry ------------------------------------------------------
 
@@ -84,6 +181,11 @@ interface SessionEntry {
   /** The surface name from the connect request — the reclaim key with origin. */
   name: string;
   session: AgentSession;
+  /** The relay's resume token — how this session survives a socket drop. */
+  token: string | undefined;
+  /** The real agent name, for extension chrome only. Mutable because a resume
+   *  learns it after the decide callback was already handed out. */
+  who: { name: string };
   /** Tool names the requester registered. A tool call is only ever dispatched
    *  to whoever declared it, and results are only accepted for a call we made. */
   toolNames: Set<string>;
@@ -100,8 +202,6 @@ const ORPHAN_GRACE_MS = 2 * 60 * 1000;
 
 const sessions = new Map<string, SessionEntry>();
 const portSessions = new WeakMap<chrome.runtime.Port, Set<string>>();
-/** Outstanding UI questions, keyed by id and pinned to the port we asked. */
-const uiWaiters = new Map<string, { port: chrome.runtime.Port; deferred: Deferred<unknown> }>();
 
 function refsOf(port: chrome.runtime.Port): Set<string> {
   let set = portSessions.get(port);
@@ -163,6 +263,7 @@ function dropSession(entry: SessionEntry, reason: string): void {
   for (const deferred of entry.pending.values()) deferred.resolve({ ok: false, error: `session closed: ${reason}` });
   entry.pending.clear();
   entry.session.close(reason);
+  if (entry.from === 'page') void clearResume(entry.origin, entry.name, entry.session.id);
 }
 
 function post(port: chrome.runtime.Port, message: WorkerToContent): void {
@@ -173,13 +274,179 @@ function post(port: chrome.runtime.Port, message: WorkerToContent): void {
   }
 }
 
-/** Ask the extension's own UI a question and wait for that port's answer. */
-function ask<T>(port: chrome.runtime.Port, build: (id: string) => WorkerToContent): Promise<T> {
-  const id = mintId('ui_');
-  const deferred = new Deferred<unknown>();
-  uiWaiters.set(id, { port, deferred });
-  post(port, build(id));
-  return deferred.promise as Promise<T>;
+// --- extension-chrome consent (ADR-009) ------------------------------------
+//
+// The question and the answer never touch page DOM. A pending question is a
+// payload the consent window fetches by id and answers over its own port; a
+// per-call approval goes to a browser notification first and falls back to
+// the same window when notifications are unavailable or unclickable.
+
+interface PendingUi {
+  id: string;
+  payload: ConsentPayload;
+  deferred: Deferred<unknown>;
+  windowId?: number;
+  notificationId?: string;
+}
+
+const pendingUi = new Map<string, PendingUi>();
+
+function settleUi(id: string, value: unknown): void {
+  const pending = pendingUi.get(id);
+  if (!pending) return;
+  pendingUi.delete(id);
+  pending.deferred.resolve(value);
+  if (pending.windowId !== undefined) void chrome.windows.remove(pending.windowId).catch(() => undefined);
+  if (pending.notificationId !== undefined) void chrome.notifications?.clear(pending.notificationId);
+}
+
+async function openUiWindow(pending: PendingUi): Promise<void> {
+  try {
+    const win = await chrome.windows.create({
+      url: chrome.runtime.getURL(`consent.html#${pending.id}`),
+      type: 'popup',
+      width: 400,
+      height: 620,
+      focused: true,
+    });
+    pending.windowId = win.id;
+  } catch {
+    // No window means no consent surface, and a missing answer is a denial.
+    settleUi(pending.id, pending.payload.kind === 'connect' ? null : false);
+  }
+}
+
+chrome.windows.onRemoved.addListener((windowId) => {
+  for (const pending of [...pendingUi.values()]) {
+    if (pending.windowId !== windowId) continue;
+    // Closing the window without answering is a denial, never a default grant.
+    settleUi(pending.id, pending.payload.kind === 'connect' ? null : false);
+  }
+});
+
+/** The connect consent: verified origin, agent picker, tool list. Resolves
+ *  with the chosen agent's pubkey, or null for a decline. */
+function askConnect(origin: string, agents: AgentRow[], request: PageConnectRequest): Promise<string | null> {
+  const pending: PendingUi = {
+    id: mintId('ui_'),
+    payload: { kind: 'connect', origin, request, agents },
+    deferred: new Deferred<unknown>(),
+  };
+  pendingUi.set(pending.id, pending);
+  void openUiWindow(pending);
+  return pending.deferred.promise.then((value) => (typeof value === 'string' ? value : null));
+}
+
+/** A per-call approval. Notification with buttons when possible; the consent
+ *  window otherwise. Never the page. */
+function askApproval(
+  origin: string,
+  who: { name: string },
+  prompt: { summary: string; call?: { name: string; arguments: Record<string, unknown> } },
+): Promise<boolean> {
+  const pending: PendingUi = {
+    id: mintId('ui_'),
+    payload: {
+      kind: 'approve',
+      origin,
+      agentName: who.name,
+      summary: prompt.summary,
+      ...(prompt.call ? { call: prompt.call } : {}),
+    },
+    deferred: new Deferred<unknown>(),
+  };
+  pendingUi.set(pending.id, pending);
+
+  if (chrome.notifications?.create) {
+    const notificationId = `agentport_${pending.id}`;
+    pending.notificationId = notificationId;
+    let detail = prompt.summary;
+    if (prompt.call) {
+      let args = '';
+      try {
+        args = JSON.stringify(prompt.call.arguments);
+      } catch {
+        args = '';
+      }
+      detail = `${prompt.summary}\n${prompt.call.name}${args && args !== '{}' ? ` ${args.slice(0, 300)}` : ''}`;
+    }
+    chrome.notifications.create(
+      notificationId,
+      {
+        type: 'basic',
+        iconUrl: 'icon128.png',
+        title: `${origin} — ${who.name}`,
+        message: detail,
+        buttons: [{ title: 'Approve' }, { title: 'Decline' }],
+        requireInteraction: true,
+        priority: 2,
+      },
+      () => {
+        if (chrome.runtime.lastError) {
+          pending.notificationId = undefined;
+          void openUiWindow(pending);
+        }
+      },
+    );
+  } else {
+    void openUiWindow(pending);
+  }
+
+  return pending.deferred.promise.then((value) => value === true);
+}
+
+chrome.notifications?.onButtonClicked.addListener((notificationId, buttonIndex) => {
+  for (const pending of pendingUi.values()) {
+    if (pending.notificationId !== notificationId) continue;
+    settleUi(pending.id, buttonIndex === 0);
+    return;
+  }
+});
+
+// Clicking the notification body opens the full card — some platforms hide
+// notification buttons, and the window shows the arguments the one-liner cut.
+chrome.notifications?.onClicked.addListener((notificationId) => {
+  for (const pending of pendingUi.values()) {
+    if (pending.notificationId !== notificationId) continue;
+    pending.notificationId = undefined;
+    void chrome.notifications?.clear(notificationId);
+    void openUiWindow(pending);
+    return;
+  }
+});
+
+chrome.notifications?.onClosed.addListener((notificationId, byUser) => {
+  for (const pending of pendingUi.values()) {
+    if (pending.notificationId !== notificationId) continue;
+    // Dismissed by the user = declined. Closed by the system (not byUser) is
+    // not an answer; keep waiting — the window fallback is one click away on
+    // the next notification, and the daemon's own timeout still bounds this.
+    if (byUser) settleUi(pending.id, false);
+    return;
+  }
+});
+
+function handleConsent(port: chrome.runtime.Port): void {
+  const reply = (message: WorkerToConsent) => {
+    try {
+      port.postMessage(message);
+    } catch {
+      // window already gone
+    }
+  };
+  port.onMessage.addListener((raw: unknown) => {
+    if (!isRecord(raw)) return;
+    const message = raw as ConsentToWorker;
+    if (message.t === 'consent.get') {
+      const pending = typeof message.id === 'string' ? pendingUi.get(message.id) : undefined;
+      if (pending) reply({ t: 'ok', rid: message.rid, value: pending.payload });
+      else reply({ t: 'err', rid: message.rid, message: 'nothing to decide — this question was already answered' });
+      return;
+    }
+    if (message.t === 'consent.answer' && typeof message.id === 'string') {
+      settleUi(message.id, message.value);
+    }
+  });
 }
 
 // --- connection flow -------------------------------------------------------
@@ -188,11 +455,53 @@ function toRow(agent: AgentSummary): AgentRow {
   return { agent: agent.agent, name: agent.name, runtime: agent.runtime, location: agent.location, online: agent.online };
 }
 
+/**
+ * What a PAGE may learn about the session (ADR-009): a generic label and a
+ * per-origin alias. The real agent name, runtime, pubkey and cert contents
+ * render only in extension chrome. The widget runs in our own isolated world
+ * behind a closed shadow root, so it keeps the real name.
+ */
+async function infoFor(entry: SessionEntry): Promise<{ agentName: string; runtime: string; alias?: string }> {
+  if (entry.from !== 'page') return { agentName: entry.session.info.agentName, runtime: entry.session.info.runtime };
+  return { agentName: 'Personal agent', runtime: 'agent', alias: await originAlias(entry.origin) };
+}
+
+function grantFor(entry: SessionEntry): { tools: ToolDefinition[]; expiresAt: number } {
+  return { tools: entry.session.grant.tools, expiresAt: entry.session.grant.expiresAt };
+}
+
+/** Streaming events and teardown follow the entry's CURRENT port and CURRENT
+ *  session object — rebinds and socket-level resumes both re-run this. */
+function wireSession(entry: SessionEntry): void {
+  const { ref, session } = entry;
+  const livePort = (): chrome.runtime.Port | null => sessions.get(ref)?.port ?? null;
+  for (const event of ['delta', 'thought', 'done', 'tool'] as const) {
+    session.on(event, (payload) => {
+      const target = livePort();
+      if (target) post(target, { t: 'event', ref, event, payload });
+    });
+  }
+  session.on('closed', (payload) => {
+    const current = sessions.get(ref);
+    // A socket-level resume swapped the session object; the old one going
+    // quiet must not tear down its replacement.
+    if (current && current.session !== session) return;
+    sessions.delete(ref);
+    clearTimeout(current?.orphanTimer);
+    if (current?.from === 'page') void clearResume(current.origin, current.name, session.id);
+    const target = current?.port ?? null;
+    if (target) {
+      refsOf(target).delete(ref);
+      post(target, { t: 'event', ref, event: 'closed', payload });
+    }
+  });
+}
+
 async function openSession(
   port: chrome.runtime.Port,
   from: Origin,
   request: PageConnectRequest,
-): Promise<{ ref: string; info: { agentName: string; runtime: string }; grant: unknown }> {
+): Promise<{ ref: string; info: unknown; grant: unknown }> {
   if (refsOf(port).size >= LIMITS.sessionsPerChannel) throw new Rejected('denied', 'too many open sessions in this tab');
 
   const origin = port.sender?.origin ?? port.sender?.url ?? 'unknown://';
@@ -200,23 +509,18 @@ async function openSession(
   const agents = await wallet.listAgents();
   if (agents.length === 0) throw new Rejected('no_agents', 'no agents paired yet');
 
-  const rows = agents.map(toRow);
-  const picked = await ask<string | null>(port, (id) => ({ t: 'ui.pick', id, agents: rows, request }));
+  // Picker + consent are ONE extension-chrome window: verified origin, agent
+  // rows, the tools with gated ones marked, Approve/Decline.
+  const picked = await askConnect(origin, agents.map(toRow), request);
   const chosen = agents.find((agent) => agent.agent === picked);
-  if (!chosen) throw new Rejected('cancelled', 'no agent chosen');
-
-  const consented = await ask<boolean>(port, (id) => ({ t: 'ui.consent', id, agent: toRow(chosen), request }));
-  if (consented !== true) throw new Rejected('denied', 'the user declined the capability grant');
+  if (!chosen) throw new Rejected('cancelled', 'the user declined the connection');
 
   const ref = mintId('s_');
+  const who = { name: chosen.name };
   const tools: SiteTool[] = request.tools.map((definition) => ({
     ...definition,
     handler: (args) => dispatchToolCall(ref, definition.name, args),
   }));
-
-  // Approvals and events must follow rebinds, so they resolve the entry's
-  // CURRENT port at fire time instead of capturing this one.
-  const livePort = (): chrome.runtime.Port | null => sessions.get(ref)?.port ?? port;
 
   // Deliberately not `createWalletProvider`: that helper builds the surface
   // descriptor without an origin, which would let the agent see the extension's
@@ -228,19 +532,9 @@ async function openSession(
     tools,
     alwaysAsk: request.alwaysAsk,
     ttlMs: request.ttlMs,
-    decide: (prompt) => {
-      const target = livePort();
-      // An approval that arrives while the page is navigating has nobody to
-      // ask. Deny — the agent can retry once the surface is back.
-      if (!target) return false;
-      return ask<boolean>(target, (id) => ({
-        t: 'ui.approve',
-        id,
-        ref,
-        summary: prompt.summary,
-        ...(prompt.call ? { call: prompt.call } : {}),
-      })).then((granted) => granted === true);
-    },
+    // Approvals go to extension chrome, so a navigating page no longer costs
+    // an automatic denial — the notification outlives the document.
+    decide: (prompt) => askApproval(origin, who, prompt),
   });
 
   const entry: SessionEntry = {
@@ -251,34 +545,99 @@ async function openSession(
     tabId: port.sender?.tab?.id,
     name: request.name,
     session,
+    token: wallet.resumeTokenFor(session.id),
+    who,
     toolNames: new Set(request.tools.map((tool) => tool.name)),
     pending: new Map(),
   };
   sessions.set(ref, entry);
   refsOf(port).add(ref);
+  wireSession(entry);
 
-  for (const event of ['delta', 'thought', 'done', 'tool'] as const) {
-    session.on(event, (payload) => {
-      const target = livePort();
-      if (target) post(target, { t: 'event', ref, event, payload });
+  // Page sessions outlive the worker: persist the resume record so a restarted
+  // worker can re-attach through the relay without any new consent.
+  if (from === 'page' && entry.token) {
+    void saveResume({
+      id: session.id,
+      token: entry.token,
+      origin,
+      name: request.name,
+      sealed: Boolean(session.info.verify),
+      expiresAt: session.grant.expiresAt,
     });
   }
-  session.on('closed', (payload) => {
-    const current = sessions.get(ref);
-    sessions.delete(ref);
-    clearTimeout(current?.orphanTimer);
-    const target = current?.port ?? null;
-    if (target) {
-      refsOf(target).delete(ref);
-      post(target, { t: 'event', ref, event: 'closed', payload });
-    }
-  });
 
-  return {
-    ref,
-    info: { agentName: session.info.agentName, runtime: session.info.runtime },
-    grant: { tools: session.grant.tools, expiresAt: session.grant.expiresAt },
-  };
+  return { ref, info: await infoFor(entry), grant: grantFor(entry) };
+}
+
+/**
+ * The fallback behind `reclaimSession`: the worker restarted and lost its
+ * table, but the relay still holds the session and storage still holds the
+ * token. Resume it, re-bind it to this page, and hand back the same generic
+ * info a fresh connect would have — no picker, no consent, because the grant
+ * the user approved never lapsed.
+ */
+async function resumeFromStore(
+  port: chrome.runtime.Port,
+  origin: string,
+  request: PageConnectRequest,
+): Promise<SessionEntry | undefined> {
+  const record = await loadResume(origin, request.name);
+  if (!record) return undefined;
+  if (record.expiresAt <= Date.now()) {
+    void clearResume(origin, request.name, record.id);
+    return undefined;
+  }
+  // A live entry bound to another tab already owns this session; the relay
+  // would refuse anyway (already_attached), so do not even race it.
+  for (const entry of sessions.values()) {
+    if (entry.origin === origin && entry.name === request.name && entry.from === 'page') return undefined;
+  }
+
+  const wallet = await getWallet();
+  const ref = mintId('s_');
+  const who = { name: 'your agent' };
+  const tools: SiteTool[] = request.tools.map((definition) => ({
+    ...definition,
+    handler: (args) => dispatchToolCall(ref, definition.name, args),
+  }));
+
+  try {
+    const { session } = await wallet.resumeSession({
+      id: record.id,
+      token: record.token,
+      tools,
+      // A sealed session must not be resumable as plaintext by a relay that
+      // "forgets" to rekey.
+      requireSealed: record.sealed,
+      decide: (prompt) => askApproval(origin, who, prompt),
+    });
+    who.name = session.info.agentName;
+    const entry: SessionEntry = {
+      ref,
+      port,
+      from: 'page',
+      origin,
+      tabId: port.sender?.tab?.id,
+      name: request.name,
+      session,
+      token: record.token,
+      who,
+      toolNames: new Set(request.tools.map((tool) => tool.name)),
+      pending: new Map(),
+    };
+    sessions.set(ref, entry);
+    refsOf(port).add(ref);
+    wireSession(entry);
+    return entry;
+  } catch (err) {
+    const reason = err instanceof ResumeError ? err.reason : '';
+    if (reason === 'not_resumable' || reason === 'grant_expired') {
+      // Proven dead. Anything else is transient — keep the token for retry.
+      void clearResume(origin, request.name, record.id);
+    }
+    return undefined;
+  }
 }
 
 /** A tool call goes back to whoever registered the tool, and nowhere else. */
@@ -324,11 +683,6 @@ function handleContent(port: chrome.runtime.Port): void {
       if (entry.from === 'page') orphanSession(entry);
       else dropSession(entry, 'frame_closed');
     }
-    for (const [id, waiter] of [...uiWaiters]) {
-      if (waiter.port !== port) continue;
-      uiWaiters.delete(id);
-      waiter.deferred.resolve(null);
-    }
   });
 }
 
@@ -346,17 +700,13 @@ async function onContentMessage(port: chrome.runtime.Port, message: ContentToWor
         return;
       }
       const origin = port.sender?.origin ?? port.sender?.url ?? 'unknown://';
-      const entry = reclaimSession(port, origin, request);
+      // Worker-held first (nothing crossed the network); relay-token second.
+      let entry = reclaimSession(port, origin, request);
+      if (!entry) entry = await resumeFromStore(port, origin, request);
       post(port, {
         t: 'ok',
         rid: message.rid,
-        value: entry
-          ? {
-              ref: entry.ref,
-              info: { agentName: entry.session.info.agentName, runtime: entry.session.info.runtime },
-              grant: { tools: entry.session.grant.tools, expiresAt: entry.session.grant.expiresAt },
-            }
-          : null,
+        value: entry ? { ref: entry.ref, info: await infoFor(entry), grant: grantFor(entry) } : null,
       });
       return;
     }
@@ -421,13 +771,6 @@ async function onContentMessage(port: chrome.runtime.Port, message: ContentToWor
       deferred.resolve(
         message.ok ? { ok: true, result: message.result } : { ok: false, error: message.error ?? 'tool failed' },
       );
-      return;
-    }
-    case 'ui.result': {
-      const waiter = uiWaiters.get(message.id);
-      if (!waiter || waiter.port !== port) return; // not this frame's question
-      uiWaiters.delete(message.id);
-      waiter.deferred.resolve(message.value);
       return;
     }
     case 'close': {
@@ -512,14 +855,17 @@ async function onPopupMessage(message: PopupToWorker): Promise<unknown> {
 // --- entry -----------------------------------------------------------------
 
 chrome.runtime.onConnect.addListener((port) => {
-  // Only our own content scripts and our own popup. `externally_connectable`
-  // is not declared in the manifest, so a web page cannot reach this listener
-  // at all; this is belt-and-braces for the day someone adds it.
+  // Only our own content scripts, our own popup, and our own consent window.
+  // `externally_connectable` is not declared in the manifest, so a web page
+  // cannot reach this listener at all; this is belt-and-braces for the day
+  // someone adds it.
   if (port.sender?.id !== chrome.runtime.id) {
     port.disconnect();
     return;
   }
   if (port.name === 'agentport.content' && port.sender.tab) handleContent(port);
   else if (port.name === 'agentport.popup' && !port.sender.tab) handlePopup(port);
+  else if (port.name === 'agentport.consent' && port.sender.url?.startsWith(chrome.runtime.getURL('consent.html')))
+    handleConsent(port);
   else port.disconnect();
 });

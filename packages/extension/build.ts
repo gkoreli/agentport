@@ -8,6 +8,7 @@
  *   inpage.js   — page world. The only bundle a site can touch; kept free of
  *                 protocol crypto so nothing key-shaped is ever parsed there.
  *   popup.js    — extension origin.
+ *   consent.js  — extension origin; the consent/approval window (ADR-009).
  */
 
 import { cp, mkdir, rm } from 'node:fs/promises';
@@ -35,6 +36,7 @@ const builds: esbuild.BuildOptions[] = [
   { ...shared, entryPoints: [join(here, 'src/content.ts')], outfile: join(outdir, 'content.js'), format: 'iife' },
   { ...shared, entryPoints: [join(here, 'src/inpage.ts')], outfile: join(outdir, 'inpage.js'), format: 'iife' },
   { ...shared, entryPoints: [join(here, 'src/popup.ts')], outfile: join(outdir, 'popup.js'), format: 'iife' },
+  { ...shared, entryPoints: [join(here, 'src/consent.ts')], outfile: join(outdir, 'consent.js'), format: 'iife' },
 ];
 
 async function copyStatic(): Promise<void> {

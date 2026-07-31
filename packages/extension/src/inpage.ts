@@ -40,10 +40,14 @@ interface PageSessionEvents {
 }
 
 /** The page's view of a session. Structurally the useful part of
- *  `AgentSession`, minus everything that would require key or socket access. */
+ *  `AgentSession`, minus everything that would require key or socket access.
+ *
+ *  `info` is deliberately generic (ADR-009): `agentName` is a label like
+ *  "Personal agent", never the user's real agent name, and `alias` is stable
+ *  for THIS origin only — two sites comparing aliases learn nothing. */
 export interface PageAgentSession {
   readonly id: string;
-  readonly info: { agentName: string; runtime: string };
+  readonly info: { agentName: string; runtime: string; alias?: string };
   readonly grant: { tools: ToolDefinition[]; expiresAt: number };
   readonly closed: boolean;
   prompt(text: string, context?: Record<string, unknown>): Promise<string>;
@@ -54,7 +58,7 @@ export interface PageAgentSession {
 
 class PageSession implements PageAgentSession {
   readonly id: string;
-  readonly info: { agentName: string; runtime: string };
+  readonly info: { agentName: string; runtime: string; alias?: string };
   readonly grant: { tools: ToolDefinition[]; expiresAt: number };
 
   readonly tools = new Map<string, SiteTool>();
@@ -64,7 +68,7 @@ class PageSession implements PageAgentSession {
 
   constructor(init: {
     ref: string;
-    info: { agentName: string; runtime: string };
+    info: { agentName: string; runtime: string; alias?: string };
     grant: { tools: ToolDefinition[]; expiresAt: number };
     tools: SiteTool[];
   }) {
@@ -261,7 +265,7 @@ window.addEventListener('message', (event: MessageEvent) => {
 
 interface ConnectResult {
   ref: string;
-  info: { agentName: string; runtime: string };
+  info: { agentName: string; runtime: string; alias?: string };
   grant: { tools: ToolDefinition[]; expiresAt: number };
 }
 

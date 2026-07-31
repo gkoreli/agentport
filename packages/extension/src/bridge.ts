@@ -122,7 +122,6 @@ export type ContentToWorker =
   | { t: 'prompt'; rid: string; ref: string; text: string; context?: Record<string, unknown> }
   | { t: 'prompt.cancel'; ref: string; promptId: string }
   | { t: 'tool.result'; ref: string; callId: string; ok: boolean; result?: unknown; error?: string }
-  | { t: 'ui.result'; id: string; value: unknown }
   | { t: 'close'; ref: string; reason?: string }
   | { t: 'status'; rid: string };
 
@@ -130,11 +129,37 @@ export type WorkerToContent =
   | { t: 'ok'; rid: string; value?: unknown }
   | { t: 'err'; rid: string; reason: string; message: string }
   | { t: 'tool.call'; ref: string; callId: string; name: string; arguments: Record<string, unknown> }
-  /** Ask the *extension's* UI — never the page's DOM — for a decision. */
-  | { t: 'ui.pick'; id: string; agents: AgentRow[]; request: PageConnectRequest }
-  | { t: 'ui.consent'; id: string; agent: AgentRow; request: PageConnectRequest }
-  | { t: 'ui.approve'; id: string; ref: string; summary: string; call?: { name: string; arguments: Record<string, unknown> } }
   | { t: 'event'; ref: string; event: string; payload: unknown };
+
+// ---------------------------------------------------------------------------
+// Consent window ⇄ service worker
+//
+// Consent and approvals render in EXTENSION chrome — a popup window on the
+// extension origin — never in page DOM (ADR-009). The page can cover an
+// overlay and pixel-perfectly fake one; it cannot draw into a browser window
+// it does not own. The window learns which question it is answering from the
+// worker, keyed by an id minted in the worker; the origin it displays came
+// from `port.sender`, never from the page.
+// ---------------------------------------------------------------------------
+
+export type ConsentPayload =
+  | { kind: 'connect'; origin: string; request: PageConnectRequest; agents: AgentRow[] }
+  | {
+      kind: 'approve';
+      origin: string;
+      agentName: string;
+      summary: string;
+      call?: { name: string; arguments: Record<string, unknown> };
+    };
+
+export type ConsentToWorker =
+  | { t: 'consent.get'; rid: string; id: string }
+  /** connect → the chosen agent pubkey or null; approve → boolean. */
+  | { t: 'consent.answer'; id: string; value: unknown };
+
+export type WorkerToConsent =
+  | { t: 'ok'; rid: string; value?: unknown }
+  | { t: 'err'; rid: string; message: string };
 
 /** Popup ⇄ service worker. Extension-origin only; still typed, still checked. */
 export type PopupToWorker =

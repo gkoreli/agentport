@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>AgentPort — consent</title>
+    <style>
+      :root { color-scheme: dark; }
+      body {
+        margin: 0; min-height: 100vh;
+        background: #121215; color: #e8e6e3;
+        font: 13px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+      }
+      main { display: flex; flex-direction: column; min-height: 100vh; }
+      header {
+        display: flex; align-items: center; gap: 8px;
+        padding: 12px 16px; border-bottom: 1px solid #26262c; position: sticky; top: 0; background: #121215;
+      }
+      header span { margin-left: auto; color: #9a97a3; font-size: 11px; }
+      section { padding: 12px 16px; border-bottom: 1px solid #1e1e24; }
+      h2 { margin: 10px 0 6px; font-size: 11px; text-transform: uppercase; letter-spacing: .07em; color: #9a97a3; }
+      h2:first-child { margin-top: 0; }
+      .origin { display: grid; gap: 2px; padding: 10px 12px; background: #1a1a1f; border: 1px solid #26262c; border-radius: 10px; }
+      .origin b { word-break: break-all; }
+      .origin small { color: #4ade80; font-size: 11px; }
+      .surface { margin: 10px 0 0; }
+      .agent {
+        display: flex; gap: 10px; align-items: center; text-align: left; width: 100%;
+        background: #1d1d22; border: 1px solid #2c2c33; border-radius: 10px;
+        padding: 10px 12px; margin: 0 0 6px; color: inherit; font: inherit; cursor: pointer;
+      }
+      .agent[aria-selected="true"] { border-color: #7c6cff; background: #23213a; }
+      .agent:disabled { opacity: .45; cursor: not-allowed; }
+      .agent .grow { display: grid; gap: 1px; }
+      .agent small { color: #9a97a3; font-size: 11px; }
+      .dot { width: 9px; height: 9px; border-radius: 50%; background: #3a3a44; flex: none; }
+      .dot.on { background: #4ade80; box-shadow: 0 0 6px #4ade8066; }
+      ul { margin: 0; padding-left: 18px; }
+      li { margin: 2px 0; }
+      li.ask { color: #fbbf24; }
+      .hint { color: #9a97a3; font-size: 11px; }
+      pre {
+        margin: 10px 0 0; padding: 10px; background: #0f0f12; border: 1px solid #2c2c33;
+        border-radius: 8px; overflow: auto; max-height: 200px; font-size: 11px; white-space: pre-wrap; word-break: break-word;
+      }
+      footer {
+        margin-top: auto; display: flex; gap: 8px; justify-content: flex-end;
+        padding: 12px 16px; border-top: 1px solid #26262c; position: sticky; bottom: 0; background: #121215;
+      }
+      button {
+        background: #24242b; border: 1px solid #33333c; border-radius: 8px;
+        padding: 8px 14px; color: inherit; font: inherit; cursor: pointer;
+      }
+      button.primary { background: #7c6cff; border-color: #7c6cff; color: #fff; }
+      button:disabled { opacity: .4; cursor: not-allowed; }
+      button:focus-visible { outline: 2px solid #7c6cff; outline-offset: 1px; }
+    </style>
+  </head>
+  <body>
+    <script src="consent.js"></script>
+  </body>
+</html>

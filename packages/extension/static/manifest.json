@@ -4,7 +4,8 @@
   "version": "0.0.1",
   "description": "Bring your own agent to any website. navigator.agent, with the wallet outside the page.",
   "minimum_chrome_version": "116",
-  "permissions": ["storage"],
+  "permissions": ["storage", "notifications", "alarms"],
+  "icons": { "128": "icon128.png" },
   "host_permissions": ["http://*/*", "https://*/*"],
   "background": {
     "service_worker": "sw.js",

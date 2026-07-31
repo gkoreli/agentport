@@ -33,7 +33,7 @@ import {
   type WorkerToContent,
 } from './bridge.js';
 import { createOverlay, type Overlay } from './overlay.js';
-import { describeCall, genericPageTools } from './pagetools.js';
+import { genericPageTools } from './pagetools.js';
 
 const CHANNEL = mintId('ch_');
 const TOOL_CALL_TIMEOUT_MS = 30_000;
@@ -260,25 +260,6 @@ function onWorkerMessage(message: WorkerToContent): void {
     }
     case 'tool.call': {
       void runToolCall(message);
-      return;
-    }
-    case 'ui.pick': {
-      void overlay()
-        .pick(message.agents, message.request)
-        .then((value) => tell({ t: 'ui.result', id: message.id, value }));
-      return;
-    }
-    case 'ui.consent': {
-      void overlay()
-        .consent(message.agent, message.request)
-        .then((value) => tell({ t: 'ui.result', id: message.id, value }));
-      return;
-    }
-    case 'ui.approve': {
-      const detail = message.call ? describeCall(message.call.name, message.call.arguments) : undefined;
-      void overlay()
-        .approve({ summary: message.summary, ...(message.call ? { call: message.call } : {}), ...(detail ? { detail } : {}) })
-        .then((value) => tell({ t: 'ui.result', id: message.id, value }));
       return;
     }
     case 'event': {

@@ -41,12 +41,13 @@ scripts need a page reload too.
 
 | file | context | holds |
 |---|---|---|
-| `src/sw.ts` | service worker | the user key, the relay socket, sessions, grants |
+| `src/sw.ts` | service worker | the user key, the relay socket, sessions, grants, consent routing |
 | `src/content.ts` | isolated world | the mediator: validation, ownership tables, tool routing |
-| `src/overlay.ts` | isolated world | picker / consent / approval UI in a closed shadow root |
+| `src/overlay.ts` | isolated world | the Job 2 widget (status + chat) in a closed shadow root |
 | `src/pagetools.ts` | isolated world | the generic `page.*` fallback toolset |
 | `src/inpage.ts` | page world | `navigator.agent`, WebMCP harvesting. No authority |
 | `src/popup.ts` | extension origin | identity, relay, pairing, what is attached |
+| `src/consent.ts` | extension origin | the consent/approval window (`chrome.windows.create`) |
 | `src/bridge.ts` | shared | the message vocabulary and every validator |
 
 ## The trust boundary
@@ -84,12 +85,24 @@ Rules the two boundaries enforce, mirroring the invariants in `AGENTS.md`:
    generic `page.*` call runs in the isolated world; a call for a name that is
    not in the table is refused before it leaves the content script. The grant is
    enforced again in the worker and again on the daemon.
-6. **Consent and approval never render in page DOM.** The picker, the capability
-   screen and every per-call approval live in a **closed** shadow root created
-   by the content script. The site cannot read what is about to be approved and
-   cannot forge a decision — a synthetic click in page script does not reach
-   into a closed root, and the decision travels over the port, not the DOM.
-   Escape means deny; a dropped port resolves outstanding questions as denials.
+6. **Consent and approval render in extension chrome, never in-page**
+   (ADR-009). A connection request opens a popup **window** on the extension
+   origin (`chrome.windows.create`) showing the origin as Chrome reported it
+   (`port.sender`, labelled verified), the agent picker with online/offline,
+   and the requested tools with gated ones marked. Per-call approvals go to a
+   `chrome.notifications` notification with Approve/Decline buttons, falling
+   back to the same window when notifications are unavailable (clicking the
+   notification body also opens the window for full arguments). A site can
+   cover any in-page overlay and imitate any in-page dialog; it cannot draw,
+   read, or click a browser window it does not own. The in-page widget shows
+   status only — it never renders an approve control. Escape and a closed
+   window both mean deny; a missing answer is a denial, never a default grant.
+7. **What a page learns cannot correlate across origins** (ADR-009). The
+   session info handed to a page reports `agentName: "Personal agent"` and a
+   generic runtime — never the real agent name, pubkeys, or cert contents,
+   which render only in extension chrome. For the site's own UX continuity the
+   info carries an `alias` derived as `hash(per-install random seed + origin)`:
+   stable for that origin across visits, meaningless to any other origin.
 
 Things the boundary deliberately does *not* claim to stop:
 
@@ -147,22 +160,46 @@ Known caveat: nisli builds DOM by assigning to `template.innerHTML`. On a page
 that enforces `require-trusted-types-for 'script'`, isolated-world scripts are
 exempted by Chrome today, but that exemption is the kind of thing that changes.
 
+## One-tap connect and refresh-resume
+
+`navigator.agent` matches the drop-in provider's surface: `isAvailable()`,
+`connect(request)`, `resume(request)`. Site tool handlers run in the page; a
+`tool.call` round-trips sw → content → inpage → page handler and back, checked
+against the grant at every hop.
+
+A page refresh (or navigation within the origin) resumes without any new
+consent, in two layers:
+
+1. **Worker-held re-binding.** The service worker owns the relay socket and
+   the session; a navigating document only orphans its binding. The next
+   document from the same origin + surface reclaims it (2-minute grace) —
+   nothing crosses the network.
+2. **Relay-token resume.** If the worker itself was evicted and restarted, a
+   resume record `{sessionId, token, sealed}` in `chrome.storage.session`
+   (extension contexts only, dies with the browser) lets it re-attach via
+   `wallet.resumeSession`, with `requireSealed` set so a sealed session can
+   never be downgraded to plaintext by a forgetful relay.
+
+The socket itself is kept alive by a 20s storage touch while sessions exist
+plus a `chrome.alarms` wake, and a dropped socket is redialed with backoff
+(daemon-style); worker-held sessions are re-attached in place, so the page
+keeps its ref and never notices.
+
 ## What is stubbed
 
-- **Approvals render in the page's viewport, not in browser chrome.** A closed
-  shadow root is the strongest thing a content script has; a site can still draw
-  over it. The endgame is `chrome.windows.create` for approvals.
 - **No key protection at rest.** `ensureUserKey` writes a raw hex key. Passkey
   wrapping, or delegating signing to a NIP-46 bunker, changes `src/storage.ts`
   and nothing else.
 - **No revocation UI.** The popup lists agents and live sessions; it cannot
   unpair one. `CertStore.remove` on the relay still has no caller.
-- **Reconnect is lazy and lossy.** A dropped relay socket tears down every live
-  session; the next request builds a new wallet. Session resume is the item on
-  the roadmap that fixes this properly.
-- **MV3 idle eviction.** A 20s heartbeat keeps the worker alive while sessions
-  exist. Chrome 116+ also counts WebSocket traffic as activity. A long silent
-  session on an older Chrome can still be evicted.
+- **MV3 idle eviction.** A 20s heartbeat plus a 1-minute `chrome.alarms` wake
+  keep the worker and socket alive while sessions exist. Chrome 116+ also
+  counts WebSocket traffic as activity. A long silent session can still be
+  evicted; the alarm redials and the resume records re-attach on the next
+  wake, so the session survives the gap rather than the socket.
+- **Notification buttons are platform-dependent.** Some OSes collapse
+  notification actions; clicking the notification body opens the consent
+  window as the fallback decision surface.
 - **`isAvailable()` answers from local state**, not from the relay: dialing the
   relay to answer a page's probe would let any site force a socket and learn
   that the user has agents before consenting to anything.
