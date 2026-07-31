@@ -106,6 +106,13 @@ class PageSession implements PageAgentSession {
     send({ t: 'prompt.cancel', ref: this.id, promptId });
   }
 
+  /** The conversation, replayed from the agent's own store via the wallet. */
+  history(): Promise<unknown[]> {
+    return post<unknown[]>({ t: 'history', rid: rid('r_'), ref: this.id }).then((entries) =>
+      Array.isArray(entries) ? entries : [],
+    );
+  }
+
   close(reason = 'user_closed'): void {
     if (this.#closed) return;
     send({ t: 'close', ref: this.id, reason });
@@ -281,6 +288,32 @@ const provider = {
         ...(request.ttlMs ? { ttlMs: request.ttlMs } : {}),
       },
     });
+    const session = new PageSession({ ref: result.ref, info: result.info, grant: result.grant, tools });
+    sessions.set(result.ref, session);
+    session.on('closed', () => sessions.delete(result.ref));
+    return session;
+  },
+
+  /**
+   * Reclaim the session this origin+surface already holds, if the wallet kept
+   * one alive across a navigation. No picker, no consent — the original grant
+   * never lapsed. Returns null when there is nothing to resume.
+   */
+  async resume(request: AgentConnectRequest): Promise<PageAgentSession | null> {
+    const tools = (request.tools ?? []) as SiteTool[];
+    const result = await post<ConnectResult | null>({
+      t: 'resume',
+      rid: rid('r_'),
+      request: {
+        name: request.name,
+        ...(request.route ? { route: request.route } : {}),
+        ...(request.context ? { context: request.context } : {}),
+        tools: tools.map(({ handler: _handler, ...definition }) => definition),
+        ...(request.alwaysAsk ? { alwaysAsk: request.alwaysAsk } : {}),
+        ...(request.ttlMs ? { ttlMs: request.ttlMs } : {}),
+      },
+    });
+    if (!result) return null;
     const session = new PageSession({ ref: result.ref, info: result.info, grant: result.grant, tools });
     sessions.set(result.ref, session);
     session.on('closed', () => sessions.delete(result.ref));

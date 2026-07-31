@@ -138,6 +138,19 @@ window.addEventListener('message', (event: MessageEvent) => {
       void connectForPage(body.rid, body.request);
       return;
     }
+    case 'resume': {
+      void resumeForPage(body.rid, body.request);
+      return;
+    }
+    case 'history': {
+      const record = ownedBy(body.ref, 'page');
+      if (!record) return void toPage({ t: 'err', rid: body.rid, reason: 'denied', message: 'unknown session' });
+      request<unknown>((rid) => ({ t: 'history', rid, ref: record.ref })).then(
+        (entries) => toPage({ t: 'ok', rid: body.rid, value: entries }),
+        (err: Error) => toPage({ t: 'err', rid: body.rid, reason: 'error', message: err.message }),
+      );
+      return;
+    }
     case 'prompt': {
       const record = ownedBy(body.ref, 'page');
       if (!record) return void toPage({ t: 'err', rid: body.rid, reason: 'denied', message: 'unknown session' });
@@ -197,6 +210,30 @@ async function connectForPage(pageRid: string, request_: PageConnectRequest): Pr
       owner: 'page',
       routes: new Map(request_.tools.map((tool) => [tool.name, 'page' as ToolRoute])),
     });
+    toPage({ t: 'ok', rid: pageRid, value });
+  } catch (err) {
+    const reason = err instanceof Error && 'reason' in err ? String((err as { reason: unknown }).reason) : 'denied';
+    toPage({ t: 'err', rid: pageRid, reason, message: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+async function resumeForPage(pageRid: string, request_: PageConnectRequest): Promise<void> {
+  try {
+    const value = await request<{ ref: string; info: unknown; grant: unknown } | null>((rid) => ({
+      t: 'resume',
+      rid,
+      from: 'page',
+      request: request_,
+    }));
+    if (value) {
+      // Same bookkeeping as a fresh connect: tool calls for this ref route to
+      // the page that just re-declared the handlers.
+      records.set(value.ref, {
+        ref: value.ref,
+        owner: 'page',
+        routes: new Map(request_.tools.map((tool) => [tool.name, 'page' as ToolRoute])),
+      });
+    }
     toPage({ t: 'ok', rid: pageRid, value });
   } catch (err) {
     const reason = err instanceof Error && 'reason' in err ? String((err as { reason: unknown }).reason) : 'denied';

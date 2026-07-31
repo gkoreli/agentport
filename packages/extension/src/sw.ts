@@ -75,15 +75,26 @@ setInterval(() => {
 
 interface SessionEntry {
   ref: string;
-  port: chrome.runtime.Port;
+  /** Null while orphaned: the document went away but the session survives. */
+  port: chrome.runtime.Port | null;
   from: Origin;
   origin: string;
+  /** The surface name from the connect request — the reclaim key with origin. */
+  name: string;
   session: AgentSession;
   /** Tool names the requester registered. A tool call is only ever dispatched
    *  to whoever declared it, and results are only accepted for a call we made. */
   toolNames: Set<string>;
   pending: Map<string, Deferred<{ ok: boolean; result?: unknown; error?: string }>>;
+  orphanTimer?: ReturnType<typeof setTimeout>;
 }
+
+/**
+ * How long an orphaned session waits for its page to come back. Navigation and
+ * refresh land well inside this; a closed tab costs one grace window before
+ * the daemon sees the close.
+ */
+const ORPHAN_GRACE_MS = 2 * 60 * 1000;
 
 const sessions = new Map<string, SessionEntry>();
 const portSessions = new WeakMap<chrome.runtime.Port, Set<string>>();
@@ -103,9 +114,42 @@ function lookup(port: chrome.runtime.Port, ref: unknown): SessionEntry | undefin
   return entry && entry.port === port ? entry : undefined;
 }
 
+/**
+ * Navigation is not a goodbye. The document died, but the wallet — and the
+ * relay session it holds — did not, so the session is parked instead of
+ * closed and the next document from the same origin may reclaim it (the
+ * grant's surface + TTL never lapsed, so no re-consent is asked).
+ */
+function orphanSession(entry: SessionEntry): void {
+  if (entry.port) refsOf(entry.port).delete(entry.ref);
+  entry.port = null;
+  entry.orphanTimer = setTimeout(() => {
+    const current = sessions.get(entry.ref);
+    if (current && current.port === null) dropSession(current, 'frame_closed');
+  }, ORPHAN_GRACE_MS);
+}
+
+function reclaimSession(port: chrome.runtime.Port, origin: string, request: PageConnectRequest): SessionEntry | undefined {
+  for (const entry of sessions.values()) {
+    if (entry.port !== null) continue;
+    if (entry.origin !== origin || entry.name !== request.name || entry.from !== 'page') continue;
+    if (entry.session.closed || entry.session.grant.expiresAt <= Date.now()) continue;
+    clearTimeout(entry.orphanTimer);
+    entry.orphanTimer = undefined;
+    entry.port = port;
+    // The new document re-declared its tools; the dispatch allowlist follows
+    // the live declaration, still bounded by the original grant on the wire.
+    entry.toolNames = new Set(request.tools.map((tool) => tool.name));
+    refsOf(port).add(entry.ref);
+    return entry;
+  }
+  return undefined;
+}
+
 function dropSession(entry: SessionEntry, reason: string): void {
   sessions.delete(entry.ref);
-  refsOf(entry.port).delete(entry.ref);
+  clearTimeout(entry.orphanTimer);
+  if (entry.port) refsOf(entry.port).delete(entry.ref);
   for (const deferred of entry.pending.values()) deferred.resolve({ ok: false, error: `session closed: ${reason}` });
   entry.pending.clear();
   entry.session.close(reason);
@@ -160,6 +204,10 @@ async function openSession(
     handler: (args) => dispatchToolCall(ref, definition.name, args),
   }));
 
+  // Approvals and events must follow rebinds, so they resolve the entry's
+  // CURRENT port at fire time instead of capturing this one.
+  const livePort = (): chrome.runtime.Port | null => sessions.get(ref)?.port ?? port;
+
   // Deliberately not `createWalletProvider`: that helper builds the surface
   // descriptor without an origin, which would let the agent see the extension's
   // own origin instead of the site it was attached to. The picker/consent steps
@@ -170,14 +218,19 @@ async function openSession(
     tools,
     alwaysAsk: request.alwaysAsk,
     ttlMs: request.ttlMs,
-    decide: (prompt) =>
-      ask<boolean>(port, (id) => ({
+    decide: (prompt) => {
+      const target = livePort();
+      // An approval that arrives while the page is navigating has nobody to
+      // ask. Deny — the agent can retry once the surface is back.
+      if (!target) return false;
+      return ask<boolean>(target, (id) => ({
         t: 'ui.approve',
         id,
         ref,
         summary: prompt.summary,
         ...(prompt.call ? { call: prompt.call } : {}),
-      })).then((granted) => granted === true),
+      })).then((granted) => granted === true);
+    },
   });
 
   const entry: SessionEntry = {
@@ -185,6 +238,7 @@ async function openSession(
     port,
     from,
     origin,
+    name: request.name,
     session,
     toolNames: new Set(request.tools.map((tool) => tool.name)),
     pending: new Map(),
@@ -193,12 +247,20 @@ async function openSession(
   refsOf(port).add(ref);
 
   for (const event of ['delta', 'thought', 'done', 'tool'] as const) {
-    session.on(event, (payload) => post(port, { t: 'event', ref, event, payload }));
+    session.on(event, (payload) => {
+      const target = livePort();
+      if (target) post(target, { t: 'event', ref, event, payload });
+    });
   }
   session.on('closed', (payload) => {
+    const current = sessions.get(ref);
     sessions.delete(ref);
-    refsOf(port).delete(ref);
-    post(port, { t: 'event', ref, event: 'closed', payload });
+    clearTimeout(current?.orphanTimer);
+    const target = current?.port ?? null;
+    if (target) {
+      refsOf(target).delete(ref);
+      post(target, { t: 'event', ref, event: 'closed', payload });
+    }
   });
 
   return {
@@ -214,6 +276,8 @@ function dispatchToolCall(ref: string, name: string, args: Record<string, unknow
   if (!entry) throw new Error('session is gone');
   if (!entry.toolNames.has(name)) throw new Error(`tool ${name} is not in this grant`);
   if (entry.pending.size >= LIMITS.pendingCallsPerSession) throw new Error('too many tool calls in flight');
+
+  if (!entry.port) throw new Error('the page is navigating; retry in a moment');
 
   const callId = mintId('c_');
   const deferred = new Deferred<{ ok: boolean; result?: unknown; error?: string }>();
@@ -243,7 +307,11 @@ function handleContent(port: chrome.runtime.Port): void {
   port.onDisconnect.addListener(() => {
     for (const ref of [...refsOf(port)]) {
       const entry = sessions.get(ref);
-      if (entry) dropSession(entry, 'frame_closed');
+      if (!entry) continue;
+      // The extension's own widget sessions die with their document — only
+      // page surfaces navigate and come back.
+      if (entry.from === 'page') orphanSession(entry);
+      else dropSession(entry, 'frame_closed');
     }
     for (const [id, waiter] of [...uiWaiters]) {
       if (waiter.port !== port) continue;
@@ -258,6 +326,40 @@ async function onContentMessage(port: chrome.runtime.Port, message: ContentToWor
     case 'status': {
       const pubkey = await userPublicKey();
       post(port, { t: 'ok', rid: message.rid, value: { hasIdentity: Boolean(pubkey), relay: await relayUrl() } });
+      return;
+    }
+    case 'resume': {
+      const request = sanitizeConnectRequest(message.request);
+      if (!request) {
+        post(port, { t: 'err', rid: message.rid, reason: 'denied', message: 'malformed connect request' });
+        return;
+      }
+      const origin = port.sender?.origin ?? port.sender?.url ?? 'unknown://';
+      const entry = reclaimSession(port, origin, request);
+      post(port, {
+        t: 'ok',
+        rid: message.rid,
+        value: entry
+          ? {
+              ref: entry.ref,
+              info: { agentName: entry.session.info.agentName, runtime: entry.session.info.runtime },
+              grant: { tools: entry.session.grant.tools, expiresAt: entry.session.grant.expiresAt },
+            }
+          : null,
+      });
+      return;
+    }
+    case 'history': {
+      const entry = lookup(port, message.ref);
+      if (!entry) {
+        post(port, { t: 'err', rid: message.rid, reason: 'denied', message: 'unknown session' });
+        return;
+      }
+      entry.session.history().then(
+        (entries) => post(port, { t: 'ok', rid: message.rid, value: entries }),
+        (err: unknown) =>
+          post(port, { t: 'err', rid: message.rid, reason: 'error', message: err instanceof Error ? err.message : String(err) }),
+      );
       return;
     }
     case 'connect': {

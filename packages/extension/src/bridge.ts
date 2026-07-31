@@ -64,6 +64,9 @@ export interface PageConnectRequest {
 export type PageOutbound =
   | { t: 'available'; rid: string }
   | { t: 'connect'; rid: string; request: PageConnectRequest }
+  /** Reclaim a session this origin+surface already holds, after a navigation. */
+  | { t: 'resume'; rid: string; request: PageConnectRequest }
+  | { t: 'history'; rid: string; ref: string }
   | { t: 'prompt'; rid: string; ref: string; text: string; context?: Record<string, unknown> }
   | { t: 'prompt.cancel'; ref: string; promptId: string }
   | { t: 'tool.result'; callId: string; ok: boolean; result?: unknown; error?: string }
@@ -114,6 +117,8 @@ export interface AgentRow {
 
 export type ContentToWorker =
   | { t: 'connect'; rid: string; from: Origin; request: PageConnectRequest }
+  | { t: 'resume'; rid: string; from: Origin; request: PageConnectRequest }
+  | { t: 'history'; rid: string; ref: string }
   | { t: 'prompt'; rid: string; ref: string; text: string; context?: Record<string, unknown> }
   | { t: 'prompt.cancel'; ref: string; promptId: string }
   | { t: 'tool.result'; ref: string; callId: string; ok: boolean; result?: unknown; error?: string }

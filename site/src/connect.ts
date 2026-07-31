@@ -45,6 +45,15 @@ const RELAY = relayUrl();
  */
 const RESUME_KEY = 'agentport.session';
 
+/**
+ * Keyed per surface: a tab that moves between two surfaces of one site (or a
+ * user who bounces between demo pages) holds one resumable session per
+ * surface, instead of each connect overwriting the last one.
+ */
+function resumeKeyFor(surface: string): string {
+  return `${RESUME_KEY}:${surface}`;
+}
+
 interface ResumeRecord {
   id: string;
   token: string;
@@ -56,15 +65,15 @@ interface ResumeRecord {
 
 function rememberSession(record: ResumeRecord): void {
   try {
-    sessionStorage.setItem(RESUME_KEY, JSON.stringify(record));
+    sessionStorage.setItem(resumeKeyFor(record.surface), JSON.stringify(record));
   } catch (err) {
     console.warn('[agentport] could not persist session for resume', err);
   }
 }
 
-function forgetSession(): void {
+function forgetSession(surface: string): void {
   try {
-    sessionStorage.removeItem(RESUME_KEY);
+    sessionStorage.removeItem(resumeKeyFor(surface));
   } catch {
     // storage disabled; resume simply will not be offered
   }
@@ -72,7 +81,7 @@ function forgetSession(): void {
 
 function rememberedSession(surface: string): ResumeRecord | null {
   try {
-    const raw = sessionStorage.getItem(RESUME_KEY);
+    const raw = sessionStorage.getItem(resumeKeyFor(surface));
     if (!raw) return null;
     const record = JSON.parse(raw) as ResumeRecord;
     if (record.relay !== RELAY || record.surface !== surface) return null;
@@ -114,11 +123,11 @@ const provider: AgentProvider & {
         decide: () => true,
         requireSealed: record.sealed,
       });
-      resumed.session.on('closed', forgetSession);
+      resumed.session.on('closed', () => forgetSession(request.name));
       return resumed;
     } catch (err) {
       console.info('[agentport] previous session is gone, starting fresh', err);
-      forgetSession();
+      forgetSession(request.name);
       wallet.close();
       return null;
     }
@@ -164,7 +173,7 @@ const provider: AgentProvider & {
           sealed: Boolean(session.info.verify),
         });
       }
-      session.on('closed', forgetSession);
+      session.on('closed', () => forgetSession(request.name));
       modal.status('connected');
       setTimeout(() => modal.close(), 400);
       return session;
@@ -191,8 +200,19 @@ const AgentPort = {
   provider,
   getProvider,
   connect: (request: AgentConnectRequest) => getProvider().connect(request),
-  /** Only the drop-in provider can resume; an extension manages its own. */
-  resume: (request: AgentConnectRequest) => provider.resume(request),
+  /**
+   * Resume follows the same discovery as connect: an installed wallet keeps
+   * sessions alive across navigations and hands the reclaimed one back; the
+   * drop-in falls back to its per-tab sessionStorage token.
+   */
+  resume: async (request: AgentConnectRequest) => {
+    const installed = (navigator as unknown as { agent?: AgentProvider & { resume?: (r: AgentConnectRequest) => Promise<AgentSession | null> } }).agent;
+    if (installed?.resume) {
+      const session = await installed.resume(request);
+      return session ? { session, missed: 0 } : null;
+    }
+    return provider.resume(request);
+  },
 };
 
 (globalThis as unknown as { AgentPort: typeof AgentPort }).AgentPort = AgentPort;
