@@ -4,6 +4,7 @@
     { "path": "packages/protocol" },
     { "path": "packages/relay" },
     { "path": "packages/daemon" },
-    { "path": "packages/client" }
+    { "path": "packages/client" },
+    { "path": "packages/agui" }
   ]
 }
