@@ -505,9 +505,20 @@ export class AgentWallet extends Emitter<WalletEvents> {
     if (frame.t === 'error') this.#log(`relay error ${frame.code}: ${frame.message}`);
   }
 
-  /** Single-shot request/response correlation by frame type. */
-  #await(...types: string[]): Promise<Frame> {
-    return this.#request(...types).promise;
+  /**
+   * Single-shot request/response correlation by frame type. Always withdraws
+   * BOTH queue entries once settled: a deferred registered under two types
+   * and answered by one used to leave a stale twin that silently consumed the
+   * next frame of the other type — an off-by-one that starved every waiter
+   * behind it. Correlation waiters must never outlive their answer.
+   */
+  async #await(...types: string[]): Promise<Frame> {
+    const request = this.#request(...types);
+    try {
+      return await request.promise;
+    } finally {
+      request.cancel();
+    }
   }
 
   /** Like #await, but cancellable: a failed attempt must withdraw its waiter
