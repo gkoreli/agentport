@@ -156,6 +156,20 @@ things to know before touching it:
   set" section of `site/public/styles.css` styles `[data-slot]` selectors in
   the site's own palette. Do not add a Tailwind pipeline for this.
 
+## Tenets
+
+- **No legacy, no parallel paths.** When new code replaces an approach, the
+  old path is deleted IN THE SAME CHANGE — never deprecated, never kept
+  "just in case", never left as a second way to do the same thing. If a
+  fallback must exist (e.g. the connect-code flow beside one-tap), it is a
+  *documented tier* with its own reason to live, not leftovers. A PR that
+  adds an abstraction and keeps the hand-rolled version alongside is
+  incomplete. Corollary: new abstractions must be consumed by our own code
+  immediately (dogfooding) — an adapter nobody calls is decoration.
+- **Production grade or not at all.** No silent failures, no swallowed
+  errors, no vacuous tests (a test whose assertions cannot fail proves
+  nothing), no security by assertion — invariants get checks in e2e.
+
 ## Conventions
 
 - ESM everywhere, `.js` extensions in relative imports (TS `Bundler`
