@@ -3,10 +3,13 @@
   "version": "0.1.2",
   "description": "Bring your own agent to any website. Run this where your agent lives; pair once from your browser.",
   "license": "Apache-2.0",
-  "repository": "github:gkoreli/agentport",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gkoreli/agentport.git"
+  },
   "type": "module",
   "bin": {
-    "agentport": "./dist/main.js"
+    "agentport": "dist/main.js"
   },
   "files": [
     "dist"
