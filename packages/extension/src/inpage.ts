@@ -278,7 +278,7 @@ const provider = {
   },
 
   async connect(request: AgentConnectRequest): Promise<PageAgentSession> {
-    const tools = (request.tools ?? []) as SiteTool[];
+    const tools = mergeWebMcpTools((request.tools ?? []) as SiteTool[]);
     const result = await post<ConnectResult>({
       t: 'connect',
       rid: rid('r_'),
@@ -304,7 +304,7 @@ const provider = {
    * never lapsed. Returns null when there is nothing to resume.
    */
   async resume(request: AgentConnectRequest): Promise<PageAgentSession | null> {
-    const tools = (request.tools ?? []) as SiteTool[];
+    const tools = mergeWebMcpTools((request.tools ?? []) as SiteTool[]);
     const result = await post<ConnectResult | null>({
       t: 'resume',
       rid: rid('r_'),
@@ -335,12 +335,12 @@ window.dispatchEvent(new Event('agent#initialized'));
 // ---------------------------------------------------------------------------
 // WebMCP interop
 //
-// `navigator.modelContext` is the site telling *some* agent what it can do. If
-// the site already speaks it, we would rather lend the agent those tools than
-// our generic DOM ones — the site's own tools carry intent, ours only carry
-// pixels. Registrations live in the page world, so harvesting has to happen
-// here and calls have to execute here; the content script only sees names,
-// descriptions and schemas.
+// `document.modelContext` (formerly `navigator.modelContext`) is the site
+// telling *some* agent what it can do. If the site already speaks it, we would
+// rather lend the agent those tools than our generic DOM ones — the site's own
+// tools carry intent, ours only carry pixels. Registrations live in the page
+// world, so harvesting has to happen here and calls have to execute here; the
+// content script only sees names, descriptions and schemas.
 // ---------------------------------------------------------------------------
 
 const webmcpTools = new Map<string, SiteTool>();
@@ -359,18 +359,23 @@ function adoptWebMcpTools(list: unknown): void {
     if (!isRecord(entry) || typeof entry.name !== 'string' || typeof entry.execute !== 'function') continue;
     const execute = entry.execute as (args: Record<string, unknown>) => unknown;
     const annotations = isRecord(entry.annotations) ? entry.annotations : {};
-    const readOnly = annotations['readOnlyHint'] === true;
     webmcpTools.set(entry.name, {
       name: entry.name,
       description: typeof entry.description === 'string' ? entry.description : entry.name,
       inputSchema: isRecord(entry.inputSchema) ? entry.inputSchema : { type: 'object' },
-      // A WebMCP tool the site says is read-only still mutates nothing we can
-      // verify, so anything not explicitly read-only is gated.
-      ...(readOnly ? {} : { requiresApproval: true }),
-      handler: (args) => execute(args),
+      // A site's tool is ungated by default. Only explicit destructive
+      // metadata adds AgentPort's per-call approval boundary.
+      ...(annotations['destructiveHint'] === true ? { requiresApproval: true } : {}),
+      handler: (args) => execute.call(entry, args),
     });
   }
   publishWebMcpTools();
+}
+
+function mergeWebMcpTools(explicit: readonly SiteTool[]): SiteTool[] {
+  const merged = new Map(webmcpTools);
+  for (const tool of explicit) merged.set(tool.name, tool);
+  return [...merged.values()];
 }
 
 function publishWebMcpTools(): void {
@@ -386,15 +391,23 @@ interface ModelContextLike {
 }
 
 function observeModelContext(): void {
+  const doc = document as Document & { modelContext?: ModelContextLike };
   const nav = navigator as Navigator & { modelContext?: ModelContextLike };
-  const existing = nav.modelContext;
+  // Chrome moved WebMCP onto document; the navigator spelling remains only as
+  // a compatibility fallback for older implementations and site polyfills.
+  const existing = isRecord(doc.modelContext)
+    ? doc.modelContext
+    : isRecord(nav.modelContext)
+      ? nav.modelContext
+      : undefined;
 
-  if (existing && typeof existing === 'object') {
+  if (existing) {
     // A real implementation is present: wrap it, never replace it. We only want
     // to see what the site registers.
     const provideContext = existing.provideContext;
     if (typeof provideContext === 'function') {
       existing.provideContext = function (this: unknown, context: { tools?: unknown }) {
+        webmcpTools.clear();
         adoptWebMcpTools(context?.tools);
         return provideContext.call(this, context);
       };
@@ -409,9 +422,9 @@ function observeModelContext(): void {
     return;
   }
 
-  // No implementation: stand one up so WebMCP-aware sites get AgentPort for
-  // free. Degrades to nothing if the browser later ships its own — this shim
-  // is `configurable`.
+  // No implementation: stand one up under both spellings so WebMCP-aware sites
+  // get AgentPort on browsers from either side of the API move. Both names
+  // share one registry and remain configurable for a later native install.
   const shim: ModelContextLike = {
     provideContext(context) {
       webmcpTools.clear();
@@ -423,6 +436,7 @@ function observeModelContext(): void {
       return { unregister: () => { webmcpTools.delete(name); publishWebMcpTools(); } };
     },
   };
+  Object.defineProperty(document, 'modelContext', { value: shim, configurable: true, enumerable: false });
   Object.defineProperty(navigator, 'modelContext', { value: shim, configurable: true, enumerable: false });
 }
 

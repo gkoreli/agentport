@@ -25,6 +25,7 @@ import { ResumeError,
 } from '@agentport/client';
 import { generateKeyPair } from '@agentport/protocol';
 import { openConnectModal } from './modal.js';
+import { createWebMcpHarvester } from './webmcp.js';
 
 function relayUrl(): string {
   const configured = document.currentScript?.getAttribute('data-relay');
@@ -33,6 +34,10 @@ function relayUrl(): string {
 }
 
 const RELAY = relayUrl();
+const webMcp = createWebMcpHarvester({
+  document: document as Document & { modelContext?: unknown },
+  navigator: navigator as Navigator & { modelContext?: unknown },
+});
 
 /**
  * Where a resumable session is remembered.
@@ -112,6 +117,7 @@ const provider: AgentProvider & {
   async resume(request: AgentConnectRequest): Promise<{ session: AgentSession; missed: number } | null> {
     const record = rememberedSession(request.name);
     if (!record) return null;
+    const tools = webMcp.harvest(request.tools);
 
     const wallet = new AgentWallet({ relayUrl: RELAY, userSecretKey: generateKeyPair().secretKey });
     try {
@@ -119,7 +125,7 @@ const provider: AgentProvider & {
       const resumed = await wallet.resumeSession({
         id: record.id,
         token: record.token,
-        tools: request.tools,
+        tools,
         decide: () => true,
         requireSealed: record.sealed,
       });
@@ -144,6 +150,7 @@ const provider: AgentProvider & {
   },
 
   async connect(request: AgentConnectRequest): Promise<AgentSession> {
+    const tools = webMcp.harvest(request.tools);
     // Open first, so every later failure is visible to the user.
     const modal = openConnectModal(request.name);
 
@@ -162,7 +169,7 @@ const provider: AgentProvider & {
 
     const { code, accepted } = await wallet.beginConnect({
       surface: { name: request.name, route: request.route, context: request.context },
-      tools: request.tools,
+      tools,
       alwaysAsk: request.alwaysAsk,
       ttlMs: request.ttlMs,
       // The owner already gated every `requiresApproval` tool before the call
