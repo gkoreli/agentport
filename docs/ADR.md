@@ -201,7 +201,7 @@ realistic.
 
 **Context.** "Run once on the VPS and never touch it again" requires approvals
 and session-opening to live in the browser. The per-site terminal command
-(`npm run connect CODE`) belongs only to the keyless drop-in path.
+(`npx @gkoreli/agentport connect CODE`) belongs only to the keyless drop-in path.
 
 **Decision.** Three coexisting tiers, each a superset of convenience:
 
@@ -359,9 +359,10 @@ are all partially claimed).
   existing pieces well — ACP, WebMCP, WalletConnect patterns, systemd,
   Cloudflare — *is* the product, the way Tailscale packaged WireGuard. Code is
   the spec; MIT it; hosted defaults that just work; self-host if paranoid.
-- **The name stays AgentPort.** The collision only bites at npm publish and
-  public launch; revisit then. Publish options when the time comes:
-  `@agentport/cli` (scope appears free) or `@gkoreli/agentport`.
+- **The name stays AgentPort.** The unscoped npm name belongs to an unrelated
+  project, and the `agentport` organization scope is unavailable. The public
+  CLI therefore ships as `@gkoreli/agentport`; the executable remains
+  `agentport` once installed.
 
 **Consequences.** No standards-body dependency on our own layer (we still
 *consume* WebMCP, ADR-006). `navigator.agent` remains the API name regardless

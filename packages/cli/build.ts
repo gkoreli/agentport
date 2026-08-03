@@ -1,6 +1,6 @@
 /**
  * Bundle the CLI into one self-contained file so the published package has
- * zero dependencies — `npx @agentport/cli` downloads one tarball and runs.
+ * zero dependencies — `npx @gkoreli/agentport` downloads one tarball and runs.
  * Workspace packages and node deps (ws, @noble, the ACP sdk) are all inlined;
  * only ws's optional native accelerators stay external, exactly as ws itself
  * treats them.

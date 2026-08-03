@@ -2,8 +2,8 @@
  * The published entry point. Users run one command; whether an always-on
  * service already owns the agent is an implementation detail handled here.
  *
- *   npx agentport               start the agent or pair the running one
- *   npx agentport connect CODE  approve a drop-in connect code from a site
+ *   npx @gkoreli/agentport               start the agent or pair the running one
+ *   npx @gkoreli/agentport connect CODE  approve a drop-in connect code from a site
  *
  * This wrapper exists so a bare VPS needs no repo checkout: it sets the
  * defaults a fresh machine wants — the deployed relay, the Claude Code
@@ -49,6 +49,6 @@ if (command === 'connect') {
   defaults();
   await import('@agentport/daemon/cli');
 } else {
-  console.log(`AgentPort ${CLI_VERSION}\n\n  npx agentport\n\nStarts your agent, or pairs the always-on agent already running on this machine.`);
+  console.log(`AgentPort ${CLI_VERSION}\n\n  npx @gkoreli/agentport\n\nStarts your agent, or pairs the always-on agent already running on this machine.`);
   process.exit(command === 'help' || command === '--help' ? 0 : 1);
 }

@@ -49,7 +49,7 @@ demo surfaces and the relay they connect to.
 Start your agent and pair it with Chrome:
 
 ```bash
-npx agentport
+npx @gkoreli/agentport
 ```
 
 Open the one-time link it prints and approve in the extension-owned window.

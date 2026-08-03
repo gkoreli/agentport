@@ -116,7 +116,7 @@ const Pairing = component('ap-pairing', () => {
       ${when(firstRun, () => html`
         <p>Your agent runs in a terminal; this extension is only its wallet. To pair the two, once:</p>
         <ol class="steps">
-          <li>On your laptop or VPS, run <code>npx agentport</code>.</li>
+          <li>On your laptop or VPS, run <code>npx @gkoreli/agentport</code>.</li>
           <li>Open the link it prints and approve here.</li>
         </ol>
         <p class="hint">After that, connecting on any site is one tap, and approvals appear where the agent runs.</p>`)}

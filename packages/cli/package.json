@@ -1,5 +1,5 @@
 {
-  "name": "agentport",
+  "name": "@gkoreli/agentport",
   "version": "0.1.2",
   "description": "Bring your own agent to any website. Run this where your agent lives; pair once from your browser.",
   "license": "Apache-2.0",

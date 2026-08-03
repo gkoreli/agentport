@@ -46,7 +46,7 @@ export interface ConnectModal {
 
 /** What a visitor should literally type. Kept in one place so it can't drift. */
 export function connectCommand(code: string): string {
-  return `npm run connect ${code}`;
+  return `npx @gkoreli/agentport connect ${code}`;
 }
 
 /**
