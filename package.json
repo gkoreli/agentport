@@ -1,6 +1,6 @@
 {
   "name": "agentport",
-  "version": "0.0.6",
+  "version": "0.0.7",
   "private": true,
   "description": "NIP-07 for agents: bring your own agent to any website.",
   "license": "Apache-2.0",
