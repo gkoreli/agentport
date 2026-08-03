@@ -13,6 +13,8 @@ export interface RelayOptions {
   port?: number;
   host?: string;
   sink?: LogSink;
+  /** Test seam for proving edge checks against a relay with a dishonest clock. */
+  now?: () => number;
 }
 
 /**
@@ -29,7 +31,7 @@ export class Relay {
 
   constructor(options: RelayOptions = {}) {
     this.#log = createLogger('relay.socket', { sink: options.sink });
-    this.core = new RelayCore({ sink: options.sink });
+    this.core = new RelayCore({ sink: options.sink, now: options.now });
 
     this.#wss = new WebSocketServer({ port: options.port ?? 8787, host: options.host ?? '127.0.0.1' });
     this.#wss.on('connection', (socket) => this.#onConnection(socket));

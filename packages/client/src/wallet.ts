@@ -31,6 +31,7 @@ import {
   type LogSink,
   type SessionFrame,
   type SealChannel,
+  type SessionDelegation,
   type SurfaceDescriptor,
 } from '@agentport/protocol';
 import { AgentSession, type ApprovalDecider, type SiteTool } from './session.js';
@@ -64,6 +65,8 @@ export interface WalletOptions {
 
 export interface SessionRequest {
   agent: Hex;
+  /** User-signed authority for this wallet's page identity. */
+  delegation?: SessionDelegation;
   surface: Omit<SurfaceDescriptor, 'origin'> & { origin?: string };
   tools: SiteTool[];
   /** Tool names that must be approved on every single invocation. */
@@ -373,6 +376,7 @@ export class AgentWallet extends Emitter<WalletEvents> {
       t: 'session.open',
       s: id,
       agent: request.agent,
+      ...(request.delegation ? { delegation: request.delegation } : {}),
       surface,
       grant,
       epk: sealPair.publicKey,
@@ -562,9 +566,20 @@ export class AgentWallet extends Emitter<WalletEvents> {
     }
   }
 
-  /** Single-shot request/response correlation by frame type. */
-  #await(...types: string[]): Promise<Frame> {
-    return this.#request(...types).promise;
+  /**
+   * Single-shot request/response correlation by frame type. Always withdraws
+   * BOTH queue entries once settled: a deferred registered under two types
+   * and answered by one used to leave a stale twin that silently consumed the
+   * next frame of the other type — an off-by-one that starved every waiter
+   * behind it. Correlation waiters must never outlive their answer.
+   */
+  async #await(...types: string[]): Promise<Frame> {
+    const request = this.#request(...types);
+    try {
+      return await request.promise;
+    } finally {
+      request.cancel();
+    }
   }
 
   /** Like #await, but cancellable: a failed attempt must withdraw its waiter

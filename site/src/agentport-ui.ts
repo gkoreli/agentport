@@ -7,9 +7,9 @@ const VERSION = typeof __AGENTPORT_VERSION__ === 'string' ? __AGENTPORT_VERSION_
  * The demo's agent panel, rendered by the protocol-neutral Nisli chat set.
  *
  * Note what is no longer here: no key, no `AgentWallet`, no picker, no consent
- * screen. Those moved to where the user's key actually is — an extension, or
- * their terminal via `connect.js`. This file is an honest example of what a
- * *site* writes, and nothing more.
+ * screen. Those moved to where the user's key actually is — an extension, the
+ * hosted wallet's own origin, or their terminal in the universal fallback.
+ * This file is an honest example of what a *site* writes, and nothing more.
  *
  * The panel consumes the same AG-UI event stream a third-party renderer would,
  * then translates it once into the protocol-neutral semantic updates owned by
@@ -24,10 +24,10 @@ const VERSION = typeof __AGENTPORT_VERSION__ === 'string' ? __AGENTPORT_VERSION_
  * safe here; the injected modal deliberately avoids it (see modal.ts).
  */
 
-import { component, computed, html, onCleanup, signal, when } from '@nisli/core';
+import { component, computed, each, html, onCleanup, signal, when } from '@nisli/core';
 import AgentPortConnect from './connect.js';
 import { aguiStream, type AguiAdapter, type AguiEvent } from '@agentport/agui';
-import type { AgentSessionHandle, SessionEvents, SiteTool } from '@agentport/client';
+import type { AgentSessionHandle, ApprovalPrompt, SessionEvents, SiteTool } from '@agentport/client';
 import { toErr, type HistoryEntry } from '@agentport/protocol';
 import { Chat, createChatStore, type ChatController } from '../../src/nisli-ui/ui/chat/index.js';
 import { siteLogger } from './observe.js';
@@ -67,6 +67,12 @@ function displayJson(value: unknown): string {
   }
 }
 
+interface PendingApproval {
+  id: number;
+  prompt: ApprovalPrompt;
+  resolve: (granted: boolean) => void;
+}
+
 const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) => {
   // nisli props are signals — `props.config` is Signal<SurfaceConfig>, not the
   // object. Casting instead of reading `.value` silently yields undefined
@@ -79,6 +85,7 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
   const live = signal(false);
   const busy = signal(false);
   const notice = signal('');
+  const pendingApprovals = signal<PendingApproval[]>([]);
 
   let session: AgentSessionHandle | null = null;
   let adapter: AguiAdapter | null = null;
@@ -88,6 +95,7 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
   let currentRunId: string | null = null;
   let attachmentEpoch = 0;
   let disposed = false;
+  let approvalCardSeq = 0;
 
   // PROVENANCE. The site stores no transcript at all — not in localStorage,
   // not in sessionStorage, nowhere. On reload the panel re-attaches to the
@@ -100,8 +108,10 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
    * same event stream any third-party AG-UI renderer would get, so the demo
    * itself proves the adapter. The switch below is the only protocol boundary
    * in the view: it produces semantic chat updates and never leaks wire event
-   * names into the reusable components. Approvals were decided in the wallet,
-   * so the panel records outcomes and never draws a consent control of its own.
+   * names into the reusable components. Extension approvals arrive already
+   * decided in trusted browser chrome; hosted-wallet delegations route
+   * approvals to this page, so the decider below renders a real card and the
+   * resulting event becomes the settled row.
    */
   const applyEvent = (event: AguiEvent): void => {
     switch (event.type) {
@@ -172,6 +182,8 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
             });
             chat.apply({ type: 'tool.end', id, status: approval.granted ? 'complete' : 'cancelled' });
           } else if (event.name === 'agentport.closed') {
+            for (const approval of pendingApprovals.value) approval.resolve(false);
+            pendingApprovals.value = [];
             notice.value = `session closed (${event.value.reason})`;
             status.value = 'disconnected';
             online.value = false;
@@ -204,11 +216,35 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
     }
   };
 
+  interface PendingApproval {
+    id: number;
+    prompt: ApprovalPrompt;
+    resolve: (granted: boolean) => void;
+  }
+  const pendingApprovals = signal<PendingApproval[]>([]);
+
+  /** Delegated sessions route approvals here; the card IS the consent UI. */
+  const decide = (prompt: ApprovalPrompt): Promise<boolean> =>
+    new Promise((resolve) => {
+      pendingApprovals.value = [...pendingApprovals.value, { id: ++approvalCardSeq, prompt, resolve }];
+    });
+
+  const settleApproval = (id: number, granted: boolean) => {
+    const approval = pendingApprovals.value.find((candidate) => candidate.id === id);
+    if (!approval) return;
+    pendingApprovals.value = pendingApprovals.value.filter((candidate) => candidate.id !== id);
+    approval.resolve(granted);
+  };
+
   const detachEvents = (): void => {
     const previous = eventIterator;
     eventIterator = null;
     adapter = null;
     void previous?.return?.();
+    // A dead attachment must not leave a consent question hanging: unanswered
+    // approvals fail closed.
+    for (const approval of pendingApprovals.value) approval.resolve(false);
+    pendingApprovals.value = [];
   };
 
   const attach = (next: AgentSessionHandle): void => {
@@ -280,6 +316,7 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
         context: config.context,
         tools: config.tools,
         alwaysAsk: config.alwaysAsk,
+        decide,
       });
       if (!resumed) return;
       resumedSession = resumed.session;
@@ -305,13 +342,14 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
   const connect = () => {
     const attempt = ++attachmentEpoch;
     // [SURFACE] The entire integration. An installed wallet is used if present;
-    // otherwise the drop-in widget carries the request to the user's terminal.
+    // otherwise the hosted wallet delegates, with the code flow as fallback.
     AgentPortConnect.connect({
       name: config.name,
       route: config.route,
       context: config.context,
       tools: config.tools,
       alwaysAsk: config.alwaysAsk,
+      decide,
     })
       .then((next) => {
         if (disposed || attempt !== attachmentEpoch) {
@@ -363,6 +401,27 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
 
   const empty = 'Ask your agent something.';
 
+  const approvalCards = each(
+    pendingApprovals,
+    (approval) => approval.id,
+    (approval) => {
+      const summary = computed(() => approval.value.prompt.summary);
+      const toolName = computed(() => approval.value.prompt.call?.name ?? 'Agent request');
+      const hasArguments = computed(() => approval.value.prompt.call !== undefined);
+      const argumentsText = computed(() => JSON.stringify(approval.value.prompt.call?.arguments ?? {}, null, 2));
+      return html`<section class="ap-approval" aria-live="polite">
+        <div class="ap-approval-label">Approval required</div>
+        <strong>${summary}</strong>
+        <span class="ap-approval-tool">${toolName}</span>
+        ${when(hasArguments, () => html`<pre>${argumentsText}</pre>`)}
+        <div class="ap-approval-actions">
+          <button class="deny" @click=${() => settleApproval(approval.value.id, false)}>Deny</button>
+          <button @click=${() => settleApproval(approval.value.id, true)}>Allow</button>
+        </div>
+      </section>`;
+    },
+  );
+
   return html`
     <div class="ap-head">
       <span>Agent <span class="ap-version" title="AgentPort build">v${VERSION}</span></span
@@ -377,7 +436,7 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
             Bring your own agent.<br />This site never sees your model, keys, or memory.
           </p>
           <button class="ap-connect" @click=${connect}>Connect agent</button>
-          <p class="ap-alt">No install. Your agent approves from wherever it runs.</p>
+          <p class="ap-alt">No install. Approve in your wallet popup, or use a connect code.</p>
         </div>
       `,
     )}
@@ -386,6 +445,26 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
       ${when(
         computed(() => notice.value !== ''),
         () => html`<div class="ap-notice">${notice}</div>`,
+      )}
+      ${each(
+        pendingApprovals,
+        (approval) => approval.id,
+        (approval) => {
+          const summary = computed(() => approval.value.prompt.summary);
+          const toolName = computed(() => approval.value.prompt.call?.name ?? 'Agent request');
+          const hasArguments = computed(() => approval.value.prompt.call !== undefined);
+          const argumentsText = computed(() => JSON.stringify(approval.value.prompt.call?.arguments ?? {}, null, 2));
+          return html`<section class="ap-approval" aria-live="polite">
+            <div class="ap-approval-label">Approval required</div>
+            <strong>${summary}</strong>
+            <span class="ap-approval-tool">${toolName}</span>
+            ${when(hasArguments, () => html`<pre>${argumentsText}</pre>`)}
+            <div class="ap-approval-actions">
+              <button class="deny" @click=${() => settleApproval(approval.value.id, false)}>Deny</button>
+              <button @click=${() => settleApproval(approval.value.id, true)}>Allow</button>
+            </div>
+          </section>`;
+        },
       )}
       ${Chat({
         entries: chat.entries,

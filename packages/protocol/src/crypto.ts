@@ -8,7 +8,7 @@
  */
 
 import { ed25519 } from '@noble/curves/ed25519';
-import type { AgentCert, Hex } from './messages.js';
+import type { AgentCert, Hex, SessionDelegation } from './messages.js';
 
 export interface KeyPair {
   publicKey: Hex;
@@ -99,6 +99,31 @@ export function signCert(userSecretKey: Hex, body: Omit<AgentCert, 'sig'>): Agen
 export function verifyCert(cert: AgentCert): boolean {
   const { sig, ...body } = cert;
   return verify(cert.user, certBody(body), sig);
+}
+
+export function delegationBody(delegation: Omit<SessionDelegation, 'sig'>): string {
+  return `agentport-session-delegation:${canonicalJson({
+    delegate: delegation.delegate,
+    agent: delegation.agent,
+    origin: delegation.origin,
+    expiresAt: delegation.expiresAt,
+  })}`;
+}
+
+export function signDelegation(
+  userSecretKey: Hex,
+  body: Omit<SessionDelegation, 'sig'>,
+): SessionDelegation {
+  return { ...body, sig: sign(userSecretKey, delegationBody(body)) };
+}
+
+export function verifyDelegation(expectedSigner: Hex, delegation: SessionDelegation): boolean {
+  try {
+    const { sig, ...body } = delegation;
+    return verify(expectedSigner, delegationBody(body), sig);
+  } catch {
+    return false;
+  }
 }
 
 export function authChallengeMessage(nonce: string): string {

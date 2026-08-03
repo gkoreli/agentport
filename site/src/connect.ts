@@ -1,43 +1,75 @@
 /**
- * connect.js — the drop-in.
+ * connect.js — the three-tier connection ladder.
  *
  * A site adds one script tag and gets `AgentPort.connect()`. That's the whole
  * integration, in the same spirit as embedding Stripe/Link: the merchant page
  * renders a component and never touches the sensitive material.
  *
- * The load-bearing property is what this file *cannot* do. It holds an
- * ephemeral keypair minted per page load, so:
- *
- *   - it cannot list the user's agents
- *   - it cannot open a session with any of them
- *   - it cannot approve anything
- *
- * All it can do is publish a request and render the code that carries it to
- * wherever the user's key actually lives. The consent — connection *and* every
- * gated tool call — happens there. The widget renders; it never decides.
+ * An installed extension wins. Without one, a popup on the wallet's own
+ * origin can remember the user's key and certs across sites, then delegate to
+ * this page's fresh key. If popups are unavailable, the original code-carrying
+ * flow remains the universal fallback.
  */
 
-import { ResumeError,
+import {
   AgentWallet,
+  ResumeError,
   type AgentConnectRequest,
   type AgentProvider,
   type AgentSession,
   type AgentSessionHandle,
 } from '@agentport/client';
-import { generateKeyPair, toErr } from '@agentport/protocol';
+import { generateKeyPair, randomId, toErr } from '@agentport/protocol';
 import { openConnectModal } from './modal.js';
 import { createWebMcpHarvester } from './webmcp.js';
 import { siteLogger } from './observe.js';
+import {
+  WALLET_CHANNEL,
+  type WalletConnectResult,
+  type WalletInbound,
+  type WalletOutbound,
+} from '../../wallet/src/handshake.js';
 
 const log = siteLogger.child('connect');
 
+const PRODUCTION_WALLET_ORIGIN = 'https://agentport-wallet.gogakoreli.workers.dev';
+const DEFAULT_WALLET_ORIGIN = /^(localhost|127\.0\.0\.1)$/.test(location.hostname)
+  ? 'http://127.0.0.1:8790'
+  : PRODUCTION_WALLET_ORIGIN;
+const POPUP_HANDSHAKE_TIMEOUT_MS = 20_000;
+
+const embedScript =
+  document.currentScript ??
+  [...document.scripts].find((script) => {
+    try {
+      return new URL(script.src, location.href).pathname.endsWith('/connect.js');
+    } catch {
+      return false;
+    }
+  });
+
+function scriptAttribute(name: string): string | null {
+  return embedScript?.getAttribute(name) ?? null;
+}
+
 function relayUrl(): string {
-  const configured = document.currentScript?.getAttribute('data-relay');
+  const configured = scriptAttribute('data-relay');
   if (configured) return configured;
   return `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/relay`;
 }
 
+function walletUrl(): URL {
+  const configured = scriptAttribute('data-wallet') ?? DEFAULT_WALLET_ORIGIN;
+  const base = new URL(configured, location.href);
+  if (base.protocol !== 'https:' && !(base.protocol === 'http:' && /^(localhost|127\.0\.0\.1)$/.test(base.hostname))) {
+    throw new Error('the hosted wallet must use HTTPS (HTTP is allowed only on localhost)');
+  }
+  return new URL('/connect', base);
+}
+
 const RELAY = relayUrl();
+const WALLET_URL = walletUrl();
+const WALLET_ORIGIN = WALLET_URL.origin;
 const webMcp = createWebMcpHarvester({
   document: document as Document & { modelContext?: unknown },
   navigator: navigator as Navigator & { modelContext?: unknown },
@@ -103,6 +135,240 @@ function rememberedSession(surface: string): ResumeRecord | null {
 
 // ---------------------------------------------------------------------------
 
+type HostedUnavailableReason = 'popup_blocked' | 'popup_closed' | 'handshake_timeout';
+
+class HostedWalletUnavailable extends Error {
+  constructor(readonly reason: HostedUnavailableReason) {
+    super(`hosted wallet unavailable: ${reason}`);
+  }
+}
+
+function popupFeatures(): string {
+  const width = 480;
+  const height = 690;
+  const left = Math.max(0, Math.round(window.screenX + (window.outerWidth - width) / 2));
+  const top = Math.max(0, Math.round(window.screenY + (window.outerHeight - height) / 2));
+  return `popup=yes,width=${width},height=${height},left=${left},top=${top}`;
+}
+
+function openWalletPopup(url: string): Window | null {
+  return window.open(url, `agentport_wallet_${randomId()}`, popupFeatures());
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+async function requestHostedDelegation(
+  request: AgentConnectRequest,
+  tools: AgentConnectRequest['tools'],
+  delegate: ReturnType<typeof generateKeyPair>,
+  preopened?: Window | null,
+): Promise<WalletConnectResult> {
+  const popup = preopened === undefined ? openWalletPopup(WALLET_URL.href) : preopened;
+  if (!popup) throw new HostedWalletUnavailable('popup_blocked');
+
+  // AgentPort.connect pre-opens about:blank synchronously to preserve the
+  // click's popup permission while extension discovery finishes.
+  try {
+    if (popup.location.href === 'about:blank') popup.location.replace(WALLET_URL.href);
+  } catch {
+    // A pre-opened window that already navigated is already on the wallet
+    // origin; cross-origin location reads are expected to throw here.
+  }
+
+  const id = randomId('wallet_');
+  const outbound: WalletInbound = {
+    e: WALLET_CHANNEL,
+    t: 'connect.request',
+    request: {
+      id,
+      delegate: delegate.publicKey,
+      surface: {
+        name: request.name,
+        ...(request.route ? { route: request.route } : {}),
+        ...(request.context ? { context: request.context } : {}),
+      },
+      tools: tools.map(({ handler: _handler, ...definition }) => definition),
+      alwaysAsk: request.alwaysAsk ?? [],
+    },
+  };
+
+  return new Promise<WalletConnectResult>((resolve, reject) => {
+    let settled = false;
+    let acknowledged = false;
+
+    const finish = (outcome: { result?: WalletConnectResult; error?: Error }) => {
+      if (settled) return;
+      settled = true;
+      clearInterval(sendTimer);
+      clearInterval(closeTimer);
+      clearTimeout(handshakeTimer);
+      window.removeEventListener('message', onMessage);
+      if (outcome.result) resolve(outcome.result);
+      else reject(outcome.error ?? new Error('hosted wallet failed'));
+    };
+
+    const onMessage = (event: MessageEvent<unknown>) => {
+      if (event.source !== popup || event.origin !== WALLET_ORIGIN || !isRecord(event.data)) return;
+      if (event.data['e'] !== WALLET_CHANNEL || event.data['id'] !== id) return;
+
+      const message = event.data as unknown as WalletOutbound;
+      if (message.t === 'connect.ack') {
+        acknowledged = true;
+        clearInterval(sendTimer);
+        clearTimeout(handshakeTimer);
+        return;
+      }
+      if (message.t === 'connect.error') {
+        finish({ error: new Error(typeof message.message === 'string' ? message.message : 'hosted wallet failed') });
+        return;
+      }
+      if (message.t !== 'connect.result') return;
+
+      const result = message.result;
+      if (
+        !result ||
+        !/^[0-9a-f]{64}$/.test(result.agent) ||
+        result.displayName !== 'Personal agent' ||
+        !isRecord(result.delegation) ||
+        'user' in result.delegation ||
+        result.delegation.delegate !== delegate.publicKey ||
+        result.delegation.agent !== result.agent ||
+        result.delegation.origin !== location.origin ||
+        typeof result.delegation.sig !== 'string' ||
+        !/^[0-9a-f]{128}$/.test(result.delegation.sig) ||
+        typeof result.delegation.expiresAt !== 'number' ||
+        !Number.isFinite(result.delegation.expiresAt) ||
+        result.delegation.expiresAt <= Date.now()
+      ) {
+        finish({ error: new Error('hosted wallet returned an invalid delegation') });
+        return;
+      }
+      finish({ result });
+    };
+
+    window.addEventListener('message', onMessage);
+    const send = () => {
+      if (settled || acknowledged) return;
+      try {
+        popup.postMessage(outbound, WALLET_ORIGIN);
+      } catch (err) {
+        log.info('wallet popup is not ready yet', { err });
+      }
+    };
+    const sendTimer = setInterval(send, 250);
+    const closeTimer = setInterval(() => {
+      if (popup.closed) finish({ error: new HostedWalletUnavailable('popup_closed') });
+    }, 250);
+    const handshakeTimer = setTimeout(
+      () => finish({ error: new HostedWalletUnavailable('handshake_timeout') }),
+      POPUP_HANDSHAKE_TIMEOUT_MS,
+    );
+    send();
+  });
+}
+
+function rememberLiveSession(wallet: AgentWallet, session: AgentSession, surface: string): void {
+  const token = wallet.resumeTokenFor(session.id);
+  const agentKey = wallet.agentKeyFor(session.id);
+  if (token && agentKey) {
+    rememberSession({
+      id: session.id,
+      agent: agentKey,
+      token,
+      relay: RELAY,
+      surface,
+    });
+  }
+  session.on('closed', () => forgetSession(surface));
+}
+
+async function connectWithHostedWallet(
+  request: AgentConnectRequest,
+  tools: AgentConnectRequest['tools'],
+  preopened?: Window | null,
+): Promise<AgentSession> {
+  const delegate = generateKeyPair();
+  const result = await requestHostedDelegation(request, tools, delegate, preopened);
+  const wallet = new AgentWallet({ relayUrl: RELAY, userSecretKey: delegate.secretKey });
+  try {
+    await wallet.connect();
+    const session = await wallet.openSession({
+      agent: result.agent,
+      delegation: result.delegation,
+      surface: { name: request.name, route: request.route, context: request.context },
+      tools,
+      alwaysAsk: request.alwaysAsk,
+      ttlMs: request.ttlMs,
+      decide: request.decide,
+    });
+    rememberLiveSession(wallet, session, request.name);
+    return session;
+  } catch (err) {
+    wallet.close();
+    throw err;
+  }
+}
+
+async function connectWithCode(
+  request: AgentConnectRequest,
+  tools: AgentConnectRequest['tools'],
+): Promise<AgentSession> {
+  // Open first, so every later failure is visible to the user.
+  const modal = openConnectModal(request.name);
+
+  const wallet = new AgentWallet({
+    relayUrl: RELAY,
+    // Ephemeral and authority-free. Discarded when the tab goes away.
+    userSecretKey: generateKeyPair().secretKey,
+  });
+  try {
+    await wallet.connect();
+  } catch (err) {
+    log.error('relay unreachable', { err, data: { relayUrl: RELAY } });
+    modal.status(`could not reach the relay: ${toErr(err).message}`, true);
+    throw err;
+  }
+
+  const { code, accepted } = await wallet.beginConnect({
+    surface: { name: request.name, route: request.route, context: request.context },
+    tools,
+    alwaysAsk: request.alwaysAsk,
+    ttlMs: request.ttlMs,
+    // The daemon's terminal gate still decides first; the panel decider makes
+    // any approval delivered to the page visible rather than auto-allowing it.
+    decide: request.decide,
+  });
+
+  modal.setCode(code);
+  try {
+    const session = await Promise.race([accepted, modal.cancelled]);
+    rememberLiveSession(wallet, session, request.name);
+    modal.status('connected');
+    setTimeout(() => modal.close(), 400);
+    return session;
+  } catch (err) {
+    const failure = toErr(err);
+    if (!/cancelled/i.test(failure.message)) log.error('connect failed', { err, data: { relayUrl: RELAY } });
+    modal.status(failure.message, true);
+    setTimeout(() => modal.close(), 2200);
+    wallet.close();
+    throw err;
+  }
+}
+
+async function connectWithoutExtension(request: AgentConnectRequest, preopened?: Window | null): Promise<AgentSession> {
+  const tools = webMcp.harvest(request.tools);
+  try {
+    return await connectWithHostedWallet(request, tools, preopened);
+  } catch (err) {
+    if (!(err instanceof HostedWalletUnavailable)) throw err;
+    log.info('hosted wallet unavailable; using the connect-code fallback', { data: { reason: err.reason } });
+    return connectWithCode(request, tools);
+  }
+}
+
 const provider: AgentProvider & {
   resume(request: AgentConnectRequest): Promise<{ session: AgentSession; missed: number } | null>;
 } = {
@@ -132,7 +398,7 @@ const provider: AgentProvider & {
         agent: record.agent,
         token: record.token,
         tools,
-        decide: () => true,
+        decide: request.decide,
       });
       resumed.session.on('closed', () => forgetSession(request.name));
       return resumed;
@@ -162,68 +428,14 @@ const provider: AgentProvider & {
   },
 
   async connect(request: AgentConnectRequest): Promise<AgentSession> {
-    const tools = webMcp.harvest(request.tools);
-    // Open first, so every later failure is visible to the user.
-    const modal = openConnectModal(request.name);
-
-    const wallet = new AgentWallet({
-      relayUrl: RELAY,
-      // Ephemeral and authority-free. Discarded when the tab goes away.
-      userSecretKey: generateKeyPair().secretKey,
-    });
-    try {
-      await wallet.connect();
-    } catch (err) {
-      log.error('relay unreachable', { err, data: { relayUrl: RELAY, surface: request.name } });
-      modal.status(`could not reach the relay: ${toErr(err).message}`, true);
-      throw err;
-    }
-
-    try {
-      const { code, accepted } = await wallet.beginConnect({
-        surface: { name: request.name, route: request.route, context: request.context },
-        tools,
-        alwaysAsk: request.alwaysAsk,
-        ttlMs: request.ttlMs,
-        // The owner already gated every `requiresApproval` tool before the call
-        // reached us — re-asking here would be asking the requester.
-        decide: () => true,
-      });
-
-      modal.setCode(code);
-      const session = await Promise.race([accepted, modal.cancelled]);
-      const token = wallet.resumeTokenFor(session.id);
-      const agentKey = wallet.agentKeyFor(session.id);
-      if (token && agentKey) {
-        rememberSession({
-          id: session.id,
-          agent: agentKey,
-          token,
-          relay: RELAY,
-          surface: request.name,
-        });
-      }
-      session.on('closed', () => forgetSession(request.name));
-      modal.status('connected');
-      setTimeout(() => modal.close(), 400);
-      return session;
-    } catch (err) {
-      const failure = toErr(err);
-      if (!/cancelled/i.test(failure.message)) {
-        log.error('connect failed', { err, data: { surface: request.name, relayUrl: RELAY } });
-      }
-      modal.status(failure.message, true);
-      setTimeout(() => modal.close(), 2200);
-      wallet.close();
-      throw err;
-    }
+    return connectWithoutExtension(request);
   },
 };
 
 /**
- * Provider discovery. An installed wallet wins — it can show the picker and
- * the consent screen in browser chrome, which is strictly better than carrying
- * a code by hand. The drop-in is what makes the site work for everyone else.
+ * Provider discovery. An installed wallet wins and keeps consent in browser
+ * chrome. Without one, this provider runs the hosted-wallet popup and retains
+ * the code-carrying flow as the documented universal fallback.
  */
 export function getProvider(): AgentProvider {
   return (navigator as unknown as { agent?: AgentProvider }).agent ?? provider;
@@ -241,8 +453,7 @@ type InstalledProvider = AgentProvider & {
  * idiom) with a short deadline before concluding no wallet is installed.
  */
 function installedProvider(timeoutMs = 400): Promise<InstalledProvider | undefined> {
-  const read = () => (navigator as unknown as { agent?: InstalledProvider }).agent;
-  const now = read();
+  const now = readInstalledProvider();
   if (now) return Promise.resolve(now);
   // An extension injects at document_start; once the document has fully
   // loaded, a provider that hasn't appeared never will — don't tax the
@@ -251,23 +462,38 @@ function installedProvider(timeoutMs = 400): Promise<InstalledProvider | undefin
   return new Promise((resolve) => {
     const timer = setTimeout(() => {
       window.removeEventListener('agent#initialized', onReady);
-      resolve(read());
+      resolve(readInstalledProvider());
     }, timeoutMs);
     const onReady = () => {
       clearTimeout(timer);
       window.removeEventListener('agent#initialized', onReady);
-      resolve(read());
+      resolve(readInstalledProvider());
     };
     window.addEventListener('agent#initialized', onReady);
   });
+}
+
+function readInstalledProvider(): InstalledProvider | undefined {
+  return (navigator as unknown as { agent?: InstalledProvider }).agent;
 }
 
 const AgentPort = {
   provider,
   getProvider,
   connect: async (request: AgentConnectRequest) => {
+    const immediate = readInstalledProvider();
+    if (immediate) return immediate.connect(request);
+
+    // Reserve the popup while this call still has user activation. If the
+    // extension appears during its document-start grace window, it still wins
+    // and the blank reservation is closed without visiting the wallet origin.
+    const popup = openWalletPopup('about:blank');
     const installed = await installedProvider();
-    return (installed ?? provider).connect(request);
+    if (installed) {
+      popup?.close();
+      return installed.connect(request);
+    }
+    return connectWithoutExtension(request, popup);
   },
   /**
    * Resume follows the same discovery as connect: an installed wallet keeps
