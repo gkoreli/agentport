@@ -361,7 +361,7 @@ of brand.
 
 ---
 
-## ADR-016: Decentralize by subtraction — stateless plural relays, then direct paths, then Nostr rendezvous — accepted (direction)
+## ADR-016: Decentralize by subtraction — stateless plural relays, then direct paths, then Nostr rendezvous — accepted (rung A core shipped 2026-08-02; CODE@relay URIs and multi-relay pending)
 
 **Context.** ADR-012 made Cloudflare the reference host; sealing (ADR-003) made
 it blind. But the relay still *remembers* things — sessions, resume tokens,

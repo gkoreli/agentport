@@ -71,8 +71,10 @@ router 404s unknown paths before the Worker ever sees the upgrade.
 
 ## Invariants — do not regress these
 
-1. **The relay cannot forge a binding.** `CertStore.put` refuses certs that
-   fail `verifyCert`. The relay only ever stores what a user signed.
+1. **The relay cannot forge a binding — and stores nothing** (ADR-016). Certs
+   are verified when a connection presents them and live only as long as the
+   socket. The durable copies are at the edges: the daemon's identity file and
+   the wallet's own store.
 2. **The grant is the boundary.** `AgentDaemon#callTool` rejects any tool not
    in the session's grant and any call after `grant.expiresAt`. Enforced again
    on the client, which only dispatches tools it registered.
@@ -82,8 +84,10 @@ router 404s unknown paths before the Worker ever sees the upgrade.
 4. **Only participants may speak.** Routing checks session membership *and*
    `mayOriginate(role, type)`, so a client cannot fake a `tool.call` and an
    agent cannot fake an `approval.response`.
-5. **You can only reach agents you own.** `session.open` requires a stored cert
-   whose `user` equals the connecting client's key.
+5. **You can only reach agents you own.** The relay checks the live
+   connection's presented cert against the opener's stamped key, and the
+   daemon re-checks `client === cert.user` itself — the invariant holds even
+   against a lying relay.
 6. **Keys never cross the wire.** Only public keys, signatures, and certs.
 
 Every one of these has a check in `scripts/e2e.ts`. If you change routing or
@@ -118,7 +122,7 @@ and the DOM lib define conflicting globals, so mixing them in one project
 produces nonsense errors.
 
 Env: `AGENTPORT_RELAY`, `AGENTPORT_IDENTITY`, `AGENTPORT_RUNTIME`,
-`AGENTPORT_NAME`, `AGENTPORT_LOCATION`, `AGENTPORT_RELAY_STORE`.
+`AGENTPORT_NAME`, `AGENTPORT_LOCATION`.
 
 ## UI framework
 
@@ -264,8 +268,9 @@ One rule: **conversation belongs to the user's own machine.**
 |---|---|---|
 | transcript | the agent's own session store (Claude Code's, on the user's disk) | the user |
 | resume token | sessionStorage on the site origin, per tab | that tab |
-| ownership certs | the relay, and the wallet | relay sees public keys only |
-| conversation frames | in flight only | relay forwards, never stores |
+| ownership certs | the wallet and the daemon's identity file | relay verifies per connection, stores nothing |
+| resume authority | the daemon (it mints and judges the token) | relay routes resume frames, holds no tokens |
+| conversation frames | in flight only, sealed | relay forwards ciphertext, never stores |
 
 The site keeps **no** transcript across a reload — not in localStorage, not in
 sessionStorage. On resume the panel asks the agent for the history via

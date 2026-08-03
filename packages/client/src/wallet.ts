@@ -93,6 +93,8 @@ export class AgentWallet extends Emitter<WalletEvents> {
   /** Per-attachment symmetric keys; the relay never holds these (ADR-003). */
   #sealKeys = new Map<string, Uint8Array>();
   #verifyWords = new Map<string, string>();
+  /** The agent behind each session — resume routes by it (stateless relay). */
+  #agentKeys = new Map<string, Hex>();
   #ready = new Deferred<void>();
   #log: (message: string) => void;
 
@@ -227,6 +229,7 @@ export class AgentWallet extends Emitter<WalletEvents> {
       const opened = reply as Extract<Frame, { t: 'session.opened' }>;
       if (opened.resume) this.#resumeTokens.set(opened.s, opened.resume);
       this.#establishSeal(opened.s, sealPair, opened, undefined);
+      if (opened.agent) this.#agentKeys.set(opened.s, opened.agent);
       return this.#makeSession(opened.s, surface, grant, opened, request);
     })();
 
@@ -239,12 +242,14 @@ export class AgentWallet extends Emitter<WalletEvents> {
    */
   async resumeSession(request: {
     id: string;
+    /** The agent the session lives on — from the caller's resume record. */
+    agent: Hex;
     token: string;
     tools: SiteTool[];
     decide?: ApprovalDecider;
     /**
      * Refuse to come back unsealed. Set when the original session was sealed:
-     * a relay that "loses" the rekey answer must not be able to downgrade a
+     * a peer that "loses" the key exchange must not be able to downgrade a
      * private session to plaintext by omission.
      */
     requireSealed?: boolean;
@@ -272,20 +277,19 @@ export class AgentWallet extends Emitter<WalletEvents> {
 
   async #attemptResume(request: {
     id: string;
+    agent: Hex;
     token: string;
     tools: SiteTool[];
     decide?: ApprovalDecider;
     requireSealed?: boolean;
   }): Promise<{ session: AgentSession; missed: number }> {
     const sealPair = generateSealKeyPair();
-    // Both replies race the round-trip, so both waiters exist BEFORE the send:
-    // the daemon's rekey answer can beat the relay's own session.resumed.
     const resumedReply = this.#request('session.resumed', 'session.denied');
-    const rekeyedReply = this.#request('session.rekeyed');
     try {
       this.#sendRaw({
         t: 'session.resume',
         s: request.id,
+        agent: request.agent,
         token: request.token,
         epk: sealPair.publicKey,
         epkSig: signEpk(this.#options.userSecretKey, request.id, sealPair.publicKey),
@@ -294,33 +298,27 @@ export class AgentWallet extends Emitter<WalletEvents> {
       if (reply.t === 'session.denied') {
         throw new ResumeError((reply as { reason: string }).reason);
       }
+      // The DAEMON answers a resume (stateless relay), and its answer carries
+      // its fresh epk — one round trip, one frame, no separate rekey step.
       const resumed = reply as Extract<Frame, { t: 'session.resumed' }>;
-      // Every attachment gets a fresh key: wait for the agent's answering epk
-      // so the first history.request is already sealed. Bounded, because a
-      // daemon running pre-sealing code will never answer — that degrades to
-      // plaintext (loudly) unless the caller forbade it.
-      const rekeyed = (await Promise.race([
-        rekeyedReply.promise,
-        new Promise<null>((resolve) => setTimeout(() => resolve(null), 5000)),
-      ])) as Extract<Frame, { t: 'session.rekeyed' }> | null;
-      if (rekeyed) {
-        this.#establishSeal(request.id, sealPair, rekeyed, resumed.agent);
+      if (resumed.epk && resumed.epkSig) {
+        this.#establishSeal(request.id, sealPair, resumed, request.agent);
       } else if (request.requireSealed) {
-        throw new ResumeError('rekey_timeout');
+        throw new ResumeError('unsealed');
       } else {
-        this.#log(`session ${request.id} resumed UNSEALED — the agent never re-keyed`);
+        this.#log(`session ${request.id} resumed UNSEALED — the agent sent no key`);
       }
+      this.#agentKeys.set(request.id, request.agent);
       const session = this.#makeSession(
-      resumed.s,
-      resumed.surface,
-      resumed.grant,
-      { agentName: resumed.agentName, runtime: resumed.runtime },
-      request,
+        resumed.s,
+        resumed.surface,
+        resumed.grant,
+        { agentName: resumed.agentName, runtime: resumed.runtime },
+        request,
       );
       return { session, missed: resumed.missed };
     } finally {
       resumedReply.cancel();
-      rekeyedReply.cancel();
     }
   }
 
@@ -357,6 +355,7 @@ export class AgentWallet extends Emitter<WalletEvents> {
     // A paired wallet knows exactly which agent it called, so the epk proof is
     // checked against the cert's key — the relay cannot substitute anything.
     this.#establishSeal(id, sealPair, opened, request.agent);
+    this.#agentKeys.set(id, request.agent);
 
     return this.#makeSession(id, surface, grant, opened, request);
   }
@@ -372,6 +371,14 @@ export class AgentWallet extends Emitter<WalletEvents> {
   /** Fingerprint words for a sealed session — show them; humans are the MITM check. */
   verifyWordsFor(sessionId: string): string | undefined {
     return this.#verifyWords.get(sessionId);
+  }
+
+  /**
+   * The agent a session lives on. A resume record must carry this: the relay
+   * is stateless, so the resume frame itself has to say where to go.
+   */
+  agentKeyFor(sessionId: string): Hex | undefined {
+    return this.#agentKeys.get(sessionId);
   }
 
   /**
@@ -419,6 +426,7 @@ export class AgentWallet extends Emitter<WalletEvents> {
       this.#sessions.delete(id);
       this.#sealKeys.delete(id);
       this.#verifyWords.delete(id);
+      this.#agentKeys.delete(id);
     });
     this.#sessions.set(id, session);
     this.#log(`session ${id} open with ${opened.agentName}`);
@@ -483,10 +491,7 @@ export class AgentWallet extends Emitter<WalletEvents> {
     // routing them by session id drops them, because the session does not
     // exist on this side yet.
     const ANSWERS_A_REQUEST =
-      frame.t === 'session.opened' ||
-      frame.t === 'session.denied' ||
-      frame.t === 'session.resumed' ||
-      frame.t === 'session.rekeyed';
+      frame.t === 'session.opened' || frame.t === 'session.denied' || frame.t === 'session.resumed';
     if (isSessionFrame(frame) && !ANSWERS_A_REQUEST) {
       await this.#sessions.get(frame.s)?.handle(frame);
       return;

@@ -274,7 +274,7 @@ const thief = new AgentWallet({ relayUrl, userSecretKey: generateKeyPair().secre
 await thief.connect();
 let hijack = '';
 await thief
-  .resumeSession({ id: liveSession.id, token: resumeToken, tools: inkwellTools(), decide: () => true })
+  .resumeSession({ id: liveSession.id, agent: resumeAgentKeys.publicKey, token: resumeToken, tools: inkwellTools(), decide: () => true })
   .catch((err: Error) => {
     hijack = err.message;
   });
@@ -286,7 +286,7 @@ await new Promise((resolve) => setTimeout(resolve, 150));
 
 let wrongToken = '';
 await thief
-  .resumeSession({ id: liveSession.id, token: 'f'.repeat(48), tools: inkwellTools(), decide: () => true })
+  .resumeSession({ id: liveSession.id, agent: resumeAgentKeys.publicKey, token: 'f'.repeat(48), tools: inkwellTools(), decide: () => true })
   .catch((err: Error) => {
     wrongToken = err.message;
   });
@@ -294,7 +294,7 @@ check('a wrong token is refused', wrongToken.includes('not_resumable'), wrongTok
 
 let unknownSession = '';
 await thief
-  .resumeSession({ id: 'sess_does_not_exist', token: resumeToken, tools: inkwellTools(), decide: () => true })
+  .resumeSession({ id: 'sess_does_not_exist', agent: resumeAgentKeys.publicKey, token: resumeToken, tools: inkwellTools(), decide: () => true })
   .catch((err: Error) => {
     unknownSession = err.message;
   });
@@ -309,6 +309,7 @@ const reopened = new AgentWallet({ relayUrl, userSecretKey: generateKeyPair().se
 await reopened.connect();
 const { session: back } = await reopened.resumeSession({
   id: liveSession.id,
+  agent: resumeAgentKeys.publicKey,
   token: resumeToken,
   tools: inkwellTools(),
   decide: () => true,
@@ -430,6 +431,78 @@ console.log('\n11. relay restarts are survived');
 
   await reDaemon.stop();
   await revived.close();
+}
+
+// --- 12. a live session survives a relay RESTART (ADR-016) --------------------
+// The relay is stateless: killing it and starting a fresh one loses only
+// sockets. The daemon redials and still holds the session, the client comes
+// back with its token, and the conversation continues. This is the property
+// no amount of relay-side storage could give as cleanly.
+console.log('\n12. sessions outlive the relay itself');
+{
+  const { Relay: FreshRelay } = await import('../packages/relay/src/relay.js');
+  const r1 = new FreshRelay({ port: 0, log: () => {} });
+  await r1.listening();
+  const relayPort = r1.port;
+  const url = `ws://127.0.0.1:${relayPort}`;
+
+  const agentKeys = generateKeyPair();
+  const survivorPairing = new Deferred<string>();
+  const survivorDaemon = new AgentDaemon({
+    relayUrl: url,
+    identity: { ...agentKeys, name: 'Survivor Agent', runtime: 'demo-writer' },
+    createRuntime: () => new DemoWriterRuntime(),
+    onPairingCode: (code) => survivorPairing.resolve(code),
+  });
+  await survivorDaemon.start();
+
+  const user = new AgentWallet({ relayUrl: url, userSecretKey: generateKeyPair().secretKey, socketFactory });
+  await user.connect();
+  const pairOffer = await user.claimPairing(await survivorPairing.promise);
+  await user.approvePairing(pairOffer);
+
+  const before = await user.openSession({
+    agent: agentKeys.publicKey,
+    surface: { name: 'Survivor Site' },
+    tools: inkwellTools(),
+    decide: () => true,
+  });
+  await before.prompt('Remember the word heliotrope.');
+  const survivorToken = user.resumeTokenFor(before.id)!;
+  check('the daemon minted a resume token', survivorToken.length > 0);
+
+  // The "deploy": relay dies, a new stateless one takes the port.
+  const daemonBack = new Deferred<boolean>();
+  survivorDaemon.on('ready', () => daemonBack.resolve(true));
+  await r1.close();
+  const r2 = new FreshRelay({ port: relayPort, log: () => {} });
+  await r2.listening();
+  await daemonBack.promise;
+
+  const laterTab = new AgentWallet({ relayUrl: url, userSecretKey: generateKeyPair().secretKey, socketFactory });
+  await laterTab.connect();
+  const { session: after } = await laterTab.resumeSession({
+    id: before.id,
+    agent: agentKeys.publicKey,
+    token: survivorToken,
+    tools: inkwellTools(),
+    decide: () => true,
+    requireSealed: true,
+  });
+  check('the session resumed through a relay that never saw it', after.info.agentName === 'Survivor Agent');
+  check('and it resumed SEALED', /^\w+-\w+-\w+$/.test(after.info.verify ?? ''), after.info.verify);
+  const memory = await after.history();
+  check(
+    'the conversation survived both the refresh and the relay',
+    memory.some((entry) => entry.text.includes('heliotrope')),
+    memory.length,
+  );
+
+  after.close();
+  user.close();
+  laterTab.close();
+  await survivorDaemon.stop();
+  await r2.close();
 }
 
 // --- teardown ---------------------------------------------------------------

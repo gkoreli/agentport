@@ -105,6 +105,8 @@ export async function originAlias(origin: string): Promise<string> {
 
 export interface StoredResume {
   id: string;
+  /** The agent the session lives on — resume routes by it (stateless relay). */
+  agent: string;
   token: string;
   origin: string;
   name: string;
@@ -142,4 +144,30 @@ export async function clearResume(origin: string, name: string, sessionId: strin
   if (bag[key]?.id !== sessionId) return;
   delete bag[key];
   await chrome.storage.session.set({ [KEY_RESUME]: bag });
+}
+
+// --- the durable agent directory (ADR-016) ---------------------------------
+// The relay is stateless and can only say who is online RIGHT NOW. The wallet
+// signed the ownership certs, so the wallet is where the list of your agents
+// durably lives.
+
+const KEY_CERTS = 'agentport.certs';
+
+export interface StoredCert {
+  agent: string;
+  name: string;
+  runtime: string;
+  location?: string;
+}
+
+export async function saveCert(cert: StoredCert): Promise<void> {
+  const bag = await chrome.storage.local.get(KEY_CERTS);
+  const list = (bag[KEY_CERTS] as StoredCert[] | undefined) ?? [];
+  const next = [...list.filter((entry) => entry.agent !== cert.agent), cert];
+  await chrome.storage.local.set({ [KEY_CERTS]: next });
+}
+
+export async function loadCerts(): Promise<StoredCert[]> {
+  const bag = await chrome.storage.local.get(KEY_CERTS);
+  return (bag[KEY_CERTS] as StoredCert[] | undefined) ?? [];
 }

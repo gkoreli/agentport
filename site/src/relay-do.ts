@@ -1,38 +1,26 @@
-import { encodeFrame, type AgentCert, type Frame } from '@agentport/protocol';
-import { MemoryCertIndex, RelayCore, type Peer } from '@agentport/relay/core';
+import { encodeFrame, type Frame } from '@agentport/protocol';
+import { RelayCore, type Peer } from '@agentport/relay/core';
 
 /**
  * The relay, as a Durable Object.
  *
  * Same `RelayCore` as the Node relay — pairing, ownership checks and routing
  * are shared code, so the hosted deployment cannot be more permissive than the
- * one you run yourself. The only things this file owns are sockets and
- * durability.
+ * one you run yourself. This file owns sockets, full stop: the relay is
+ * stateless (ADR-016). No storage API is touched — certs are verified per
+ * connection and sessions are the daemon's to remember, so a redeploy loses
+ * nothing that both ends cannot re-establish themselves.
  *
- * Deliberately NOT using the hibernation API: sessions, pending pairings and
- * presence are in-memory and must outlive individual messages. The DO stays
- * resident while any socket is open, which is exactly the lifetime we want.
+ * Deliberately NOT using the hibernation API: pending pairings and presence
+ * are in-memory and must outlive individual messages. The DO stays resident
+ * while any socket is open, which is exactly the lifetime we want.
  */
 export class RelayDurableObject implements DurableObject {
-  #state: DurableObjectState;
-  #core: RelayCore | undefined;
+  #core: RelayCore;
   #peers = new Map<WebSocket, Peer>();
 
-  constructor(state: DurableObjectState) {
-    this.#state = state;
-    state.blockConcurrencyWhile(async () => {
-      const stored = ((await state.storage.get<AgentCert[]>('certs')) ?? []) as AgentCert[];
-      this.#core = new RelayCore({
-        certs: new MemoryCertIndex(stored),
-        onCertStored: () => void this.#persist(),
-        log: (message) => console.log(`[relay] ${message}`),
-      });
-    });
-  }
-
-  async #persist(): Promise<void> {
-    const certs = this.#core?.certs as MemoryCertIndex | undefined;
-    if (certs) await this.#state.storage.put('certs', certs.all());
+  constructor(_state: DurableObjectState) {
+    this.#core = new RelayCore({ log: (message) => console.log(`[relay] ${message}`) });
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -45,7 +33,7 @@ export class RelayDurableObject implements DurableObject {
     const server = pair[1];
     server.accept();
 
-    const core = this.#core!;
+    const core = this.#core;
     const peer: Peer = {
       send: (frame: Frame) => {
         try {

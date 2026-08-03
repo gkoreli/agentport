@@ -1,31 +1,26 @@
 import { WebSocketServer, type WebSocket } from 'ws';
 import { encodeFrame, randomId, type Frame } from '@agentport/protocol';
-import { RelayCore, MemoryCertIndex, type Peer } from './core.js';
-import { CertStore } from './store.js';
+import { RelayCore, type Peer } from './core.js';
 
 export interface RelayOptions {
   port?: number;
   host?: string;
-  storePath?: string;
   log?: (message: string) => void;
 }
 
 /**
- * Node host for {@link RelayCore}. Owns sockets and the file-backed cert
- * store; every decision about who may talk to whom lives in the core.
+ * Node host for {@link RelayCore}. Owns sockets and nothing else — the relay
+ * is stateless (ADR-016): certs are verified per connection, sessions are
+ * daemon-authoritative, and a restart loses only sockets.
  */
 export class Relay {
-  readonly certs: CertStore;
   readonly core: RelayCore;
 
   #wss: WebSocketServer;
   #peers = new Map<WebSocket, Peer>();
 
   constructor(options: RelayOptions = {}) {
-    this.certs = new CertStore(options.storePath);
     this.core = new RelayCore({
-      certs: new MemoryCertIndex(this.certs.all()),
-      onCertStored: (cert) => this.certs.put(cert),
       log: options.log ?? (() => {}),
     });
 

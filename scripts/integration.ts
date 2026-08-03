@@ -167,6 +167,7 @@ const reloaded = new AgentWallet({
 await reloaded.connect();
 const resuming = reloaded.resumeSession({
   id: session.id,
+  agent: keys.publicKey,
   token: token!,
   tools,
   decide: () => true,

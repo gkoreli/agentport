@@ -61,6 +61,8 @@ function resumeKeyFor(surface: string): string {
 
 interface ResumeRecord {
   id: string;
+  /** The agent the session lives on — resume routes by it (stateless relay). */
+  agent: string;
   token: string;
   relay: string;
   surface: string;
@@ -124,6 +126,7 @@ const provider: AgentProvider & {
       await wallet.connect();
       const resumed = await wallet.resumeSession({
         id: record.id,
+        agent: record.agent,
         token: record.token,
         tools,
         decide: () => true,
@@ -181,9 +184,11 @@ const provider: AgentProvider & {
     try {
       const session = await Promise.race([accepted, modal.cancelled]);
       const token = wallet.resumeTokenFor(session.id);
-      if (token) {
+      const agentKey = wallet.agentKeyFor(session.id);
+      if (token && agentKey) {
         rememberSession({
           id: session.id,
+          agent: agentKey,
           token,
           relay: RELAY,
           surface: request.name,

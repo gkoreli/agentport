@@ -44,7 +44,7 @@ import {
   type WorkerToConsent,
   type WorkerToContent,
 } from './bridge.js';
-import {
+import { loadCerts, saveCert,
   DEFAULT_RELAY_URL,
   clearResume,
   ensureUserKey,
@@ -126,7 +126,7 @@ async function reconnect(): Promise<void> {
 /** Re-attach one worker-held session over a fresh socket, in place: the page
  *  keeps its ref and never notices the relay blinked. */
 async function resumeEntry(wallet: AgentWallet, entry: SessionEntry): Promise<void> {
-  if (!entry.token) throw new ResumeError('not_resumable');
+  if (!entry.token || !entry.agent) throw new ResumeError('not_resumable');
   const definitions = entry.session.grant.tools;
   const tools: SiteTool[] = definitions.map((definition) => ({
     ...definition,
@@ -134,6 +134,7 @@ async function resumeEntry(wallet: AgentWallet, entry: SessionEntry): Promise<vo
   }));
   const { session } = await wallet.resumeSession({
     id: entry.session.id,
+    agent: entry.agent,
     token: entry.token,
     tools,
     requireSealed: Boolean(entry.session.info.verify),
@@ -183,6 +184,8 @@ interface SessionEntry {
   session: AgentSession;
   /** The relay's resume token — how this session survives a socket drop. */
   token: string | undefined;
+  /** The agent behind the session — resume routes by it (stateless relay). */
+  agent: string | undefined;
   /** The real agent name, for extension chrome only. Mutable because a resume
    *  learns it after the decide callback was already handed out. */
   who: { name: string };
@@ -546,6 +549,7 @@ async function openSession(
     name: request.name,
     session,
     token: wallet.resumeTokenFor(session.id),
+    agent: wallet.agentKeyFor(session.id),
     who,
     toolNames: new Set(request.tools.map((tool) => tool.name)),
     pending: new Map(),
@@ -556,9 +560,11 @@ async function openSession(
 
   // Page sessions outlive the worker: persist the resume record so a restarted
   // worker can re-attach through the relay without any new consent.
-  if (from === 'page' && entry.token) {
+  const agentKey = wallet.agentKeyFor(session.id);
+  if (from === 'page' && entry.token && agentKey) {
     void saveResume({
       id: session.id,
+      agent: agentKey,
       token: entry.token,
       origin,
       name: request.name,
@@ -605,6 +611,7 @@ async function resumeFromStore(
   try {
     const { session } = await wallet.resumeSession({
       id: record.id,
+      agent: record.agent,
       token: record.token,
       tools,
       // A sealed session must not be resumable as plaintext by a relay that
@@ -622,6 +629,7 @@ async function resumeFromStore(
       name: request.name,
       session,
       token: record.token,
+      agent: record.agent,
       who,
       toolNames: new Set(request.tools.map((tool) => tool.name)),
       pending: new Map(),
@@ -817,8 +825,15 @@ async function onPopupMessage(message: PopupToWorker): Promise<unknown> {
       return { relay: url };
     }
     case 'agents': {
+      // Durable list from our own cert store; liveness from the relay.
       const wallet = await getWallet();
-      return { agents: (await wallet.listAgents()).map(toRow) };
+      const [owned, live] = await Promise.all([loadCerts(), wallet.listAgents()]);
+      const online = new Set(live.map((agent) => agent.agent));
+      const rows = owned.map((cert) => ({ ...cert, online: online.has(cert.agent) }));
+      for (const agent of live) {
+        if (!rows.some((row) => row.agent === agent.agent)) rows.push(toRow(agent));
+      }
+      return { agents: rows };
     }
     case 'pair.claim': {
       const wallet = await getWallet();
@@ -834,6 +849,9 @@ async function onPopupMessage(message: PopupToWorker): Promise<unknown> {
       // it. This is the one moment the user key is used for anything but auth.
       const cert = await wallet.approvePairing(offer, message.name ? { name: message.name } : {});
       pairOffers.delete(offer.code);
+      // The wallet is the durable directory (ADR-016): the stateless relay
+      // will only ever report live agents, so remember what we own here.
+      await saveCert({ agent: cert.agent, name: cert.name, runtime: cert.runtime, location: cert.location });
       return { cert: { agent: cert.agent, name: cert.name, runtime: cert.runtime } };
     }
     case 'sessions':

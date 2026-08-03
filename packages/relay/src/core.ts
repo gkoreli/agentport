@@ -19,78 +19,25 @@ import {
   type SurfaceDescriptor,
 } from '@agentport/protocol';
 
-/**
- * Compares two hex secrets without leaking length or content through timing.
- * Small, but this is the one place a secret is checked, so it is worth doing.
- */
-function timingSafeEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  return diff === 0;
-}
-
 const PAIRING_TTL_MS = 5 * 60 * 1000;
 /** Long enough to switch to a terminal or phone and read a code out loud. */
 const CONNECT_TTL_MS = 3 * 60 * 1000;
-/** Guess limits, per connection, for the two code/token lookups. */
+/** Guess limit, per connection, for connect-code claims. */
 const MAX_CLAIM_ATTEMPTS = 20;
-const MAX_RESUME_ATTEMPTS = 10;
+/** A resume the daemon never answers must not leak the waiter forever. */
+const PENDING_RESUME_TTL_MS = 30 * 1000;
 /**
- * How long a session survives its client so a re-attach can happen. Long,
- * deliberately: this also covers a tab sitting on a sibling surface of the
- * same site before coming back. Costs the relay a few hundred bytes of
- * routing metadata per orphan — never conversation, which is dropped.
- */
-const ORPHAN_GRACE_MS = 30 * 60 * 1000;
-/**
- * The relay does NOT hold conversation. When a client is away, agent output is
- * dropped and only counted — a number is routing metadata, the frames are the
- * user's data and belong to their own agent. Replay on resume is the agent's
- * job (ACP `session/load`), not ours.
+ * ADR-016 rung A: the relay is stateless about everything durable. Sessions
+ * are live-socket routing entries and nothing more — no tokens (the daemon
+ * mints and checks them), no grants or surfaces (the daemon holds them), no
+ * certs (verified at connection time, stored at the edges). A relay restart
+ * loses only sockets, and both ends redial.
  */
 
 /** A connected socket, whatever the runtime's socket actually is. */
 export interface Peer {
   send(frame: Frame): void;
   close(): void;
-}
-
-/** In-memory cert index. Durability is the host's problem, not the core's. */
-export interface CertIndex {
-  get(agent: Hex): AgentCert | undefined;
-  put(cert: AgentCert): void;
-  forUser(user: Hex): AgentCert[];
-  remove(agent: Hex): boolean;
-}
-
-export class MemoryCertIndex implements CertIndex {
-  #byAgent = new Map<Hex, AgentCert>();
-
-  constructor(certs: AgentCert[] = []) {
-    for (const cert of certs) if (verifyCert(cert)) this.#byAgent.set(cert.agent, cert);
-  }
-
-  get(agent: Hex): AgentCert | undefined {
-    return this.#byAgent.get(agent);
-  }
-
-  put(cert: AgentCert): void {
-    if (!verifyCert(cert)) throw new Error('refusing to store cert with invalid signature');
-    this.#byAgent.set(cert.agent, cert);
-  }
-
-  forUser(user: Hex): AgentCert[] {
-    return [...this.#byAgent.values()].filter((cert) => cert.user === user);
-  }
-
-  remove(agent: Hex): boolean {
-    return this.#byAgent.delete(agent);
-  }
-
-  all(): AgentCert[] {
-    return [...this.#byAgent.values()];
-  }
 }
 
 interface Conn {
@@ -101,26 +48,21 @@ interface Conn {
   authed: boolean;
   bound: boolean;
   announce?: { name: string; runtime: string; location?: string };
+  /**
+   * The agent's ownership cert, verified at identify time. Lives and dies
+   * with the socket — the relay stores nothing (ADR-016).
+   */
+  cert?: AgentCert;
   sessions: Set<string>;
-  /** Failed guesses, so a socket cannot brute-force a code or a token. */
+  /** Failed guesses, so a socket cannot brute-force a connect code. */
   claimAttempts: number;
-  resumeAttempts: number;
 }
 
+/** Pure routing: which two sockets may speak on this id. Nothing else. */
 interface Session {
   id: string;
   client: Conn | undefined;
   agent: Conn;
-  /** Bearer secret the client presents to re-attach after a reload. */
-  token: string;
-  surface: SurfaceDescriptor;
-  grant: CapabilityGrant;
-  agentName: string;
-  runtime: string;
-  /** Set when the client socket dropped; cleared on resume. */
-  orphanedAt?: number;
-  /** How many agent frames were dropped while nobody was listening. */
-  missedWhileAway: number;
 }
 
 interface Pending {
@@ -143,39 +85,32 @@ interface PendingConnect {
 }
 
 export interface RelayCoreOptions {
-  certs: CertIndex;
-  /** Called after a cert is accepted, so the host can persist it. */
-  onCertStored?: (cert: AgentCert) => void;
   log?: (message: string) => void;
   now?: () => number;
 }
 
 /**
- * All relay behaviour, with no I/O.
+ * All relay behaviour, with no I/O and (ADR-016) no durable state.
  *
- * Node (`ws`) and Cloudflare (Durable Object) both wrap this, so pairing,
- * presence, ownership checks and routing can't drift between deployments.
- * Everything the relay is allowed to do is in this file — if it isn't here,
- * the relay can't do it.
+ * Node (`ws`) and Cloudflare (Durable Object) both wrap this. Everything the
+ * relay is allowed to do is in this file — if it isn't here, the relay can't
+ * do it, and if it isn't a live socket, the relay doesn't know it.
  */
 export class RelayCore {
-  readonly certs: CertIndex;
-
   #conns = new Set<Conn>();
   #byPeer = new Map<Peer, Conn>();
   #agents = new Map<Hex, Conn>();
   #sessions = new Map<string, Session>();
   #pending = new Map<string, Pending>();
   #connects = new Map<string, PendingConnect>();
+  /** Clients whose resume is in flight to a daemon, keyed by session id. */
+  #pendingResumes = new Map<string, { conn: Conn; at: number }>();
   #log: (message: string) => void;
   #now: () => number;
-  #onCertStored: ((cert: AgentCert) => void) | undefined;
 
-  constructor(options: RelayCoreOptions) {
-    this.certs = options.certs;
+  constructor(options: RelayCoreOptions = {}) {
     this.#log = options.log ?? (() => {});
     this.#now = options.now ?? (() => Date.now());
-    this.#onCertStored = options.onCertStored;
   }
 
   // --- lifecycle -----------------------------------------------------------
@@ -188,7 +123,6 @@ export class RelayCore {
       bound: false,
       sessions: new Set(),
       claimAttempts: 0,
-      resumeAttempts: 0,
     };
     this.#conns.add(conn);
     this.#byPeer.set(peer, conn);
@@ -221,11 +155,11 @@ export class RelayCore {
       if (!session) continue;
 
       if (session.client === conn) {
-        // A page refresh looks exactly like this. Keep the agent side alive
-        // and hold its output so the reloaded tab can pick the thread back up.
+        // A page refresh looks exactly like this. Tell the daemon its client
+        // detached; the DAEMON holds the session through its own grace period
+        // and counts what was missed. The relay keeps only the routing entry.
         session.client = undefined;
-        session.orphanedAt = this.#now();
-        this.#log(`session ${id} orphaned; holding ${ORPHAN_GRACE_MS / 1000}s for a resume`);
+        session.agent.peer.send({ t: 'session.detach', s: id });
         continue;
       }
 
@@ -244,8 +178,7 @@ export class RelayCore {
 
     if (conn.role === 'agent' && conn.pubkey && this.#agents.get(conn.pubkey) === conn) {
       this.#agents.delete(conn.pubkey);
-      const cert = this.certs.get(conn.pubkey);
-      if (cert) this.#broadcastPresence(cert.user, conn.pubkey, false);
+      if (conn.cert) this.#broadcastPresence(conn.cert.user, conn.pubkey, false);
       this.#log(`agent offline ${conn.pubkey.slice(0, 8)}`);
     }
   }
@@ -305,26 +238,25 @@ export class RelayCore {
     conn.authed = true;
 
     if (conn.role === 'agent') {
-      const stored = this.certs.get(frame.pubkey) ?? frame.cert;
-      if (stored && (stored.agent !== frame.pubkey || !verifyCert(stored))) {
+      // The cert is presented, verified, and held for this socket's lifetime —
+      // never stored (ADR-016). An agent that reconnects presents it again.
+      const cert = frame.cert;
+      if (cert && (cert.agent !== frame.pubkey || !verifyCert(cert))) {
         return this.#fail(conn, 'cert', 'cert does not match this agent key');
       }
-      if (stored && !this.certs.get(frame.pubkey)) {
-        this.certs.put(stored);
-        this.#onCertStored?.(stored);
-      }
 
-      conn.bound = Boolean(stored);
+      conn.cert = cert;
+      conn.bound = Boolean(cert);
       conn.announce =
         frame.announce ??
-        (stored ? { name: stored.name, runtime: stored.runtime, location: stored.location } : undefined);
+        (cert ? { name: cert.name, runtime: cert.runtime, location: cert.location } : undefined);
 
       const existing = this.#agents.get(frame.pubkey);
       if (existing && existing !== conn) existing.peer.close();
       this.#agents.set(frame.pubkey, conn);
 
       conn.peer.send({ t: 'ready', role: 'agent', pubkey: frame.pubkey, bound: conn.bound });
-      if (stored) this.#broadcastPresence(stored.user, frame.pubkey, true);
+      if (cert) this.#broadcastPresence(cert.user, frame.pubkey, true);
       this.#log(`agent online ${frame.pubkey.slice(0, 8)} bound=${conn.bound}`);
       return;
     }
@@ -372,10 +304,9 @@ export class RelayCore {
     }
     if (!verifyCert(cert)) return this.#fail(conn, 'pair_sig', 'cert signature did not verify', code);
 
-    this.certs.put(cert);
-    this.#onCertStored?.(cert);
     this.#pending.delete(code);
     pending.conn.bound = true;
+    pending.conn.cert = cert;
 
     pending.conn.peer.send({ t: 'pair.bound', cert });
     conn.peer.send({ t: 'pair.bound', cert });
@@ -456,17 +387,7 @@ export class RelayCore {
     // synthesised session.open with session.opened, which routes back to the
     // widget through the normal path.
     const id = randomId('sess_');
-    this.#sessions.set(id, {
-      id,
-      client: connect.conn,
-      agent: conn,
-      token: toHex(randomBytes(24)),
-      surface: connect.surface,
-      grant: connect.grant,
-      agentName: '',
-      runtime: '',
-      missedWhileAway: 0,
-    });
+    this.#sessions.set(id, { id, client: connect.conn, agent: conn });
     connect.conn.sessions.add(id);
     conn.sessions.add(id);
 
@@ -494,14 +415,19 @@ export class RelayCore {
 
   // --- directory -----------------------------------------------------------
 
+  /**
+   * Live connections only. The wallet holds the durable directory (it signed
+   * the certs); the relay can only ever say who is HERE, and that is all it
+   * should know.
+   */
   #agentsFor(user: Hex): AgentSummary[] {
-    return this.certs.forUser(user).map((cert) => ({
-      agent: cert.agent,
-      name: cert.name,
-      runtime: cert.runtime,
-      location: cert.location,
-      online: this.#agents.has(cert.agent),
-    }));
+    const rows: AgentSummary[] = [];
+    for (const conn of this.#agents.values()) {
+      const cert = conn.cert;
+      if (!cert || cert.user !== user) continue;
+      rows.push({ agent: cert.agent, name: cert.name, runtime: cert.runtime, location: cert.location, online: true });
+    }
+    return rows;
   }
 
   #broadcastPresence(user: Hex, agent: Hex, online: boolean): void {
@@ -518,9 +444,33 @@ export class RelayCore {
     if (frame.t === 'session.open') return this.#openSession(conn, frame);
     if (frame.t === 'session.resume') return this.#resumeSession(conn, frame);
 
-    this.#sweepOrphans();
-
     const session = this.#sessions.get(frame.s);
+
+    // The daemon answers a resume with session.resumed (or a denial): bind the
+    // waiting client into the routing entry at that moment. The relay makes no
+    // judgement — the daemon minted the token and already made it.
+    if (conn.role === 'agent' && (frame.t === 'session.resumed' || frame.t === 'session.denied')) {
+      const waiting = this.#takePendingResume(frame.s);
+      if (waiting) {
+        if (frame.t === 'session.resumed') {
+          const existing = session;
+          if (existing && existing.agent !== conn) {
+            return this.#fail(conn, 'forbidden', 'not a participant in this session', frame.s);
+          }
+          // A stale client socket the daemon has already ruled dead gets told.
+          if (existing?.client && existing.client !== waiting.conn) {
+            existing.client.sessions.delete(frame.s);
+            existing.client.peer.send({ t: 'session.close', s: frame.s, reason: 'resumed_elsewhere' });
+          }
+          this.#sessions.set(frame.s, { id: frame.s, client: waiting.conn, agent: conn });
+          waiting.conn.sessions.add(frame.s);
+          conn.sessions.add(frame.s);
+        }
+        waiting.conn.peer.send(frame);
+        return;
+      }
+    }
+
     if (!session) return this.#fail(conn, 'no_session', 'unknown session', frame.s);
     if (session.client !== conn && session.agent !== conn) {
       return this.#fail(conn, 'forbidden', 'not a participant in this session', frame.s);
@@ -530,19 +480,12 @@ export class RelayCore {
     }
 
     if (session.agent === conn) {
-      let outbound: Frame = frame;
-      if (frame.t === 'session.opened') {
-        // Captured here so a resume can describe the session without asking
-        // the agent again, and the token reaches only this client.
-        session.agentName = frame.agentName;
-        session.runtime = frame.runtime;
-        // The resume token reaches only this client; the agent identity stamp
-        // lets a drop-in client (which knows no agent key) verify the epk
-        // proof instead of trusting the relay outright.
-        outbound = { ...frame, resume: session.token, agent: session.agent.pubkey! };
-      }
+      // The agent identity stamp on session.opened lets a drop-in client
+      // (which chose no agent and knows none) verify the epk proof rather
+      // than trusting the relay outright. Tokens are the daemon's business.
+      const outbound: Frame = frame.t === 'session.opened' ? { ...frame, agent: conn.pubkey! } : frame;
       if (session.client) session.client.peer.send(outbound);
-      else session.missedWhileAway++;
+      // No client attached: drop. The daemon counts its own misses.
     } else {
       session.agent.peer.send(frame);
     }
@@ -554,84 +497,41 @@ export class RelayCore {
     }
   }
 
-  #sweepOrphans(): void {
-    const now = this.#now();
-    for (const [id, session] of this.#sessions) {
-      if (session.orphanedAt !== undefined && now - session.orphanedAt > ORPHAN_GRACE_MS) {
-        session.agent.sessions.delete(id);
-        session.agent.peer.send({ t: 'session.close', s: id, reason: 'client_never_returned' });
-        this.#sessions.delete(id);
-        this.#log(`session ${id} expired without a resume`);
-      }
-    }
+  #takePendingResume(id: string): { conn: Conn; at: number } | undefined {
+    const entry = this.#pendingResumes.get(id);
+    this.#pendingResumes.delete(id);
+    if (!entry) return undefined;
+    if (this.#now() - entry.at > PENDING_RESUME_TTL_MS) return undefined;
+    return this.#conns.has(entry.conn) ? entry : undefined;
   }
 
+  /**
+   * The relay's whole role in a resume: find the named agent's live socket,
+   * stamp the resumer's authenticated identity, forward, and remember who to
+   * answer. The daemon minted the token; the daemon rules on it.
+   */
   #resumeSession(conn: Conn, frame: Extract<Frame, { t: 'session.resume' }>): void {
     if (conn.role !== 'client') return this.#fail(conn, 'role', 'only clients resume', frame.s);
-    this.#sweepOrphans();
 
-    if (++conn.resumeAttempts > MAX_RESUME_ATTEMPTS) {
-      return this.#fail(conn, 'rate_limited', 'too many resume attempts', frame.s);
+    const agentConn = this.#agents.get(frame.agent);
+    if (!agentConn) {
+      return conn.peer.send({ t: 'session.denied', s: frame.s, reason: 'agent_offline' });
     }
 
-    const session = this.#sessions.get(frame.s);
-    // One message for every failure: a wrong token must not be distinguishable
-    // from an unknown session. The compare is constant-time so the answer
-    // cannot be teased out by timing either.
-    if (!session || !timingSafeEqual(session.token, frame.token)) {
-      return conn.peer.send({ t: 'session.denied', s: frame.s, reason: 'not_resumable' });
-    }
-    conn.resumeAttempts = 0;
-    if (session.client) {
-      return conn.peer.send({ t: 'session.denied', s: frame.s, reason: 'already_attached' });
-    }
-    if (session.grant.expiresAt <= this.#now()) {
-      return conn.peer.send({ t: 'session.denied', s: frame.s, reason: 'grant_expired' });
-    }
-
-    session.client = conn;
-    session.orphanedAt = undefined;
-    conn.sessions.add(session.id);
-
-    const missed = session.missedWhileAway;
-    session.missedWhileAway = 0;
-
-    // Sealing re-keys on every attachment: hand the agent the new client epk
-    // (with the client identity stamped from the authenticated socket) so it
-    // answers with a fresh key of its own. Synthesised here — a client has no
-    // way to originate a session.rekey itself.
-    if (frame.epk && frame.epkSig) {
-      session.agent.peer.send({
-        t: 'session.rekey',
-        s: session.id,
-        client: conn.pubkey!,
-        epk: frame.epk,
-        epkSig: frame.epkSig,
-      });
-    }
-
-    conn.peer.send({
-      t: 'session.resumed',
-      s: session.id,
-      agentName: session.agentName,
-      runtime: session.runtime,
-      surface: session.surface,
-      grant: session.grant,
-      missed,
-      agent: session.agent.pubkey!,
-    });
-    this.#log(`session ${session.id} resumed (${missed} frame(s) were dropped while away)`);
+    this.#pendingResumes.set(frame.s, { conn, at: this.#now() });
+    agentConn.peer.send({ ...frame, client: conn.pubkey! });
   }
 
   #openSession(conn: Conn, frame: Extract<Frame, { t: 'session.open' }>): void {
     if (conn.role !== 'client') return this.#fail(conn, 'role', 'only clients open sessions', frame.s);
 
-    const cert = this.certs.get(frame.agent);
-    if (!cert || cert.user !== conn.pubkey) {
-      return conn.peer.send({ t: 'session.denied', s: frame.s, reason: 'not_your_agent' });
-    }
     const agentConn = this.#agents.get(frame.agent);
     if (!agentConn) return conn.peer.send({ t: 'session.denied', s: frame.s, reason: 'agent_offline' });
+    // Ownership is judged against the cert the live connection presented; the
+    // daemon re-checks on its side. Nothing here consults storage.
+    if (!agentConn.cert || agentConn.cert.user !== conn.pubkey) {
+      return conn.peer.send({ t: 'session.denied', s: frame.s, reason: 'not_your_agent' });
+    }
     if (this.#sessions.has(frame.s)) {
       return conn.peer.send({ t: 'session.denied', s: frame.s, reason: 'duplicate_session' });
     }
@@ -639,17 +539,7 @@ export class RelayCore {
       return conn.peer.send({ t: 'session.denied', s: frame.s, reason: 'grant_expired' });
     }
 
-    const session: Session = {
-      id: frame.s,
-      client: conn,
-      agent: agentConn,
-      token: toHex(randomBytes(24)),
-      surface: frame.surface,
-      grant: frame.grant,
-      agentName: '',
-      runtime: '',
-      missedWhileAway: 0,
-    };
+    const session: Session = { id: frame.s, client: conn, agent: agentConn };
     this.#sessions.set(frame.s, session);
     conn.sessions.add(frame.s);
     agentConn.sessions.add(frame.s);

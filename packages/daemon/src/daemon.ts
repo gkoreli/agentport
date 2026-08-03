@@ -11,10 +11,13 @@ import {
   fingerprintWords,
   generateSealKeyPair,
   openSealed,
+  randomBytes,
   randomId,
   seal,
   sign,
   signEpk,
+  timingSafeEqualStr,
+  toHex,
   verifyEpk,
   type AgentCert,
   type CapabilityGrant,
@@ -47,7 +50,21 @@ interface SessionState {
   prompts: Map<string, AbortController>;
   /** Symmetric key sealing this attachment's content frames (ADR-003). */
   sealKey?: Uint8Array;
+  /**
+   * Session authority lives HERE (ADR-016): the daemon mints the resume
+   * token, judges resume attempts, survives relay restarts, and counts what
+   * the client missed while detached. The relay only ever routes.
+   */
+  resumeToken: string;
+  clientKey?: string;
+  detachedAt?: number;
+  missed: number;
+  resumeAttempts: number;
 }
+
+/** How long a detached session is held for a client to come back. */
+const DETACH_GRACE_MS = 30 * 60 * 1000;
+const MAX_RESUME_ATTEMPTS = 10;
 
 /** Frames a client may legitimately put inside a sealed envelope. */
 const CLIENT_SEALABLE = new Set<string>(['prompt', 'prompt.cancel', 'tool.result', 'approval.response', 'history.request']);
@@ -150,6 +167,14 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     socket.on('pong', () => (alive = true));
     clearInterval(this.#heartbeat);
     this.#heartbeat = setInterval(() => {
+      // Detached sessions do not wait forever: past the grace, close the
+      // runtime and forget the token.
+      const cutoff = Date.now() - DETACH_GRACE_MS;
+      for (const session of [...this.#sessions.values()]) {
+        if (session.detachedAt !== undefined && session.detachedAt < cutoff) {
+          void this.#closeSession(session, 'client_never_returned', false);
+        }
+      }
       if (socket.readyState !== WebSocket.OPEN) return;
       if (!alive) {
         this.#log('heartbeat lost — terminating socket to force a redial');
@@ -162,10 +187,12 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
 
     socket.on('close', () => {
       clearInterval(this.#heartbeat);
-      // The relay treats an agent drop as terminal for its sessions, so ours
-      // are dead too: clean up runtimes rather than leak agent processes.
-      for (const session of [...this.#sessions.values()]) {
-        void this.#closeSession(session, 'relay_disconnected', false);
+      // The relay is stateless: losing it detaches every session but kills
+      // none. Clients come back with their tokens through whatever relay
+      // socket exists next, and this daemon is the one that remembers them.
+      const now = Date.now();
+      for (const session of this.#sessions.values()) {
+        if (session.detachedAt === undefined) session.detachedAt = now;
       }
       this.emit('closed', undefined);
       if (this.#stopped) return;
@@ -203,6 +230,12 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
    * opened by a peer that never sent an epk fall back to plaintext.
    */
   #sendSession(session: SessionState, frame: SessionFrame): void {
+    if (session.detachedAt !== undefined && SEALED_TYPES.has(frame.t)) {
+      // Nobody is listening; count, never buffer. The conversation already
+      // lives in the runtime's own store, which is what replays on resume.
+      session.missed++;
+      return;
+    }
     if (session.sealKey && SEALED_TYPES.has(frame.t)) this.#send(seal(session.sealKey, frame));
     else this.#send(frame);
   }
@@ -268,6 +301,18 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
       case 'session.open':
         return this.#onSessionOpen(frame);
 
+      case 'session.detach': {
+        const session = this.#sessions.get(frame.s);
+        if (session && session.detachedAt === undefined) {
+          session.detachedAt = Date.now();
+          this.#log(`session ${frame.s} detached; holding ${DETACH_GRACE_MS / 60000}min for a resume`);
+        }
+        return;
+      }
+
+      case 'session.resume':
+        return this.#onSessionResume(frame);
+
       case 'enc': {
         const session = this.#sessions.get(frame.s);
         if (!session?.sealKey) {
@@ -290,26 +335,6 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
         return this.#onFrame(inner);
       }
 
-      case 'session.rekey': {
-        const session = this.#sessions.get(frame.s);
-        if (!session) return;
-        // A refreshed page re-attaches with a fresh identity and a fresh epk;
-        // the relay already checked the resume token and stamped the identity.
-        if (!verifyEpk(frame.client, frame.s, frame.epk, frame.epkSig)) {
-          this.#log(`rekey epk proof failed on ${frame.s} — ignoring`);
-          return;
-        }
-        const mine = generateSealKeyPair();
-        session.sealKey = deriveSealKey(mine.secretKey, frame.epk, frame.s);
-        this.#send({
-          t: 'session.rekeyed',
-          s: frame.s,
-          epk: mine.publicKey,
-          epkSig: signEpk(this.#options.identity.secretKey, frame.s, mine.publicKey),
-        });
-        this.#log(`session ${frame.s} re-keyed for a resumed client`);
-        return;
-      }
 
       case 'session.close': {
         const session = this.#sessions.get(frame.s);
@@ -365,12 +390,79 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     }
   }
 
+  /**
+   * The daemon rules on a resume: it minted the token, so only it can judge
+   * one. One denial reason for anything unprovable — a wrong token must not
+   * be distinguishable from a session that never existed — and a constant-time
+   * compare so timing does not answer what the message will not.
+   */
+  #onSessionResume(frame: Extract<Frame, { t: 'session.resume' }>): void {
+    const session = this.#sessions.get(frame.s);
+    if (!session) {
+      this.#send({ t: 'session.denied', s: frame.s, reason: 'not_resumable' });
+      return;
+    }
+    if (++session.resumeAttempts > MAX_RESUME_ATTEMPTS) {
+      this.#send({ t: 'session.denied', s: frame.s, reason: 'not_resumable' });
+      return;
+    }
+    if (!timingSafeEqualStr(session.resumeToken, frame.token)) {
+      this.#send({ t: 'session.denied', s: frame.s, reason: 'not_resumable' });
+      return;
+    }
+    session.resumeAttempts = 0;
+    // Attached means a live client the relay has not reported dead: a valid
+    // token must not hijack a session out from under it. The refresh race
+    // resolves through the wallet's retry — the detach lands within a second.
+    if (session.detachedAt === undefined) {
+      this.#send({ t: 'session.denied', s: frame.s, reason: 'already_attached' });
+      return;
+    }
+    if (session.grant.expiresAt <= Date.now()) {
+      this.#send({ t: 'session.denied', s: frame.s, reason: 'grant_expired' });
+      return;
+    }
+    if (!frame.client || !frame.epk || !frame.epkSig || !verifyEpk(frame.client, frame.s, frame.epk, frame.epkSig)) {
+      this.#send({ t: 'session.denied', s: frame.s, reason: 'bad_epk_proof' });
+      return;
+    }
+
+    const mine = generateSealKeyPair();
+    session.sealKey = deriveSealKey(mine.secretKey, frame.epk, frame.s);
+    session.clientKey = frame.client;
+    session.detachedAt = undefined;
+    const missed = session.missed;
+    session.missed = 0;
+
+    this.#send({
+      t: 'session.resumed',
+      s: frame.s,
+      agentName: this.#options.identity.name,
+      runtime: this.#options.identity.runtime,
+      surface: session.surface,
+      grant: session.grant,
+      missed,
+      epk: mine.publicKey,
+      epkSig: signEpk(this.#options.identity.secretKey, frame.s, mine.publicKey),
+    });
+    this.#log(`session ${frame.s} resumed (${missed} frame(s) missed while detached)`);
+  }
+
   async #onSessionOpen(frame: Extract<Frame, { t: 'session.open' }>): Promise<void> {
     // Local policy lives here. A real daemon would consult a per-origin
     // allowlist; v0 accepts any session the relay authorised, but still
     // refuses grants it cannot honour.
     if (frame.grant.expiresAt <= Date.now()) {
       this.#send({ t: 'session.denied', s: frame.s, reason: 'grant_expired' });
+      return;
+    }
+
+    // Invariant 5 at the edge: with a stateless relay, the daemon re-checks
+    // that whoever opens a session IS the user this agent is bound to. The
+    // drop-in flow is exempt by construction — its consent happened here.
+    const cert = this.#options.identity.cert;
+    if (!frame.viaConnect && cert && frame.client !== cert.user) {
+      this.#send({ t: 'session.denied', s: frame.s, reason: 'not_your_agent' });
       return;
     }
 
@@ -409,6 +501,10 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
       approvals: new Map(),
       prompts: new Map(),
       sealKey,
+      resumeToken: toHex(randomBytes(24)),
+      clientKey: frame.client,
+      missed: 0,
+      resumeAttempts: 0,
     };
     this.#sessions.set(frame.s, session);
 
@@ -419,6 +515,7 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
       s: frame.s,
       agentName: this.#options.identity.name,
       runtime: this.#options.identity.runtime,
+      resume: session.resumeToken,
       ...(myEpk ?? {}),
     });
     this.emit('session', frame.s);

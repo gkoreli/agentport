@@ -308,32 +308,28 @@ export interface SessionOpened {
 export interface SessionResume {
   t: 'session.resume';
   s: string;
+  /**
+   * The agent the session lives on, from the client's own resume record. The
+   * relay is stateless about sessions (ADR-016): it routes this frame to that
+   * agent's live socket, and the DAEMON — which minted the token — decides.
+   */
+  agent: Hex;
   token: string;
   /** Fresh ephemeral key — a resumed attachment never reuses the old one. */
   epk?: Hex;
   epkSig?: Hex;
+  /** Stamped by the relay before forwarding; ignored if sent by a client. */
+  client?: Hex;
 }
 
 /**
- * Relay -> agent only, synthesised when a client resumes: the new client
- * epk, so the agent can re-key. Not in any originate set — a client cannot
- * inject one.
+ * Relay -> agent when the client's socket died: the session is detached, not
+ * closed. The daemon holds it for its own grace period and counts (never
+ * buffers) what the agent said meanwhile.
  */
-export interface SessionRekey {
-  t: 'session.rekey';
+export interface SessionDetach {
+  t: 'session.detach';
   s: string;
-  /** The resuming client's authenticated identity, stamped by the relay. */
-  client: Hex;
-  epk: Hex;
-  epkSig: Hex;
-}
-
-/** Agent -> client: the agent's fresh epk answering a rekey. */
-export interface SessionRekeyed {
-  t: 'session.rekeyed';
-  s: string;
-  epk: Hex;
-  epkSig: Hex;
 }
 
 export interface SessionResumed {
@@ -343,10 +339,11 @@ export interface SessionResumed {
   runtime: string;
   surface: SurfaceDescriptor;
   grant: CapabilityGrant;
-  /** Frames the agent sent while nobody was listening. */
+  /** Frames the agent sent while nobody was listening (daemon-counted). */
   missed: number;
-  /** Stamped by the relay, same purpose as on session.opened. */
-  agent?: Hex;
+  /** The daemon's fresh sealing key for this attachment, proof-signed. */
+  epk?: Hex;
+  epkSig?: Hex;
 }
 
 export interface SessionDenied {
@@ -503,8 +500,7 @@ export type SessionFrame =
   | SessionOpened
   | SessionResume
   | SessionResumed
-  | SessionRekey
-  | SessionRekeyed
+  | SessionDetach
   | Enc
   | SessionDenied
   | HistoryRequest
@@ -530,8 +526,7 @@ const SESSION_FRAME_TYPES = new Set<string>([
   'session.opened',
   'session.resume',
   'session.resumed',
-  'session.rekey',
-  'session.rekeyed',
+  'session.detach',
   'enc',
   'session.denied',
   'history.request',
@@ -568,7 +563,7 @@ const CLIENT_ORIGINATED = new Set<string>([
 /** Frames an agent is allowed to originate inside a session. */
 const AGENT_ORIGINATED = new Set<string>([
   'session.opened',
-  'session.rekeyed',
+  'session.resumed',
   'history',
   'session.denied',
   'session.close',
