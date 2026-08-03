@@ -16,7 +16,7 @@
  */
 
 import type { SiteTool } from '@agentport/client';
-import type { ToolDefinition } from '@agentport/protocol';
+import { createLogger, type ToolDefinition } from '@agentport/protocol';
 import {
   ENVELOPE,
   LIMITS,
@@ -27,6 +27,7 @@ import {
   readPageOutbound,
   sanitizeTools,
   type ContentToWorker,
+  type ExtensionProviderErrorReason,
   type Origin,
   type PageConnectRequest,
   type PageInbound,
@@ -34,9 +35,11 @@ import {
 } from './bridge.js';
 import { createOverlay, type Overlay } from './overlay.js';
 import { genericPageTools } from './pagetools.js';
+import { AGENTPORT_VERSION } from './version.js';
 
 const CHANNEL = mintId('ch_');
 const TOOL_CALL_TIMEOUT_MS = 30_000;
+const log = createLogger('extension.content');
 
 type ToolRoute = 'page' | ((args: Record<string, unknown>) => unknown | Promise<unknown>);
 
@@ -70,14 +73,20 @@ function workerPort(): chrome.runtime.Port {
     for (const record of records.values()) closeRecord(record, 'wallet_disconnected');
   });
   port = next;
+  next.postMessage({ t: 'hello', version: AGENTPORT_VERSION } satisfies ContentToWorker);
   return next;
 }
 
 function tell(message: ContentToWorker): void {
   try {
     workerPort().postMessage(message);
-  } catch {
+  } catch (err) {
+    log.warn('failed to send message to extension worker', { err, data: { messageType: message.t } });
     port = undefined;
+    if ('rid' in message) {
+      waiters.get(message.rid)?.reject(new Error('wallet disconnected'));
+      waiters.delete(message.rid);
+    }
   }
 }
 
@@ -212,7 +221,7 @@ async function connectForPage(pageRid: string, request_: PageConnectRequest): Pr
     });
     toPage({ t: 'ok', rid: pageRid, value });
   } catch (err) {
-    const reason = err instanceof Error && 'reason' in err ? String((err as { reason: unknown }).reason) : 'denied';
+    const reason = errorReason(err);
     toPage({ t: 'err', rid: pageRid, reason, message: err instanceof Error ? err.message : String(err) });
   }
 }
@@ -236,8 +245,22 @@ async function resumeForPage(pageRid: string, request_: PageConnectRequest): Pro
     }
     toPage({ t: 'ok', rid: pageRid, value });
   } catch (err) {
-    const reason = err instanceof Error && 'reason' in err ? String((err as { reason: unknown }).reason) : 'denied';
+    const reason = errorReason(err);
     toPage({ t: 'err', rid: pageRid, reason, message: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+function errorReason(err: unknown): ExtensionProviderErrorReason {
+  const reason = err instanceof Error && 'reason' in err ? (err as Error & { reason: unknown }).reason : undefined;
+  switch (reason) {
+    case 'no_agents':
+    case 'cancelled':
+    case 'denied':
+    case 'error':
+    case 'extension_updating':
+      return reason;
+    default:
+      return 'denied';
   }
 }
 
@@ -245,6 +268,14 @@ async function resumeForPage(pageRid: string, request_: PageConnectRequest): Pro
 
 function onWorkerMessage(message: WorkerToContent): void {
   switch (message.t) {
+    case 'hello': {
+      if (!message.compatible || message.version !== AGENTPORT_VERSION) {
+        log.warn('extension build mismatch during worker handshake', {
+          data: { contentVersion: AGENTPORT_VERSION, workerVersion: message.version },
+        });
+      }
+      return;
+    }
     case 'ok': {
       const waiter = waiters.get(message.rid);
       waiters.delete(message.rid);
