@@ -42,8 +42,8 @@ scripts need a page reload too.
 | file | context | holds |
 |---|---|---|
 | `src/sw.ts` | service worker | the user key, the relay socket, sessions, grants, consent routing |
-| `src/content.ts` | isolated world | the mediator: validation, ownership tables, tool routing |
-| `src/overlay.ts` | isolated world | the Job 2 widget (status + chat) in a closed shadow root |
+| `src/content.ts` | isolated world | the mediator: validation, ownership tables, tool routing, closed iframe host |
+| `src/overlay.ts` | extension-origin iframe | the Job 2 widget (status + shared chat), reached only by a MessageChannel |
 | `src/pagetools.ts` | isolated world | the generic `page.*` fallback toolset |
 | `src/inpage.ts` | page world | `navigator.agent`, WebMCP harvesting. No authority |
 | `src/popup.ts` | extension origin | identity, relay, pairing, what is attached |
@@ -55,7 +55,9 @@ scripts need a page reload too.
 ```
  [PAGE]  navigator.agent          ← site code can rewrite this
     |    window.postMessage       ← HOSTILE. everything re-validated on arrival
- [CONTENT SCRIPT]  isolated world ← UI, ownership tables, generic tools
+ [CONTENT SCRIPT]  isolated world ← ownership tables, generic tools, iframe bridge
+    |    MessageChannel             ← semantic widget commands/actions only
+ [EXTENSION IFRAME] extension origin ← shared Chat + ordinary custom-element registry
     |    chrome.runtime.Port
  [SERVICE WORKER]  user key, one WebSocket to the relay
     |    ws
@@ -150,17 +152,13 @@ click — see "Prompt injection" in `AGENTS.md`.
 The UI is built with [`@nisli/core`](https://github.com/gkoreli/nisli) 0.54.1 —
 signals, `html` templates, `when`, `each`, `computed`, `effect`.
 
-One deliberate split: the popup uses `component()` (custom elements), the
-injected overlay does not. Inside a page, `component()` would register tag names
-in a registry whose isolation from the main world is a browser implementation
-detail, and a tag the page could pre-empt is a tag the page could implement.
-Templates own their DOM outright, so the overlay's trust story does not depend
-on that detail. Nothing else about nisli needed working around: it has no
-runtime dependencies, needs no compiler, and mounts happily into a shadow root.
-
-Known caveat: nisli builds DOM by assigning to `template.innerHTML`. On a page
-that enforces `require-trusted-types-for 'script'`, isolated-world scripts are
-exempted by Chrome today, but that exemption is the kind of thing that changes.
+The popup and `overlay.html` use `component()` in an extension-origin registry.
+The content script creates only a plain extension-origin iframe inside a closed
+shadow root; it never registers or constructs the shared Chat's custom
+elements. A MessageChannel carries semantic commands into the iframe and user
+actions back out. The host page cannot traverse that closed root to obtain the
+iframe or its `contentWindow`. Consent and approval controls stay in extension
+chrome; injected consent UI elsewhere in AgentPort remains template-only.
 
 ## One-tap connect and refresh-resume
 
@@ -207,13 +205,17 @@ keeps its ref and never notices.
   that the user has agents before consenting to anything.
 - **Prompt ids are wallet-side.** A page learns a prompt's id from the first
   `delta`/`done` event, so `cancel()` before the first token is not expressible.
-- **No tests.** The overlay and the boundary validators were exercised by hand
-  against happy-dom; nothing is wired into `scripts/e2e.ts` yet. The natural
-  addition is a headless check that a forged `tool.result` and a forged session
-  ref are both refused.
+- **Boundary coverage is split by environment.** `check.ts` exercises hostile
+  page-message validation and bundle separation. `scripts/extension-ui-smoke.ts`
+  loads the unpacked extension into real Chrome against a page that predefines
+  the chat tags and patches `attachShadow`; it verifies the opaque iframe host
+  and the shared `UI-CHAT` tree. Forged session/tool-result cases still belong
+  in the socket-level adversarial suite.
 
 ## Typecheck
 
 ```bash
 npx tsc -p packages/extension/tsconfig.json
+npm run check:extension
+AGENTPORT_CHROME=/path/to/chrome-for-testing npm run ui:extension-smoke
 ```

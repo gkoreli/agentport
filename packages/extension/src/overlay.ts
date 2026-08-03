@@ -1,24 +1,14 @@
 /**
- * Extension-owned in-page UI.
+ * Extension-origin fallback surface.
  *
- * The floating shell and the shared protocol-neutral Chat render inside a
- * closed shadow root with its own custom-element registry. The content script
- * runs in Chrome's isolated world; the scoped registry additionally prevents
- * page-defined tag names from participating in this tree.
- *
- * Consent and approval controls remain absent. Those decisions render in
- * extension chrome, never in a page viewport (ADR-009).
+ * This module runs only in overlay.html, never in the content script. Chrome
+ * isolates a content script's custom-element constructors from its own global
+ * registry, so rendering Nisli components there throws `Illegal constructor`.
+ * An extension-origin iframe has one coherent registry and keeps the shared
+ * Chat renderer out of the hostile page's JavaScript world.
  */
 
-import {
-  attachScopedShadow,
-  computed,
-  effect,
-  html,
-  signal,
-  when,
-  type Signal,
-} from '@nisli/core';
+import { computed, each, html, signal, when } from '@nisli/core';
 import {
   Chat,
   createChatStore,
@@ -26,32 +16,48 @@ import {
   type ContentBlock,
 } from '../../../src/nisli-ui/ui/chat/index.js';
 
-export interface WidgetHandlers {
-  attach(): void;
-  detach(): void;
-  send(text: string): boolean;
-  cancel(): void;
-}
-
 export type WidgetPhase = 'idle' | 'attaching' | 'attached';
 
+/** Commands originate in the content script and update this extension UI. */
+export type OverlayCommand =
+  | { t: 'overlay.show' }
+  | { t: 'overlay.state'; phase: WidgetPhase; agentName?: string }
+  | { t: 'overlay.notice'; text: string }
+  | { t: 'chat.add-user'; content: string | readonly ContentBlock[] }
+  | { t: 'chat.update'; update: ChatUpdate }
+  | { t: 'chat.reset' }
+  | { t: 'overlay.action-result'; id: string; accepted: boolean };
+
+/** Actions originate in the iframe and are interpreted by the content script. */
+export type OverlayAction =
+  | { t: 'overlay.attach' }
+  | { t: 'overlay.detach' }
+  | { t: 'overlay.layout'; expanded: boolean }
+  | { t: 'chat.prompt'; id: string; text: string }
+  | { t: 'chat.cancel' };
+
 const STYLE = `
-:host, * { box-sizing: border-box; }
-:host { --bg:#16161a; --surface:#1d1d22; --line:#303039; --text:#e8e6e3; --muted:#9a97a3; --accent:#8c7dff; --ok:#63d795; }
-.root { position:fixed; inset:0; z-index:2147483647; pointer-events:none; font:13px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif; color:var(--text); }
+:root, body { width:100%; height:100%; margin:0; overflow:hidden; }
+:root, * { box-sizing:border-box; }
+:root { --bg:#16161a; --surface:#1d1d22; --line:#303039; --text:#e8e6e3; --muted:#9a97a3; --accent:#8c7dff; --ok:#63d795; }
+body { font:13px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif; color:var(--text); }
+#agentport-overlay { width:100%; height:100%; }
+.root { width:100%; height:100%; display:flex; flex-direction:column; align-items:stretch; gap:12px; padding:18px; pointer-events:none; }
 .root > * { pointer-events:auto; }
 button, textarea { font:inherit; color:inherit; }
 button { cursor:pointer; }
 button:focus-visible, textarea:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
-.fab { position:absolute; right:18px; bottom:18px; width:44px; height:44px; border-radius:50%; background:var(--bg); border:1px solid var(--line); color:var(--text); box-shadow:0 8px 24px rgba(0,0,0,.45); display:grid; place-items:center; font-size:17px; }
+.fab { order:2; flex:0 0 44px; align-self:flex-end; width:44px; height:44px; border-radius:50%; background:var(--bg); border:1px solid var(--line); color:var(--text); box-shadow:0 8px 24px rgba(0,0,0,.45); display:grid; place-items:center; font-size:17px; }
 .fab.live { border-color:var(--accent); box-shadow:0 0 0 3px rgba(140,125,255,.22),0 8px 24px rgba(0,0,0,.45); }
-.panel { position:absolute; right:18px; bottom:74px; width:min(390px,calc(100vw - 36px)); height:min(560px,calc(100vh - 110px)); display:flex; flex-direction:column; background:var(--bg); border:1px solid var(--line); border-radius:14px; box-shadow:0 24px 64px rgba(0,0,0,.55); overflow:hidden; }
+.panel { order:1; flex:1 1 auto; min-height:0; width:100%; display:flex; flex-direction:column; background:var(--bg); border:1px solid var(--line); border-radius:14px; box-shadow:0 24px 64px rgba(0,0,0,.55); overflow:hidden; }
 .panel > header { min-height:48px; padding:10px 13px; border-bottom:1px solid #28282f; display:flex; align-items:center; gap:8px; }
 .panel > header b { font-weight:650; }
 .panel > header span { color:var(--muted); font-size:11px; margin-left:auto; }
 .panel > header button { border:0; border-radius:7px; padding:5px 8px; background:transparent; color:var(--muted); }
 .panel > header button:hover { background:var(--surface); color:var(--text); }
 .panel-body { min-height:0; flex:1; display:flex; flex-direction:column; padding:11px 12px 12px; }
+.chat-shell { display:none; min-height:0; flex:1; flex-direction:column; }
+.chat-shell.active { display:flex; }
 .attach { flex:1; display:grid; place-content:center; gap:12px; padding:24px; text-align:center; color:var(--muted); }
 .attach button { border:1px solid var(--accent); border-radius:9px; padding:9px 14px; background:var(--accent); color:#fff; font-weight:650; }
 .notices { display:grid; gap:5px; padding:0 2px 8px; }
@@ -108,97 +114,140 @@ button:focus-visible, textarea:focus-visible { outline:2px solid var(--accent); 
 [data-slot="chat-composer-send"][disabled] { opacity:.4; cursor:default; }
 `;
 
-export interface Overlay {
-  widget: {
-    show(): void;
-    phase: Signal<WidgetPhase>;
-    agentName: Signal<string>;
-    addUserMessage(text: string | readonly ContentBlock[]): string;
-    apply(update: ChatUpdate): void;
-    notice(text: string): void;
-    reset(): void;
-  };
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
 }
 
-export function createOverlay(handlers: WidgetHandlers): Overlay {
-  const host = document.createElement('div');
-  host.setAttribute('data-agentport-ui', '');
-  host.style.cssText = 'all: initial;';
-  const root = attachScopedShadow(host, { mode: 'closed' });
-  const style = document.createElement('style');
-  style.textContent = STYLE;
-  root.append(style);
-  const mountPoint = document.createElement('div');
-  root.append(mountPoint);
-  (document.documentElement ?? document.body).append(host);
+function isPortMessage(value: unknown): value is { t: string } {
+  return isRecord(value) && typeof value.t === 'string';
+}
 
+/** Mount exactly one Chat renderer in the extension page's ordinary registry. */
+export function mountOverlay(port: MessagePort): void {
   const visible = signal(false);
-  const open = signal(false);
+  const expanded = signal(false);
   const phase = signal<WidgetPhase>('idle');
   const agentName = signal('');
-  const notices = signal<string[]>([]);
+  const notices = signal<Array<{ id: number; text: string }>>([]);
   const chat = createChatStore();
+  const pendingPrompts = new Map<string, (accepted: boolean) => void>();
+  let noticeSeq = 0;
+  let promptSeq = 0;
 
+  const post = (action: OverlayAction) => port.postMessage(action);
   const statusLine = computed(() =>
     phase.value === 'attached' ? agentName.value : phase.value === 'attaching' ? 'attaching…' : 'not attached',
   );
+  const attached = computed(() => phase.value === 'attached');
 
-  const panelBody = computed(() => {
-    if (phase.value !== 'attached') {
-      return html`<div class="attach">
+  const requestPrompt = (text: string): Promise<boolean> => {
+    const id = `prompt-${++promptSeq}`;
+    return new Promise((resolve) => {
+      pendingPrompts.set(id, resolve);
+      post({ t: 'chat.prompt', id, text });
+    });
+  };
+
+  const toggle = (): void => {
+    expanded.value = !expanded.value;
+    post({ t: 'overlay.layout', expanded: expanded.value });
+  };
+
+  const panelBody = html`<div class="panel-body">
+    ${when(computed(() => !attached.value), () => html`<div class="attach">
         <div>Attach your agent to give it tools over this page.</div>
-        <button type="button" disabled="${computed(() => phase.value === 'attaching')}" @click=${handlers.attach}>
+        <button type="button" disabled="${computed(() => phase.value === 'attaching')}" @click=${() => post({ t: 'overlay.attach' })}>
           ${computed(() => phase.value === 'attaching' ? 'Attaching…' : 'Attach my agent')}
         </button>
-      </div>`;
-    }
-    return html`<div class="panel-body">
-      ${when(computed(() => notices.value.length > 0), () => html`<div class="notices">
-        ${computed(() => notices.value.slice(-2).map((notice) => html`<div class="notice">${notice}</div>`))}
       </div>`)}
+    <div class="chat-shell" class:active="${attached}" inert="${computed(() => !attached.value)}">
+      <div class="notices">${each(
+        notices,
+        (notice) => notice.id,
+        (notice) => html`<div class="notice">${computed(() => notice.value.text)}</div>`,
+      )}</div>
       ${Chat({
         entries: chat.entries,
         busy: chat.running,
         empty: 'Ask your agent about this page.',
         placeholder: 'Ask your agent…',
-        onPrompt: handlers.send,
-        onCancel: handlers.cancel,
+        onPrompt: requestPrompt,
+        onCancel: () => post({ t: 'chat.cancel' }),
       })}
-    </div>`;
-  });
+    </div>
+  </div>`;
 
+  const mount = document.getElementById('agentport-overlay');
+  if (!mount) throw new Error('overlay.html is missing #agentport-overlay');
+  const style = document.createElement('style');
+  style.textContent = STYLE;
+  document.head.append(style);
   html`<div class="root">
-    ${when(visible, () => html`<button class="fab" type="button" title="AgentPort" @click=${() => { open.value = !open.value; }}>◆</button>`)}
-    ${when(computed(() => visible.value && open.value), () => html`<div class="panel">
+    ${when(visible, () => html`<button class="fab" class:live="${computed(() => phase.value === 'attached')}" type="button" title="AgentPort" @click=${toggle}>◆</button>`)}
+    ${when(computed(() => visible.value && expanded.value), () => html`<div class="panel">
       <header>
         <b>AgentPort</b><span>${statusLine}</span>
-        ${when(computed(() => phase.value === 'attached'), () => html`<button type="button" @click=${handlers.detach}>Detach</button>`)}
+        ${when(computed(() => phase.value === 'attached'), () => html`<button type="button" @click=${() => post({ t: 'overlay.detach' })}>Detach</button>`)}
       </header>
       ${panelBody}
     </div>`)}
-  </div>`.mount(mountPoint);
+  </div>`.mount(mount);
 
-  effect(() => {
-    const fab = root.querySelector('.fab');
-    if (fab) fab.classList.toggle('live', phase.value === 'attached');
-  });
-
-  return {
-    widget: {
-      show: () => { visible.value = true; },
-      phase,
-      agentName,
-      addUserMessage: (content) => chat.addUserMessage(content),
-      apply: (update) => chat.apply(update),
-      notice: (text) => {
-        notices.value = [...notices.value, text];
-      },
-      reset: () => {
+  port.onmessage = (event: MessageEvent<unknown>) => {
+    const raw = event.data;
+    if (!isPortMessage(raw)) return;
+    const command = raw as OverlayCommand;
+    switch (command.t) {
+      case 'overlay.show':
+        visible.value = true;
+        return;
+      case 'overlay.state':
+        if (command.phase === 'idle' || command.phase === 'attaching' || command.phase === 'attached') {
+          phase.value = command.phase;
+          agentName.value = typeof command.agentName === 'string' ? command.agentName : '';
+        }
+        return;
+      case 'overlay.notice':
+        if (typeof command.text === 'string') notices.value = [...notices.value.slice(-1), { id: ++noticeSeq, text: command.text }];
+        return;
+      case 'chat.add-user':
+        if (typeof command.content === 'string' || Array.isArray(command.content)) chat.addUserMessage(command.content as string | ContentBlock[]);
+        return;
+      case 'chat.update':
+        if (isRecord(command.update) && typeof command.update.type === 'string') chat.apply(command.update as ChatUpdate);
+        return;
+      case 'chat.reset':
         chat.reset();
         notices.value = [];
         phase.value = 'idle';
         agentName.value = '';
-      },
-    },
+        return;
+      case 'overlay.action-result': {
+        if (typeof command.id !== 'string' || typeof command.accepted !== 'boolean') return;
+        const resolve = pendingPrompts.get(command.id);
+        pendingPrompts.delete(command.id);
+        resolve?.(command.accepted);
+        return;
+      }
+      default:
+        return;
+    }
   };
+  port.start();
 }
+
+// `content.ts` transfers the only MessagePort after the iframe loads. The page
+// cannot reach this frame through the closed shadow root to forge that setup.
+const acceptBridge = (event: MessageEvent<unknown>): void => {
+  if (
+    event.source !== window.parent ||
+    !isRecord(event.data) ||
+    event.data.t !== 'agentport.overlay.connect' ||
+    event.data.secret !== location.hash.slice(1)
+  ) return;
+  const port = event.ports[0];
+  if (!port) return;
+  window.removeEventListener('message', acceptBridge);
+  mountOverlay(port);
+};
+window.addEventListener('message', acceptBridge);

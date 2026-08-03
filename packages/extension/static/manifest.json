@@ -4,7 +4,7 @@
   "version": "0.0.0",
   "_build_note": "Placeholder only; build.ts stamps the root package version into dist/manifest.json.",
   "description": "Bring your own agent to any website. navigator.agent, with the wallet outside the page.",
-  "minimum_chrome_version": "146",
+  "minimum_chrome_version": "116",
   "permissions": ["storage", "notifications", "alarms"],
   "icons": { "128": "icon128.png" },
   "host_permissions": ["http://*/*", "https://*/*"],
@@ -26,7 +26,7 @@
   ],
   "web_accessible_resources": [
     {
-      "resources": ["inpage.js"],
+      "resources": ["inpage.js", "overlay.html", "overlay.js"],
       "matches": ["http://*/*", "https://*/*"]
     }
   ]

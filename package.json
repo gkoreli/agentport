@@ -1,6 +1,6 @@
 {
   "name": "agentport",
-  "version": "0.0.8",
+  "version": "0.0.9",
   "private": true,
   "description": "NIP-07 for agents: bring your own agent to any website.",
   "license": "Apache-2.0",
@@ -26,6 +26,7 @@
     "deploy": "tsx scripts/deploy.ts",
     "connect": "tsx packages/daemon/src/connect-cli.ts",
     "ui:smoke": "tsx scripts/ui-smoke.ts",
+    "ui:extension-smoke": "tsx scripts/extension-ui-smoke.ts",
     "integration": "tsx scripts/integration.ts"
   },
   "devDependencies": {

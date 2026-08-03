@@ -9,8 +9,8 @@
  *
  * This page runs on the extension origin. No site script exists in this
  * context, so it is the one place in the extension where nisli's `component()`
- * custom elements are used without the registry caveat that applies inside a
- * page (see the header of overlay.ts).
+ * custom elements are used without the page-world registry caveat; the
+ * fallback widget gets the same property from its extension-origin iframe.
  *
  * The secret key is never rendered and never leaves the service worker; the
  * popup only ever sees the public key.

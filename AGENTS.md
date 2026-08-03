@@ -137,19 +137,21 @@ signals + `html` template + custom-element framework; local checkout at
 which matters most for `connect.js`, since that ships into other people's
 pages.
 
-One deliberate split, in both the extension and the site:
+Registry ownership follows the trust boundary:
 
-- **Our own pages** use `component()`. Idiomatic, and registry collisions are
-  not a threat on a page we control.
-- **Anything injected into a third-party page** — the connect modal, the
-  extension overlay — uses the `html` template layer only, never
-  `component()`. A custom-element tag name lives in a registry the embedding
-  page can also reach, and a tag it could pre-empt is a tag that could
-  impersonate a consent dialog. The template layer owns its DOM outright, so
-  the trust story doesn't depend on registry isolation.
+- **Our own pages** use `component()` in the document registry.
+- **The extension transcript overlay** renders the same components in an
+  extension-origin iframe. Its document and custom-element registry belong to
+  the extension; the isolated content script injects only a plain iframe inside
+  a closed shadow root and mediates a private `MessagePort`.
+- **Injected consent UI** uses the `html` template layer only. A consent dialog
+  must not depend on custom-element support or registry setup in the embedding
+  page; its template owns its DOM outright.
 
-`scripts/ui-smoke.ts` renders both under happy-dom and asserts the shadow root
-stays unreachable via `.shadowRoot`.
+`scripts/ui-smoke.ts` covers the site and injected template surfaces under
+happy-dom. `scripts/extension-ui-smoke.ts` loads the real unpacked extension in
+Chrome, verifies that the page cannot enumerate the iframe, and asserts the
+shared `UI-CHAT` tree renders in the extension origin.
 
 The agent panel's transcript is the protocol-neutral Nisli chat set in
 `src/nisli-ui/ui/chat`, backed by the semantic store in

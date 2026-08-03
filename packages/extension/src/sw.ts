@@ -522,8 +522,9 @@ function toRow(agent: AgentSummary): AgentRow {
 /**
  * What a PAGE may learn about the session (ADR-009): a generic label and a
  * per-origin alias. The real agent name, runtime, pubkey and cert contents
- * render only in extension chrome. The widget runs in our own isolated world
- * behind a closed shadow root, so it keeps the real name.
+ * render only in extension chrome. The widget renders in an extension-origin
+ * iframe behind the content script's closed shadow root, so it keeps the real
+ * name without exposing it to the page.
  */
 async function infoFor(entry: SessionEntry): Promise<{ agentName: string; runtime: string; alias?: string }> {
   if (entry.from !== 'page') return { agentName: entry.session.info.agentName, runtime: entry.session.info.runtime };

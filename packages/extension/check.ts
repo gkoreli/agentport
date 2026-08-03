@@ -23,6 +23,9 @@ console.log('extension boundary check passed');
 
 const rootPackage = JSON.parse(await readFile(join(here, '../../package.json'), 'utf8')) as { version: string };
 const inpage = await readFile(join(here, 'dist/inpage.js'), 'utf8');
+const content = await readFile(join(here, 'dist/content.js'), 'utf8');
+const overlay = await readFile(join(here, 'dist/overlay.js'), 'utf8');
+const overlayHtml = await readFile(join(here, 'dist/overlay.html'), 'utf8');
 const staticManifest = JSON.parse(await readFile(join(here, 'static/manifest.json'), 'utf8')) as {
   version: string;
   _build_note?: string;
@@ -39,5 +42,9 @@ assert.ok(
   !distManifestText.includes(staticManifest.version),
   `static manifest placeholder ${staticManifest.version} shipped to dist`,
 );
+assert.doesNotMatch(content, /createChatStore|ui-chat/, 'content script bundles the chat renderer');
+assert.match(overlay, /createChatStore/, 'extension iframe does not bundle the shared chat store');
+assert.match(overlay, /ui-chat/, 'extension iframe does not bundle the shared Chat components');
+assert.match(overlayHtml, /overlay\.js/, 'extension iframe page does not load its renderer');
 
 console.log(`extension build stamp check passed (${rootPackage.version})`);

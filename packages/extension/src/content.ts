@@ -17,6 +17,7 @@
 
 import type { SiteTool } from '@agentport/client';
 import { createLogger, type ToolDefinition } from '@agentport/protocol';
+import type { ChatUpdate } from '../../../src/nisli-ui/ui/chat/index.js';
 import {
   ENVELOPE,
   LIMITS,
@@ -33,7 +34,7 @@ import {
   type PageInbound,
   type WorkerToContent,
 } from './bridge.js';
-import { createOverlay, type Overlay } from './overlay.js';
+import type { OverlayAction, OverlayCommand, WidgetPhase } from './overlay.js';
 import { genericPageTools } from './pagetools.js';
 import { AGENTPORT_VERSION } from './version.js';
 
@@ -217,7 +218,7 @@ window.addEventListener('message', (event: MessageEvent) => {
     }
     case 'webmcp.tools': {
       webmcpTools = sanitizeTools(body.tools);
-      if (webmcpTools.length > 0) overlay().widget.show();
+      if (webmcpTools.length > 0 && !overlaySuppressed) overlay().show();
       return;
     }
     default:
@@ -386,38 +387,171 @@ async function runToolCall(call: Extract<WorkerToContent, { t: 'tool.call' }>): 
 // per-call approvals as a site-declared grant.
 // ---------------------------------------------------------------------------
 
-let overlayInstance: Overlay | undefined;
+interface OverlayBridge {
+  show(): void;
+  setState(phase: WidgetPhase, agentName?: string): void;
+  addUserMessage(content: string): void;
+  apply(update: ChatUpdate): void;
+  notice(text: string): void;
+  reset(): void;
+}
+
+let overlayInstance: OverlayBridge | undefined;
+let overlaySuppressed = false;
+let widgetSurfaceAlive = false;
 let widgetRef: string | undefined;
 let widgetPromptId: string | undefined;
+let widgetAttaching = false;
 let widgetToolSeq = 0;
 const widgetTextMessages = new Set<string>();
 const widgetReasoningMessages = new Set<string>();
 
-function overlay(): Overlay {
-  if (!overlayInstance) {
-    overlayInstance = createOverlay({
-      attach: () => void attachWidget(),
-      detach: () => {
+function displayJson(value: unknown): string {
+  try {
+    return JSON.stringify(value, null, 2) ?? String(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function overlay(): OverlayBridge {
+  if (overlayInstance) return overlayInstance;
+  widgetSurfaceAlive = true;
+
+  // The page cannot traverse this closed root, so it cannot obtain the iframe
+  // or its contentWindow. The content script alone keeps the MessagePort that
+  // carries semantic UI commands/actions; no page data is accepted here.
+  const host = document.createElement('div');
+  host.setAttribute('data-agentport-ui', '');
+  host.style.cssText = 'all:initial;';
+  const root = host.attachShadow({ mode: 'closed' });
+  const frame = document.createElement('iframe');
+  // A hostile parent can never read this fragment cross-origin. It authenticates
+  // the port transfer even if a browser exposes a shadow-tree frame through an
+  // unexpected browsing-context enumeration.
+  const overlaySecret = mintId('overlay_');
+  frame.src = `${chrome.runtime.getURL('overlay.html')}#${overlaySecret}`;
+  frame.title = 'AgentPort';
+  frame.style.cssText = [
+    'position:fixed',
+    'right:0',
+    'bottom:0',
+    'width:80px',
+    'height:80px',
+    'border:0',
+    'z-index:2147483647',
+    'background:transparent',
+    'overflow:hidden',
+  ].join(';');
+  root.append(frame);
+  (document.documentElement ?? document.body).append(host);
+
+  const channel = new MessageChannel();
+  const queued: OverlayCommand[] = [];
+  let connected = false;
+  let disposed = false;
+  let removalObserver: MutationObserver | undefined;
+
+  const send = (command: OverlayCommand): void => {
+    if (connected) channel.port1.postMessage(command);
+    else queued.push(command);
+  };
+  const setExpanded = (expanded: boolean): void => {
+    frame.style.width = expanded ? 'min(426px, 100vw)' : '80px';
+    frame.style.height = expanded ? 'min(652px, 100vh)' : '80px';
+  };
+  const disposeBridge = (reason: string): void => {
+    if (disposed) return;
+    disposed = true;
+    removalObserver?.disconnect();
+    channel.port1.close();
+    queued.length = 0;
+    const ref = widgetRef;
+    widgetRef = undefined;
+    widgetPromptId = undefined;
+    widgetAttaching = false;
+    widgetTextMessages.clear();
+    widgetReasoningMessages.clear();
+    widgetSurfaceAlive = false;
+    overlaySuppressed = true;
+    overlayInstance = undefined;
+    if (ref) tell({ t: 'close', ref, reason });
+  };
+
+  channel.port1.onmessage = (event: MessageEvent<unknown>) => {
+    const action = event.data;
+    if (!isRecord(action) || typeof action['t'] !== 'string') return;
+    switch ((action as OverlayAction).t) {
+      case 'overlay.attach':
+        void attachWidget();
+        return;
+      case 'overlay.detach':
         if (widgetRef) tell({ t: 'close', ref: widgetRef, reason: 'user_detached' });
         widgetRef = undefined;
         widgetPromptId = undefined;
-        overlay().widget.reset();
-      },
-      send: sendFromWidget,
-      cancel: () => {
-        if (widgetRef && widgetPromptId) {
-          tell({ t: 'prompt.cancel', ref: widgetRef, promptId: widgetPromptId });
+        overlay().reset();
+        return;
+      case 'overlay.layout':
+        if (typeof action['expanded'] === 'boolean') setExpanded(action['expanded']);
+        return;
+      case 'chat.prompt':
+        if (
+          typeof action['id'] !== 'string' ||
+          action['id'].length > 128 ||
+          typeof action['text'] !== 'string' ||
+          action['text'].length > LIMITS.textLength
+        ) return;
+        {
+          const accepted = sendFromWidget(action['text']);
+          if (accepted) overlay().addUserMessage(action['text']);
+          send({ t: 'overlay.action-result', id: action['id'], accepted });
         }
-      },
-    });
-  }
+        return;
+      case 'chat.cancel':
+        if (widgetRef && widgetPromptId) tell({ t: 'prompt.cancel', ref: widgetRef, promptId: widgetPromptId });
+        return;
+      default:
+        return;
+    }
+  };
+  channel.port1.start();
+  frame.addEventListener('load', () => {
+    if (connected) {
+      disposeBridge('widget_reloaded');
+      return;
+    }
+    // The iframe URL is extension-origin. The page cannot name this browsing
+    // context because it is nested in the closed root above.
+    frame.contentWindow?.postMessage(
+      { t: 'agentport.overlay.connect', secret: overlaySecret },
+      new URL(frame.src).origin,
+      [channel.port2],
+    );
+    connected = true;
+    for (const command of queued.splice(0)) channel.port1.postMessage(command);
+  });
+
+  removalObserver = new MutationObserver(() => {
+    if (!host.isConnected) disposeBridge('widget_removed');
+  });
+  removalObserver.observe(document, { childList: true, subtree: true });
+
+  overlayInstance = {
+    show: () => send({ t: 'overlay.show' }),
+    setState: (phase, agentName) => send({ t: 'overlay.state', phase, agentName }),
+    addUserMessage: (content) => send({ t: 'chat.add-user', content }),
+    apply: (update) => send({ t: 'chat.update', update }),
+    notice: (text) => send({ t: 'overlay.notice', text }),
+    reset: () => send({ t: 'chat.reset' }),
+  };
   return overlayInstance;
 }
 
 async function attachWidget(): Promise<void> {
   const ui = overlay();
-  if (widgetRef) return;
-  ui.widget.phase.value = 'attaching';
+  if (widgetRef || widgetAttaching) return;
+  widgetAttaching = true;
+  ui.setState('attaching');
 
   const usingWebMcp = webmcpTools.length > 0;
   const local: SiteTool[] = usingWebMcp ? [] : genericPageTools();
@@ -439,33 +573,40 @@ async function attachWidget(): Promise<void> {
       },
     }));
 
+    if (!widgetSurfaceAlive) {
+      widgetAttaching = false;
+      tell({ t: 'close', ref: value.ref, reason: 'widget_removed' });
+      return;
+    }
+
     const routes = new Map<string, ToolRoute>();
     if (usingWebMcp) for (const tool of webmcpTools) routes.set(tool.name, 'page');
     else for (const tool of local) routes.set(tool.name, tool.handler);
 
     records.set(value.ref, { ref: value.ref, owner: 'widget', routes });
     widgetRef = value.ref;
-    ui.widget.agentName.value = value.info.agentName;
-    ui.widget.phase.value = 'attached';
-    ui.widget.notice(
+    widgetAttaching = false;
+    ui.setState('attached', value.info.agentName);
+    ui.notice(
       usingWebMcp
         ? `Attached with ${webmcpTools.length} tool(s) this site published via WebMCP.`
         : `Attached with the generic page toolset. Reads are free; anything that changes the page asks first.`,
     );
   } catch (err) {
-    ui.widget.phase.value = 'idle';
-    ui.widget.notice(err instanceof Error ? err.message : String(err));
+    widgetAttaching = false;
+    if (!widgetSurfaceAlive) return;
+    ui.setState('idle');
+    ui.notice(err instanceof Error ? err.message : String(err));
   }
 }
 
 function sendFromWidget(text: string): boolean {
-  const ui = overlay();
+  const ui = overlayInstance;
   const ref = widgetRef;
-  if (!ref || widgetPromptId) return false;
+  if (!ui || !ref || widgetPromptId) return false;
   const promptId = mintId('p_');
   widgetPromptId = promptId;
-  ui.widget.addUserMessage(text);
-  ui.widget.apply({ type: 'run.start' });
+  ui.apply({ type: 'run.start' });
   request<string>((rid) => ({ t: 'prompt', rid, ref, promptId, text })).then(
     (full) => {
       // `done` normally settles the run first. This fallback is for a worker
@@ -473,17 +614,17 @@ function sendFromWidget(text: string): boolean {
       if (widgetPromptId !== promptId) return;
       if (full && !widgetTextMessages.has(promptId)) {
         widgetTextMessages.add(promptId);
-        ui.widget.apply({ type: 'message.start', id: promptId, role: 'assistant' });
-        ui.widget.apply({ type: 'message.delta', id: promptId, content: { type: 'text', text: full } });
-        ui.widget.apply({ type: 'message.end', id: promptId });
+        ui.apply({ type: 'message.start', id: promptId, role: 'assistant' });
+        ui.apply({ type: 'message.delta', id: promptId, content: { type: 'text', text: full } });
+        ui.apply({ type: 'message.end', id: promptId });
       }
-      ui.widget.apply({ type: 'run.end' });
+      ui.apply({ type: 'run.end' });
       widgetPromptId = undefined;
     },
     (err: Error) => {
       if (widgetPromptId !== promptId) return;
-      ui.widget.apply({ type: 'run.error', error: err.message });
-      ui.widget.notice(err.message);
+      ui.apply({ type: 'run.error', error: err.message });
+      ui.notice(err.message);
       widgetPromptId = undefined;
     },
   );
@@ -491,60 +632,67 @@ function sendFromWidget(text: string): boolean {
 }
 
 function onWidgetEvent(event: string, payload: unknown): void {
-  const ui = overlay();
+  if (event === 'closed') {
+    const reason = isRecord(payload) ? String(payload['reason'] ?? 'closed') : 'closed';
+    onWidgetClosed(reason);
+    return;
+  }
+  const ui = overlayInstance;
+  if (!ui) return;
   if (!isRecord(payload)) return;
   const promptId = typeof payload['promptId'] === 'string' ? payload['promptId'] : undefined;
   if (event === 'delta' && promptId) {
     if (!widgetTextMessages.has(promptId)) {
       widgetTextMessages.add(promptId);
-      ui.widget.apply({ type: 'message.start', id: promptId, role: 'assistant' });
+      ui.apply({ type: 'message.start', id: promptId, role: 'assistant' });
     }
-    ui.widget.apply({ type: 'message.delta', id: promptId, content: { type: 'text', text: String(payload['text'] ?? '') } });
+    ui.apply({ type: 'message.delta', id: promptId, content: { type: 'text', text: String(payload['text'] ?? '') } });
   } else if (event === 'thought' && promptId) {
     const id = `${promptId}:reasoning`;
     if (!widgetReasoningMessages.has(id)) {
       widgetReasoningMessages.add(id);
-      ui.widget.apply({ type: 'reasoning.start', id });
+      ui.apply({ type: 'reasoning.start', id });
     }
-    ui.widget.apply({ type: 'reasoning.delta', id, content: { type: 'text', text: String(payload['text'] ?? '') } });
+    ui.apply({ type: 'reasoning.delta', id, content: { type: 'text', text: String(payload['text'] ?? '') } });
   } else if (event === 'tool') {
     const id = `tool-${widgetToolSeq++}`;
     const ok = payload['ok'] === true;
-    ui.widget.apply({
+    ui.apply({
       type: 'tool.start',
       id,
       name: String(payload['name'] ?? 'Tool call'),
-      input: JSON.stringify(payload['arguments'] ?? {}, null, 2),
+      input: displayJson(payload['arguments'] ?? {}),
     });
-    ui.widget.apply({
+    ui.apply({
       type: 'tool.end',
       id,
       status: ok ? 'complete' : 'error',
       output: ok && payload['result'] !== undefined
-        ? [{ type: 'text', text: JSON.stringify(payload['result'], null, 2) }]
+        ? [{ type: 'text', text: displayJson(payload['result']) }]
         : undefined,
       error: ok ? undefined : String(payload['error'] ?? 'Tool call failed'),
     });
   } else if (event === 'done' && promptId) {
-    if (widgetTextMessages.delete(promptId)) ui.widget.apply({ type: 'message.end', id: promptId });
+    if (widgetTextMessages.delete(promptId)) ui.apply({ type: 'message.end', id: promptId });
     const reasoningId = `${promptId}:reasoning`;
-    if (widgetReasoningMessages.delete(reasoningId)) ui.widget.apply({ type: 'reasoning.end', id: reasoningId });
+    if (widgetReasoningMessages.delete(reasoningId)) ui.apply({ type: 'reasoning.end', id: reasoningId });
     const failed = payload['stopReason'] === 'error';
-    ui.widget.apply(failed
+    ui.apply(failed
       ? { type: 'run.error', error: String(payload['error'] ?? 'Agent run failed') }
       : { type: 'run.end' });
     if (widgetPromptId === promptId) widgetPromptId = undefined;
-  } else if (event === 'closed') onWidgetClosed(String(payload['reason'] ?? 'closed'));
+  }
 }
 
 function onWidgetClosed(reason: string): void {
   widgetRef = undefined;
   widgetPromptId = undefined;
+  widgetAttaching = false;
   widgetTextMessages.clear();
   widgetReasoningMessages.clear();
-  const ui = overlay();
-  ui.widget.reset();
-  ui.widget.notice(`Detached: ${reason}`);
+  const ui = overlayInstance;
+  ui?.reset();
+  ui?.notice(`Detached: ${reason}`);
 }
 
 // --- boot ------------------------------------------------------------------
@@ -555,7 +703,7 @@ handlePairingLink();
 // Only the top frame gets a widget: a floating panel per iframe would be noise,
 // and an iframe is not where a user expects to grant page-wide capabilities.
 if (window.top === window && location.pathname !== '/pair') {
-  const start = () => overlay().widget.show();
+  const start = () => overlay().show();
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, { once: true });
   else start();
 }

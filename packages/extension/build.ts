@@ -4,7 +4,8 @@
  *   sw.js       — MV3 service worker. Holds the key and the socket, so nothing
  *                 that runs in a page may ever share a module graph with it.
  *   content.js  — isolated world. Classic script (content scripts are not
- *                 modules), bundles the nisli overlay.
+ *                 modules), injects and bridges the extension-origin iframe.
+ *   overlay.js  — extension-origin iframe; owns the Nisli Chat registry.
  *   inpage.js   — page world. The only bundle a site can touch; kept free of
  *                 protocol crypto so nothing key-shaped is ever parsed there.
  *   popup.js    — extension origin.
@@ -41,6 +42,7 @@ const shared = {
 const builds: esbuild.BuildOptions[] = [
   { ...shared, entryPoints: [join(here, 'src/sw.ts')], outfile: join(outdir, 'sw.js'), format: 'esm' },
   { ...shared, entryPoints: [join(here, 'src/content.ts')], outfile: join(outdir, 'content.js'), format: 'iife' },
+  { ...shared, entryPoints: [join(here, 'src/overlay.ts')], outfile: join(outdir, 'overlay.js'), format: 'iife' },
   { ...shared, entryPoints: [join(here, 'src/inpage.ts')], outfile: join(outdir, 'inpage.js'), format: 'iife' },
   { ...shared, entryPoints: [join(here, 'src/popup.ts')], outfile: join(outdir, 'popup.js'), format: 'iife' },
   { ...shared, entryPoints: [join(here, 'src/consent.ts')], outfile: join(outdir, 'consent.js'), format: 'iife' },

@@ -681,3 +681,91 @@ and executable evidence. The cost is intentional: protocol changes carry a
 documentation and adversarial-test obligation, metadata cannot be hand-waved
 as encrypted, and availability is allowed to fail before confidentiality or
 authority does.
+
+---
+
+## ADR-020: One chat renderer, with an extension-origin frame for injected UI — accepted
+
+**Context.** Inkwell and the Chrome extension had independently implemented
+the same transcript, composer, streaming, tool, queue, and cancellation UI.
+The duplicate renderer had already drifted. The replacement chat set in
+`src/nisli-ui` is deliberately protocol-neutral, but Nisli components are Web
+Components and therefore need a custom-element registry in the JavaScript
+realm that constructs them.
+
+Scoped custom-element registries initially appeared to make those components
+safe inside an isolated content script: Chromium 146 added constructable
+registries, registry-scoped shadow roots, and registry-selected element
+creation. A real unpacked-extension test on Chrome for Testing 151 disproved
+that design. The isolated-world component was registered, but construction
+failed with `Failed to construct 'HTMLElement': Illegal constructor`.
+Chromium also explicitly prevents registry objects from crossing extension
+world IDs because constructors and `whenDefined()` promises would otherwise
+leak executable objects between worlds.
+
+Lit is relevant prior art but does not remove that browser boundary. Lit's
+renderer accepts a destination `creationScope`, and its Labs scoped-registry
+mixin passes a shadow render root into template cloning. That mixin still
+targets the earlier speculative API/polyfill (`customElements` and
+`ShadowRoot.importNode`), is marked experimental, and assumes the component
+constructor can execute in the render realm. It helps explain how a renderer
+propagates registry ownership; it does not make an isolated extension world an
+extension-owned component realm.
+
+**Decision.** There is one semantic chat renderer: the Nisli `Chat` component
+tree and `createChatStore()` in `src/nisli-ui`. Inkwell mounts it in the site
+document. The extension mounts the identical source in an extension-origin
+iframe, where the document, JavaScript realm, and global custom-element
+registry belong to the extension.
+
+The isolated content script remains the mediator. It creates only ordinary DOM:
+a host, a closed shadow root, and the iframe. The closed root prevents page code
+from obtaining the live iframe window; it is not treated as proof of UI
+authenticity or availability. A private transferred `MessagePort` carries a
+narrow semantic command/action vocabulary between mediator and renderer. The
+page never receives that port, session references, grants, approvals, resume
+authority, or raw worker frames.
+
+The content script owns session state, page tools, worker communication, prompt
+IDs, and cancellation. The iframe owns presentation state only. It may request
+`attach`, `detach`, `prompt`, `cancel`, or one of the fixed compact/panel
+layouts. The mediator may send phase/name changes, notices, user content, and
+protocol-neutral `ChatUpdate`s. Unknown or malformed actions are ignored.
+
+Consent and approval remain in extension chrome. An in-page surface can always
+be removed, covered, or imitated by the page, regardless of shadow mode or
+iframe origin, so it must never become an authority surface.
+
+**Alternatives.** Keeping a second template-only chat was rejected because it
+duplicates behavior and accessibility work. Running components in the content
+script with the global registry was rejected because the page owns the tag
+namespace and Chromium does not expose the main-world registry to an isolated
+world. A fresh scoped registry was rejected for this surface because the real
+browser construction path fails across the isolated-world/DOM realm boundary.
+Running the component bundle in the page's main world was rejected because page
+code could replace APIs and observe or alter application objects. A second
+renderer library such as Lit was rejected because it adds a runtime without
+changing any of those realm constraints.
+
+**Consequences.** Both surfaces now share component behavior and semantic
+updates while retaining different outer shells and trust boundaries. The
+extension pays for one small extension document and a typed message adapter.
+The page can deny availability by removing the host, which closes the widget
+session; it cannot reach the extension iframe DOM or turn transcript controls
+into consent. There is no legacy renderer and no protocol name in component
+APIs.
+
+**Implementation evidence.** Unit/type checks cover the semantic chat store and
+both consumers. The extension build must additionally be loaded as an unpacked
+extension in real Chrome, open the widget, and prove that the rendered tree
+contains the shared `ui-chat`/`data-slot` contract without isolated-world
+constructor exceptions.
+
+**Authoritative prior art and platform references.**
+
+- [HTML Standard: custom elements and registry association](https://html.spec.whatwg.org/multipage/custom-elements.html)
+- [Chrome: scoped custom-element registries](https://developer.chrome.com/blog/scoped-registries)
+- [Chrome Extensions: content scripts and isolated worlds](https://developer.chrome.com/docs/extensions/develop/concepts/content-scripts)
+- [Chromium: cross-world scoped-registry isolation fix](https://chromium.googlesource.com/chromium/src/+/40b2818870e8acc4d968e4ea966decc9b5c8c020%5E%21/)
+- [Lit Labs scoped-registry mixin source](https://github.com/lit/lit/blob/main/packages/labs/scoped-registry-mixin/src/scoped-registry-mixin.ts)
+- [lit-html `creationScope` implementation](https://github.com/lit/lit/blob/main/packages/lit-html/src/lit-html.ts)

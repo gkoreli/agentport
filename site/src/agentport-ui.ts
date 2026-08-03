@@ -395,27 +395,6 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
 
   const empty = 'Ask your agent something.';
 
-  const approvalCards = each(
-    pendingApprovals,
-    (approval) => approval.id,
-    (approval) => {
-      const summary = computed(() => approval.value.prompt.summary);
-      const toolName = computed(() => approval.value.prompt.call?.name ?? 'Agent request');
-      const hasArguments = computed(() => approval.value.prompt.call !== undefined);
-      const argumentsText = computed(() => JSON.stringify(approval.value.prompt.call?.arguments ?? {}, null, 2));
-      return html`<section class="ap-approval" aria-live="polite">
-        <div class="ap-approval-label">Approval required</div>
-        <strong>${summary}</strong>
-        <span class="ap-approval-tool">${toolName}</span>
-        ${when(hasArguments, () => html`<pre>${argumentsText}</pre>`)}
-        <div class="ap-approval-actions">
-          <button class="deny" @click=${() => settleApproval(approval.value.id, false)}>Deny</button>
-          <button @click=${() => settleApproval(approval.value.id, true)}>Allow</button>
-        </div>
-      </section>`;
-    },
-  );
-
   return html`
     <div class="ap-head">
       <span>Agent <span class="ap-version" title="AgentPort build">v${VERSION}</span></span
