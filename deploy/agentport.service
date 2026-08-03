@@ -25,10 +25,11 @@ User=root
 WorkingDirectory=/root/agentport
 ExecStart=/usr/bin/env npx tsx packages/daemon/src/cli.ts
 
+Environment=AGENTPORT_WALLET=https://agentport.gogakoreli.workers.dev/pair
 Environment=AGENTPORT_RELAY=wss://agentport.gogakoreli.workers.dev/relay
 Environment=AGENTPORT_RUNTIME=claude-code
-Environment=AGENTPORT_NAME=Goga's VPS Agent
-Environment=AGENTPORT_LOCATION=Personal VPS
+Environment="AGENTPORT_NAME=Goga's VPS Agent"
+Environment="AGENTPORT_LOCATION=Personal VPS"
 Environment=AGENTPORT_IDENTITY=/root/.agentport/agent.json
 Environment=AGENTPORT_AGENT_CWD=/root
 
