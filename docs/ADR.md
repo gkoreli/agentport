@@ -407,3 +407,35 @@ cert persistence remains until rung A removes the need). Relay-side session
 state becomes an implementation detail of one transport, never the product's
 memory. The "relay can be run by anyone" claim becomes literal: stateless
 forwarders are fungible.
+
+---
+
+## ADR-017: Adopt AG-UI as the UI-event edge, via an adapter — accepted
+
+**Context.** AG-UI standardizes the agent→UI event stream (text deltas, tool
+call lifecycle, state sync, human-in-the-loop) with a growing ecosystem of
+ready renderers (CopilotKit et al.). It is perpendicular to WebMCP: WebMCP is
+the site→agent capability direction, AG-UI is the agent→screen direction. A
+single AgentPort session uses both at once. Neither defines identity, grants,
+consent, or transport — the middle stays ours (same finding as ADR-006).
+
+**Decision.** Integrate as an ADAPTER at the client edge, not as the wire
+format:
+
+- Ship `@agentport/agui`: translate a live `AgentSession` into an AG-UI event
+  stream (`delta` → TEXT_MESSAGE_CONTENT, `tool.call`/`tool.result` →
+  TOOL_CALL_*, `thought` → thinking events, `approval.request` → the
+  human-in-the-loop pattern). Any AG-UI-compatible component can then render
+  an AgentPort session with zero custom code.
+- Our SessionFrame vocabulary REMAINS the sealed wire format. It carries what
+  AG-UI has no words for (epk handshakes, grants, resume, approval authority),
+  and interop has no value inside ciphertext — only at the edges where other
+  people's code runs.
+- Revisit aligning the inner content vocabulary with AG-UI only if it clearly
+  wins its layer; premature while the spec is young.
+
+**Consequences.** The standardized stack positioning is complete: WebMCP at
+the input edge (ADR-006), ACP at the runtime (ADR-004), AG-UI at the output
+edge (this), AgentPort as the trust-and-transport middle none of them define.
+One sentence: WebMCP tools in, AG-UI events out, your agent in the middle,
+nobody in between.
