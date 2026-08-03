@@ -48,6 +48,8 @@ if (command === 'connect') {
   // Internal systemd entry point. Kept out of user-facing help.
   defaults();
   await import('@agentport/daemon/cli');
+} else if (command === '--version' || command === '-v') {
+  console.log(CLI_VERSION);
 } else {
   console.log(`AgentPort ${CLI_VERSION}\n\n  npx @gkoreli/agentport\n\nStarts your agent, or pairs the always-on agent already running on this machine.`);
   process.exit(command === 'help' || command === '--help' ? 0 : 1);
