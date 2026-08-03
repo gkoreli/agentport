@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { AgentDaemon } from './daemon.js';
 import { loadIdentity, saveIdentity } from './identity.js';
-import { pairingControlPath, writePairingControl } from './pairing-control.js';
+import { pairingControlPath, readPairingControl, writePairingControl } from './pairing-control.js';
 import { RUNTIMES, registerRuntime } from './runtime.js';
 import { McpBridge } from './mcp-bridge.js';
 import { AcpRuntime } from './runtimes/acp.js';
@@ -137,15 +137,19 @@ if (bound) {
   if (process.env.AGENTPORT_PAIR_ON_START === '1') daemon.beginPairing();
 }
 
-process.on('SIGUSR1', () => {
+let handledPairRequest: string | undefined;
+const pairingControlTimer = setInterval(() => {
   try {
+    const state = readPairingControl(pairingPath);
+    if (state?.status !== 'request' || state.id === handledPairRequest) return;
+    handledPairRequest = state.id;
     daemon.beginPairing();
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     writePairingControl(pairingPath, { status: 'error', message, at: Date.now() });
     log.error('could not begin pairing', { err });
   }
-});
+}, 200);
 
 console.log('');
 console.log('  Paste a connect code from any site using the AgentPort widget:');
@@ -159,6 +163,7 @@ rl.on('line', (line) => {
 
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   process.on(signal, () => {
+    clearInterval(pairingControlTimer);
     void daemon.stop().then(
       () => process.exit(0),
       (err: unknown) => {

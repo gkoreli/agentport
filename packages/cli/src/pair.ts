@@ -1,27 +1,12 @@
-import { spawnSync } from 'node:child_process';
-import { unlinkSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { pairingControlPath, readPairingControl } from '@agentport/daemon/pairing-control';
+import { pairingControlPath, readPairingControl, writePairingControl } from '@agentport/daemon/pairing-control';
+import { randomId } from '@agentport/protocol';
 
 const identityPath = process.env.AGENTPORT_IDENTITY ?? join(homedir(), '.agentport', 'agent.json');
 const statePath = pairingControlPath(identityPath);
 
-if (process.platform !== 'linux') {
-  throw new Error('agentport pair currently requires an installed Linux systemd service');
-}
-
-try {
-  unlinkSync(statePath);
-} catch (err) {
-  if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
-}
-
-const signalled = spawnSync('systemctl', ['kill', '--signal=SIGUSR1', 'agentport.service'], { encoding: 'utf8' });
-if (signalled.status !== 0) {
-  const detail = (signalled.stderr || signalled.stdout).trim();
-  throw new Error(`could not ask the AgentPort service to pair${detail ? `: ${detail}` : ''}`);
-}
+writePairingControl(statePath, { status: 'request', id: randomId('pair_'), requestedAt: Date.now() });
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 const startedAt = Date.now();

@@ -3,6 +3,7 @@ import { dirname, join } from 'node:path';
 import { randomId } from '@agentport/protocol';
 
 export type PairingControlState =
+  | { status: 'request'; id: string; requestedAt: number }
   | { status: 'pending'; code: string; url: string; expiresAt: number }
   | { status: 'bound'; user: string; pairedAt: number }
   | { status: 'error'; message: string; at: number };
@@ -22,6 +23,9 @@ export function writePairingControl(path: string, state: PairingControlState): v
 export function readPairingControl(path: string): PairingControlState | undefined {
   try {
     const value = JSON.parse(readFileSync(path, 'utf8')) as Partial<PairingControlState>;
+    if (value.status === 'request' && typeof value.id === 'string' && typeof value.requestedAt === 'number') {
+      return value as Extract<PairingControlState, { status: 'request' }>;
+    }
     if (value.status === 'pending' && typeof value.code === 'string' && typeof value.url === 'string' && typeof value.expiresAt === 'number') {
       return value as Extract<PairingControlState, { status: 'pending' }>;
     }
