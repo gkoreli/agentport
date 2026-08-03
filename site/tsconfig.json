@@ -5,5 +5,5 @@
     "types": ["node"],
     "composite": false, "declaration": false, "declarationMap": false, "noEmit": true
   },
-  "include": ["src/agentport-ui.ts", "src/inkwell.ts", "src/tasker.ts", "build.ts"]
+  "include": ["src/agentport-ui.ts", "src/connect.ts", "src/inkwell.ts", "src/tasker.ts", "src/webmcp.ts", "build.ts"]
 }

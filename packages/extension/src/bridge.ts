@@ -71,7 +71,7 @@ export type PageOutbound =
   | { t: 'prompt.cancel'; ref: string; promptId: string }
   | { t: 'tool.result'; callId: string; ok: boolean; result?: unknown; error?: string }
   | { t: 'close'; ref: string; reason?: string }
-  /** WebMCP interop: the page tells us what `navigator.modelContext` holds. */
+  /** WebMCP interop: definitions harvested from the page-world modelContext. */
   | { t: 'webmcp.tools'; tools: ToolDefinition[] };
 
 export type PageInbound =

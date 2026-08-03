@@ -128,10 +128,12 @@ Every page gets a floating ◆ button in the top frame. Attaching opens the same
 consent flow as a site-declared grant, over one of two toolsets:
 
 - **WebMCP, if the site has any.** `src/inpage.ts` wraps
-  `navigator.modelContext` when it exists and installs a minimal shim when it
-  does not, so a site that registers tools gets AgentPort for free. Harvested
-  tools execute in the page (that is where they were defined), and anything the
-  site did not explicitly annotate `readOnlyHint` is gated behind approval.
+  `document.modelContext` when it exists, falls back to the deprecated
+  `navigator.modelContext`, and installs a minimal two-spelling shim when
+  neither exists, so a site that registers tools gets AgentPort for free.
+  Harvested tools execute in the page (that is where they were defined). They
+  are ungated by default because the site deliberately published them;
+  `annotations.destructiveHint: true` opts a tool into per-call approval.
 - **Otherwise the generic `page.*` toolset:** `page.info`, `page.readText`,
   `page.readSelection`, `page.listElements`, `page.scroll` are ungated reads;
   `page.fill` and `page.click` mutate the document and always ask. Writes

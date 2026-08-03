@@ -189,8 +189,9 @@ Not built yet, in rough priority order:
 3. **Extension packaging.** The wallet lives in the page today, which is only
    acceptable for a demo — the page can reach the user key. Move it behind an
    extension boundary with `postMessage`.
-4. **WebMCP interop.** Consume `navigator.modelContext` tool registrations as
-   `SiteTool`s so sites get AgentPort for free once they support WebMCP.
+4. ~~WebMCP interop.~~ **Done.** Both connect.js and the extension harvest
+   `document.modelContext` registrations (with the deprecated
+   `navigator.modelContext` fallback) into `SiteTool`s at attachment time.
 5. **Revocation UI.** `CertStore.remove` exists; nothing calls it.
 6. **Reconnect + session resume.** Sockets are assumed stable; they aren't.
 

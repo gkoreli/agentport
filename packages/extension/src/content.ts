@@ -385,7 +385,7 @@ async function attachWidget(): Promise<void> {
     ui.widget.phase.value = 'attached';
     ui.widget.note(
       usingWebMcp
-        ? `Attached with ${webmcpTools.length} tool(s) this site published via navigator.modelContext.`
+        ? `Attached with ${webmcpTools.length} tool(s) this site published via WebMCP.`
         : `Attached with the generic page toolset. Reads are free; anything that changes the page asks first.`,
     );
   } catch (err) {
