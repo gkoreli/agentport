@@ -596,6 +596,10 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     }
     const sealChannel = deriveSealChannel(mine.secretKey, frame.epk, frame.s, 'agent');
     const resumeToken = toHex(randomBytes(24));
+    // The proof authenticates the exact clear response the client receives.
+    // Delegated pages receive a generic label, so signing the private label
+    // here would make a valid response unverifiable at the other endpoint.
+    const responseAgentName = frame.delegation ? 'Personal agent' : this.#options.identity.name;
     const myEpk = {
       epk: mine.publicKey,
       epkSig: signEpk(
@@ -603,7 +607,7 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
         frame.s,
         mine.publicKey,
         answerProofBinding(frame.viaConnect ? 'connect' : 'open', frame.client, frame.epk, frame.surface, frame.grant, {
-          agentName: this.#options.identity.name,
+          agentName: responseAgentName,
           runtime: this.#options.identity.runtime,
           resume: resumeToken,
         }),
@@ -657,7 +661,7 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
       s: frame.s,
       // A delegated page receives the generic label the hosted wallet showed;
       // the user's real agent name stays inside the wallet-origin popup.
-      agentName: frame.delegation ? 'Personal agent' : this.#options.identity.name,
+      agentName: responseAgentName,
       runtime: this.#options.identity.runtime,
       resume: session.resumeToken,
       ...myEpk,
