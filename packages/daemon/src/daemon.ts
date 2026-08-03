@@ -124,6 +124,7 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
   #offerSeals = new Map<string, KeyPair>();
   #log: Logger;
   #readyDeferred = new Deferred<{ bound: boolean }>();
+  #authenticated = false;
   #stopped = false;
   #retryMs = 1000;
   #heartbeat: ReturnType<typeof setInterval> | undefined;
@@ -202,6 +203,7 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     }, 30_000);
 
     socket.on('close', () => {
+      this.#authenticated = false;
       clearInterval(this.#heartbeat);
       // The relay is stateless: losing it detaches every session but kills
       // none. Clients come back with their tokens through whatever relay
@@ -230,6 +232,12 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
   /** Claim a connect code the user pasted here from a website's widget. */
   claimConnect(code: string): void {
     this.#send({ t: 'connect.claim', code });
+  }
+
+  /** Mint a fresh one-time wallet pairing offer on this authenticated socket. */
+  beginPairing(): void {
+    if (!this.#authenticated) throw new Error('agent is not connected to the relay');
+    this.#send({ t: 'pair.begin' });
   }
 
   async stop(): Promise<void> {
@@ -283,6 +291,7 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
 
       case 'ready': {
         this.#retryMs = 1000;
+        this.#authenticated = true;
         const bound = Boolean(frame.bound);
         this.emit('ready', { bound });
         this.#readyDeferred.resolve({ bound });

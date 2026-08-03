@@ -1,9 +1,9 @@
 /**
- * The published entry point: `npx @agentport/cli` and everything just works.
+ * The published entry point. Users run one command; whether an always-on
+ * service already owns the agent is an implementation detail handled here.
  *
- *   npx agentport               run the agent daemon (prints a pairing code)
+ *   npx agentport               start the agent or pair the running one
  *   npx agentport connect CODE  approve a drop-in connect code from a site
- *   npx agentport service       install the always-on systemd unit (Linux)
  *
  * This wrapper exists so a bare VPS needs no repo checkout: it sets the
  * defaults a fresh machine wants — the deployed relay, the Claude Code
@@ -14,10 +14,9 @@
 
 import { hostname } from 'node:os';
 import { spawnSync } from 'node:child_process';
-import { writeFileSync } from 'node:fs';
-import { createLogger } from '@agentport/protocol';
 
-const log = createLogger('cli');
+declare const __AGENTPORT_CLI_VERSION__: string;
+const CLI_VERSION = typeof __AGENTPORT_CLI_VERSION__ === 'string' ? __AGENTPORT_CLI_VERSION__ : 'development';
 
 const DEPLOYED_RELAY = 'wss://agentport.gogakoreli.workers.dev/relay';
 
@@ -36,54 +35,20 @@ if (command === 'connect') {
   process.argv.splice(2, 1);
   defaults();
   await import('@agentport/daemon/connect-cli');
-} else if (command === 'service') {
+} else if (command === undefined) {
   defaults();
-  const unit = `[Unit]
-Description=AgentPort agent daemon
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=${process.env.SUDO_USER ?? process.env.USER ?? 'root'}
-ExecStart=/usr/bin/env npx -y @agentport/cli daemon
-Environment=AGENTPORT_RELAY=${process.env.AGENTPORT_RELAY}
-Environment=AGENTPORT_RUNTIME=${process.env.AGENTPORT_RUNTIME}
-Environment=AGENTPORT_NAME=${process.env.AGENTPORT_NAME}
-Environment=AGENTPORT_LOCATION=${process.env.AGENTPORT_LOCATION}
-UMask=0077
-Restart=always
-RestartSec=5
-NoNewPrivileges=true
-PrivateTmp=true
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=multi-user.target
-`;
-  if (process.platform !== 'linux') {
-    log.error('service install is only supported on Linux/systemd');
-    process.exit(1);
+  const serviceIsActive = process.platform === 'linux' &&
+    spawnSync('systemctl', ['is-active', '--quiet', 'agentport.service']).status === 0;
+  if (serviceIsActive) await import('./pair.js');
+  else {
+    process.env.AGENTPORT_PAIR_ON_START = '1';
+    await import('@agentport/daemon/cli');
   }
-  try {
-    writeFileSync('/etc/systemd/system/agentport.service', unit);
-  } catch (err) {
-    log.error('could not install systemd service; run with sudo', {
-      err,
-      data: { path: '/etc/systemd/system/agentport.service' },
-    });
-    process.exit(1);
-  }
-  for (const args of [['daemon-reload'], ['enable', '--now', 'agentport']]) {
-    const result = spawnSync('systemctl', args, { stdio: 'inherit' });
-    if (result.status !== 0) process.exit(result.status ?? 1);
-  }
-  console.log('agentport is now always-on. Watch it with: journalctl -u agentport -f');
-} else if (command === undefined || command === 'daemon') {
+} else if (command === 'daemon') {
+  // Internal systemd entry point. Kept out of user-facing help.
   defaults();
   await import('@agentport/daemon/cli');
 } else {
-  console.log('usage: agentport [daemon | connect <CODE> | service]');
+  console.log(`AgentPort ${CLI_VERSION}\n\n  npx agentport\n\nStarts your agent, or pairs the always-on agent already running on this machine.`);
   process.exit(command === 'help' || command === '--help' ? 0 : 1);
 }

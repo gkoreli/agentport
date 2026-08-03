@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Pair your agent — AgentPort</title>
+<link rel="stylesheet" href="/styles.css"/>
+<style>
+  .pair-card { max-width: 560px; margin: 14vh auto 0; padding: 32px; text-align: center; }
+  .pair-card h1 { margin: 0 0 12px; }
+  #pair-status { color: var(--muted, #8d96a5); }
+  #pair-status[data-state="done"] { color: #72d49b; }
+  #pair-status[data-state="error"] { color: #ff8b8b; }
+</style></head><body>
+<main class="card pair-card">
+  <h1>Pair your agent</h1>
+  <p id="pair-status">Waiting for the AgentPort extension…</p>
+  <p class="hint">The approval opens in extension chrome. This page cannot sign or approve anything.</p>
+</main>
+</body></html>

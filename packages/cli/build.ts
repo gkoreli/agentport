@@ -6,6 +6,9 @@
  * treats them.
  */
 import { build } from 'esbuild';
+import { readFileSync } from 'node:fs';
+
+const { version } = JSON.parse(readFileSync('package.json', 'utf8')) as { version: string };
 
 await build({
   entryPoints: ['src/main.ts'],
@@ -14,6 +17,7 @@ await build({
   platform: 'node',
   target: 'node20',
   format: 'esm',
+  define: { __AGENTPORT_CLI_VERSION__: JSON.stringify(version) },
   external: ['bufferutil', 'utf-8-validate'],
   banner: {
     js: [

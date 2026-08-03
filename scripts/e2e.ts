@@ -126,6 +126,7 @@ const user = generateKeyPair();
 const agentKeys = generateKeyPair();
 
 const pairingCode = new Deferred<string>();
+let pairingSink = pairingCode;
 const daemon = new AgentDaemon({
   relayUrl,
   identity: {
@@ -136,7 +137,7 @@ const daemon = new AgentDaemon({
     location: 'Personal VPS',
   },
   createRuntime: () => new DemoWriterRuntime(),
-  onPairingCode: (code) => pairingCode.resolve(code),
+  onPairingCode: (code) => pairingSink.resolve(code),
 });
 
 console.log('1. pairing');
@@ -154,6 +155,13 @@ check('wallet sees the agent announcement', offer.agent.name === "Goga's Writing
 
 const cert = await wallet.approvePairing(offer);
 check('cert binds agent to user', cert.user === user.publicKey && cert.agent === agentKeys.publicKey);
+
+const renewedPairingCode = new Deferred<string>();
+pairingSink = renewedPairingCode;
+daemon.beginPairing();
+const renewedOffer = await wallet.claimPairing(await renewedPairingCode.promise);
+const renewedCert = await wallet.approvePairing(renewedOffer);
+check('a running bound agent can mint a fresh pairing link', renewedCert.agent === agentKeys.publicKey);
 
 console.log('\n2. discovery');
 const agents = await wallet.listAgents();

@@ -39,6 +39,7 @@ import { AGENTPORT_VERSION } from './version.js';
 
 const CHANNEL = mintId('ch_');
 const TOOL_CALL_TIMEOUT_MS = 30_000;
+const PAIR_CODE = /^[A-Z2-9]{4}-[A-Z2-9]{4}$/;
 const log = createLogger('extension.content');
 
 type ToolRoute = 'page' | ((args: Record<string, unknown>) => unknown | Promise<unknown>);
@@ -119,6 +120,29 @@ function injectProvider(): void {
   script.async = false;
   script.addEventListener('load', () => script.remove());
   (document.head ?? document.documentElement).append(script);
+}
+
+/** The pairing link contains no authority: it only opens an extension-owned
+ * confirmation. The content script reports success into the otherwise static
+ * page so the user never has to open the popup or paste a code. */
+function handlePairingLink(): void {
+  if (window.top !== window || location.pathname !== '/pair') return;
+  const code = new URLSearchParams(location.hash.slice(1)).get('code')?.trim().toUpperCase();
+  if (!code || !PAIR_CODE.test(code)) return;
+  const status = () => document.getElementById('pair-status');
+  const show = (message: string, failed = false) => {
+    const target = status();
+    if (!target) {
+      document.addEventListener('DOMContentLoaded', () => show(message, failed), { once: true });
+      return;
+    }
+    target.textContent = message;
+    target.dataset['state'] = failed ? 'error' : 'done';
+  };
+  request<{ agent: { name: string } }>((rid) => ({ t: 'pair.link', rid, code })).then(
+    (result) => show(`${result.agent.name} is paired. You can close this tab.`),
+    (err: Error) => show(err.message, true),
+  );
 }
 
 window.addEventListener('message', (event: MessageEvent) => {
@@ -461,10 +485,11 @@ function onWidgetClosed(reason: string): void {
 // --- boot ------------------------------------------------------------------
 
 injectProvider();
+handlePairingLink();
 
 // Only the top frame gets a widget: a floating panel per iframe would be noise,
 // and an iframe is not where a user expects to grant page-wide capabilities.
-if (window.top === window) {
+if (window.top === window && location.pathname !== '/pair') {
   const start = () => overlay().widget.show();
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, { once: true });
   else start();

@@ -46,17 +46,14 @@ remote agent** a **site-defined toolset**. That's this.
 **https://agentport.gogakoreli.workers.dev** — one Cloudflare Worker serving both
 demo surfaces and the relay they connect to.
 
-Point your own agent at it:
+Start your agent and pair it with Chrome:
 
 ```bash
-AGENTPORT_RELAY=wss://agentport.gogakoreli.workers.dev/relay \
-AGENTPORT_RUNTIME=claude-code \
-npm run daemon
+npx agentport
 ```
 
-Paste the pairing code it prints into either surface, and the panel is talking
-to your machine. Connect on Inkwell, then open Tasker: same agent, entirely
-different hands.
+Open the one-time link it prints and approve in the extension-owned window.
+Connect on Inkwell, then open Tasker: same agent, entirely different hands.
 
 ## Try it locally
 

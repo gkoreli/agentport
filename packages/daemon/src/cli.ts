@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { AgentDaemon } from './daemon.js';
 import { loadIdentity, saveIdentity } from './identity.js';
+import { pairingControlPath, writePairingControl } from './pairing-control.js';
 import { RUNTIMES, registerRuntime } from './runtime.js';
 import { McpBridge } from './mcp-bridge.js';
 import { AcpRuntime } from './runtimes/acp.js';
@@ -48,6 +49,7 @@ registerRuntime(
 const relayUrl = process.env.AGENTPORT_RELAY ?? 'ws://127.0.0.1:8787';
 const walletUrl = process.env.AGENTPORT_WALLET ?? 'http://127.0.0.1:8788/pair';
 const identityPath = process.env.AGENTPORT_IDENTITY ?? join(homedir(), '.agentport', 'agent.json');
+const pairingPath = pairingControlPath(identityPath);
 const runtimeName = process.env.AGENTPORT_RUNTIME ?? 'demo-writer';
 
 const createRuntime = RUNTIMES[runtimeName];
@@ -83,11 +85,13 @@ const daemon = new AgentDaemon({
   relayUrl,
   identity,
   createRuntime,
-  onPairingCode: (code) => {
+  onPairingCode: (code, expiresAt) => {
+    const url = `${walletUrl}#code=${code}`;
+    writePairingControl(pairingPath, { status: 'pending', code, url, expiresAt });
     console.log('');
     console.log('  Your agent is ready to pair:');
     console.log('');
-    console.log(`    ${walletUrl}#code=${code}`);
+    console.log(`    ${url}`);
     console.log('');
     console.log(`  Code: ${code}`);
     console.log('');
@@ -119,6 +123,7 @@ const daemon = new AgentDaemon({
 
   onBound: (cert) => {
     saveIdentity(identityPath, { ...identity, cert });
+    writePairingControl(pairingPath, { status: 'bound', user: cert.user, pairedAt: Date.now() });
     log.info('agent paired and selectable in the picker', { data: { user: cert.user.slice(0, 16) } });
   },
 });
@@ -127,7 +132,20 @@ const { bound } = await daemon.start();
 log.info('agent connected to relay', {
   data: { name: identity.name, agent: identity.publicKey.slice(0, 16), relayUrl },
 });
-if (bound) log.info('agent already paired; waiting for sessions');
+if (bound) {
+  log.info('agent already paired; waiting for sessions');
+  if (process.env.AGENTPORT_PAIR_ON_START === '1') daemon.beginPairing();
+}
+
+process.on('SIGUSR1', () => {
+  try {
+    daemon.beginPairing();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    writePairingControl(pairingPath, { status: 'error', message, at: Date.now() });
+    log.error('could not begin pairing', { err });
+  }
+});
 
 console.log('');
 console.log('  Paste a connect code from any site using the AgentPort widget:');

@@ -116,8 +116,8 @@ const Pairing = component('ap-pairing', () => {
       ${when(firstRun, () => html`
         <p>Your agent runs in a terminal; this extension is only its wallet. To pair the two, once:</p>
         <ol class="steps">
-          <li>In a terminal (laptop or server), run <code>npx agentport</code> and leave it running.</li>
-          <li>It prints a short pairing code — paste it below.</li>
+          <li>On your laptop or VPS, run <code>npx agentport</code>.</li>
+          <li>Open the link it prints and approve here.</li>
         </ol>
         <p class="hint">After that, connecting on any site is one tap, and approvals appear where the agent runs.</p>`)}
       ${when(computed(() => offer.value === null), () => html`
@@ -135,7 +135,7 @@ const Pairing = component('ap-pairing', () => {
             offer.value = claimed;
           })}>Pair</button>
         </div>
-        <p class="hint">The code is printed where your agent runs — <code>npx agentport</code> on your server.</p>`)}
+        <p class="hint">Pairing links fill this automatically. Manual entry is for moving a code between different devices.</p>`)}
       ${when(computed(() => offer.value !== null), () => {
         const current = offer.value!;
         return html`

@@ -379,6 +379,17 @@ function askConnect(origin: string, agents: AgentRow[], request: PageConnectRequ
   return pending.deferred.promise.then((value) => (typeof value === 'string' ? value : null));
 }
 
+function askPair(agent: { name: string; runtime: string; location?: string }): Promise<boolean> {
+  const pending: PendingUi = {
+    id: mintId('ui_'),
+    payload: { kind: 'pair', agent },
+    deferred: new Deferred<unknown>(),
+  };
+  pendingUi.set(pending.id, pending);
+  observe(openUiWindow(pending), 'pairing consent window flow failed', { data: { pendingId: pending.id } });
+  return pending.deferred.promise.then((value) => value === true);
+}
+
 /** A per-call approval. Notification with buttons when possible; the consent
  *  window otherwise. Never the page. */
 function askApproval(
@@ -805,6 +816,32 @@ function handleContent(port: chrome.runtime.Port): void {
 
 async function onContentMessage(port: chrome.runtime.Port, message: ContentRequest): Promise<void> {
   switch (message.t) {
+    case 'pair.link': {
+      const senderUrl = port.sender?.url;
+      const configuredRelay = new URL(await relayUrl());
+      configuredRelay.protocol = configuredRelay.protocol === 'wss:' ? 'https:' : 'http:';
+      const sender = senderUrl ? new URL(senderUrl) : undefined;
+      if (!sender || sender.origin !== configuredRelay.origin || sender.pathname !== '/pair') {
+        post(port, { t: 'err', rid: message.rid, reason: 'denied', message: 'pairing links are only accepted from your configured AgentPort host' });
+        return;
+      }
+      const code = message.code.trim().toUpperCase();
+      if (!/^[A-Z2-9]{4}-[A-Z2-9]{4}$/.test(code)) {
+        post(port, { t: 'err', rid: message.rid, reason: 'denied', message: 'invalid pairing code' });
+        return;
+      }
+      const wallet = await getWallet();
+      const offer = await wallet.claimPairing(code);
+      const approved = await askPair(offer.agent);
+      if (!approved) {
+        post(port, { t: 'err', rid: message.rid, reason: 'cancelled', message: 'pairing declined' });
+        return;
+      }
+      const cert = await wallet.approvePairing(offer);
+      await saveCert({ agent: cert.agent, name: cert.name, runtime: cert.runtime, location: cert.location });
+      post(port, { t: 'ok', rid: message.rid, value: { agent: { name: cert.name } } });
+      return;
+    }
     case 'status': {
       const pubkey = await userPublicKey();
       post(port, { t: 'ok', rid: message.rid, value: { hasIdentity: Boolean(pubkey), relay: await relayUrl() } });

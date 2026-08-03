@@ -125,6 +125,7 @@ export type ExtensionProviderErrorReason =
 
 export type ContentToWorker =
   | { t: 'hello'; version: string }
+  | { t: 'pair.link'; rid: string; code: string }
   | { t: 'connect'; rid: string; from: Origin; request: PageConnectRequest }
   | { t: 'resume'; rid: string; from: Origin; request: PageConnectRequest }
   | { t: 'history'; rid: string; ref: string }
@@ -154,6 +155,7 @@ export type WorkerToContent =
 
 export type ConsentPayload =
   | { kind: 'connect'; origin: string; request: PageConnectRequest; agents: AgentRow[] }
+  | { kind: 'pair'; agent: { name: string; runtime: string; location?: string } }
   | {
       kind: 'approve';
       origin: string;

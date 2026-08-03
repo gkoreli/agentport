@@ -13,6 +13,7 @@
  */
 
 import { component, computed, each, html, signal, when } from '@nisli/core';
+import { randomId } from '@agentport/protocol';
 import type { AgentRow, ConsentPayload, ConsentToWorker } from './bridge.js';
 
 const port = chrome.runtime.connect({ name: 'agentport.consent' });
@@ -134,12 +135,34 @@ const Approve = component('ap-consent-approve', () => {
     </main>`;
 });
 
+const Pair = component('ap-consent-pair', () => {
+  const state = payload.value as Extract<ConsentPayload, { kind: 'pair' }>;
+  return html`
+    <main>
+      <header><b>AgentPort</b><span>pair agent</span></header>
+      <section>
+        <p class="surface">Add this agent to your wallet?</p>
+        <div class="card">
+          <b>${state.agent.name}</b>
+          <small>${state.agent.runtime} · ${state.agent.location ?? 'unknown location'}</small>
+        </div>
+        <p class="hint">Pairing signs an ownership certificate inside this extension. The agent's device key stays on its machine, and your wallet key never leaves Chrome.</p>
+      </section>
+      <footer>
+        <button type="button" @click=${() => answer(false)}>Decline</button>
+        <button class="primary" type="button" @click=${() => answer(true)}>Pair agent</button>
+      </footer>
+    </main>`;
+});
+
 const App = component('ap-consent', () => {
   const view = computed(() => {
     if (error.value) return html`<main><section><p class="hint">${error.value}</p></section></main>`;
     const current = payload.value;
     if (!current) return html`<main><section><p class="hint">Loading…</p></section></main>`;
-    return current.kind === 'connect' ? Connect({}) : Approve({});
+    if (current.kind === 'connect') return Connect({});
+    if (current.kind === 'pair') return Pair({});
+    return Approve({});
   });
   return html`${view}`;
 });
@@ -160,7 +183,7 @@ window.addEventListener('pagehide', () => {
   }
 });
 
-void ask<ConsentPayload>({ t: 'consent.get', rid: `r_${Math.random().toString(36).slice(2, 10)}`, id: questionId }).then(
+void ask<ConsentPayload>({ t: 'consent.get', rid: randomId('r_'), id: questionId }).then(
   (value) => {
     payload.value = value;
   },
