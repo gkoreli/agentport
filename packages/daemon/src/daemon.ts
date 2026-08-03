@@ -585,22 +585,6 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
       return;
     }
 
-    // If extension state was lost during an update, it cannot present the old
-    // resume token and opens a replacement attachment instead. Retire only an
-    // orphan belonging to the same authenticated client and surface before
-    // the ACP adapter loads that surface's persisted session. Two live ACP
-    // processes must never own one persisted agent session concurrently.
-    for (const existing of [...this.#sessions.values()]) {
-      if (
-        existing.id !== frame.s &&
-        existing.detachedAt !== undefined &&
-        existing.clientKey === frame.client &&
-        existing.surface.origin === frame.surface.origin &&
-        existing.surface.name === frame.surface.name
-      ) {
-        await this.#closeSession(existing, 'replaced_by_new_attachment', false);
-      }
-    }
     // Reuse the keypair minted at consent time so the fingerprint the user
     // just compared is the fingerprint the session actually uses.
     let mine: KeyPair;
@@ -837,13 +821,17 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
   }
 
   async #closeSession(session: SessionState, reason: string, notify = true): Promise<void> {
+    // Claim teardown synchronously. A client close and daemon shutdown can
+    // arrive in the same tick; only the caller that still owns the map entry
+    // may close the runtime or emit the terminal frame.
+    if (this.#sessions.get(session.id) !== session) return;
+    this.#sessions.delete(session.id);
     this.#cancelInFlight(session, 'session closed');
     try {
       await session.runtime.closeSession?.();
     } catch (err) {
       this.#log.error('runtime failed to close session', { sessionId: session.id, err, data: { reason } });
     } finally {
-      this.#sessions.delete(session.id);
       if (notify) this.#send({ t: 'session.close', s: session.id, reason });
       this.#log.info('session closed', { sessionId: session.id, data: { reason } });
     }

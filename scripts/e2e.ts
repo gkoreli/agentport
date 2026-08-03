@@ -13,6 +13,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { Relay } from '../packages/relay/src/relay.js';
 import { AgentDaemon } from '../packages/daemon/src/daemon.js';
 import { McpBridge } from '../packages/daemon/src/mcp-bridge.js';
+import { AcpRuntime } from '../packages/daemon/src/runtimes/acp.js';
 import { DemoWriterRuntime, type AgentRuntime, type TurnContext } from '../packages/daemon/src/runtime.js';
 import { AgentWallet, type SiteTool } from '../packages/client/src/index.js';
 import {
@@ -21,6 +22,7 @@ import {
   signCert,
   signDelegation,
   type Hex,
+  type LogEntry,
 } from '../packages/protocol/src/index.js';
 import {
   decrypt,
@@ -128,6 +130,36 @@ console.log('\n0b. official MCP transport');
   ]);
   check('MCP timeout aborts the exact in-flight surface call', didCancel === true);
   await mcp.close();
+  await bridge.stop();
+}
+
+console.log('\n0c. ACP attachment identity');
+{
+  const bridge = new McpBridge({ sink: () => {} });
+  const entries: LogEntry[] = [];
+  const fixture = new URL('./fixtures/acp-session-agent.ts', import.meta.url).pathname;
+  const makeRuntime = () => new AcpRuntime({
+    command: process.execPath,
+    args: ['--import', 'tsx', fixture],
+    bridge,
+    sink: (entry) => entries.push(entry),
+  });
+  const context = {
+    surface: { name: 'Same Label', origin: 'https://same.test' },
+    grant: { tools: [] },
+    tools: [],
+  };
+  const first = makeRuntime();
+  const second = makeRuntime();
+  await first.openSession(context);
+  await second.openSession(context);
+  const ids = entries
+    .filter((entry) => entry.message === 'ACP session ready')
+    .map((entry) => entry.data?.['acpSessionId']);
+  check('same-named new attachments receive distinct ACP sessions', ids.length === 2 && new Set(ids).size === 2, ids);
+  check('new attachments never enter implicit ACP resume', !entries.some((entry) => entry.message === 'ACP session resumed'));
+  await first.closeSession();
+  await second.closeSession();
   await bridge.stop();
 }
 
@@ -879,8 +911,8 @@ console.log('\n13. delegated sessions');
   await lyingRelay.close();
 }
 
-// --- 14. a vanished page cannot wedge or duplicate an ACP owner -------------
-console.log('\n14. detached tool calls fail and replacement is single-owner');
+// --- 14. attachment identity is explicit -----------------------------------
+console.log('\n14. detached tool calls fail without heuristic ownership transfer');
 {
   const isolated = new Relay({ port: 0, sink: () => {} });
   await isolated.listening();
@@ -896,10 +928,14 @@ console.log('\n14. detached tool calls fail and replacement is single-owner');
   });
   const toolReachedPage = new Deferred<void>();
   const toolRejected = new Deferred<string>();
+  let runtimeOpens = 0;
   let runtimeCloses = 0;
 
   class BlockingRuntime implements AgentRuntime {
     readonly name = 'blocking-test';
+    openSession(): void {
+      runtimeOpens++;
+    }
     async prompt(_text: string, ctx: TurnContext): Promise<void> {
       try {
         await ctx.callTool('page.read', {});
@@ -970,12 +1006,14 @@ console.log('\n14. detached tool calls fail and replacement is single-owner');
     surface: { name: 'Reloading Page', origin: 'https://reload.test' },
     tools: [hangingTool],
   });
-  check('replacement retires the orphan runtime before opening', runtimeCloses === 1, runtimeCloses);
+  check('a new attachment receives a distinct runtime', runtimeOpens === 2, runtimeOpens);
+  check('surface labels never identify or retire the orphan', runtimeCloses === 0, runtimeCloses);
 
   replacement.close();
   firstWallet.close();
   replacementWallet.close();
   await detachDaemon.stop();
+  check('concurrent client and daemon close tears down each runtime once', runtimeCloses === 2, runtimeCloses);
   await isolated.close();
 }
 

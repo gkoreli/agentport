@@ -37,6 +37,11 @@ async function terminateProcessTree(child: ChildProcessWithoutNullStreams): Prom
       return true;
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'ESRCH') return false;
+      // macOS can report EPERM for a signal-0 group existence probe after the
+      // group leader has exited even though the preceding SIGTERM succeeded.
+      // Real TERM/KILL failures still propagate; only this read-only probe is
+      // treated as no longer ours to manage.
+      if (value === 0 && (err as NodeJS.ErrnoException).code === 'EPERM') return false;
       throw err;
     }
   };
@@ -78,18 +83,6 @@ export interface AcpRuntimeOptions {
   bridge: McpBridge;
   sink?: LogSink;
 }
-
-/**
- * The conversation outlives any one attachment: ACP agents persist sessions on
- * the user's disk and advertise `loadSession`. This registry remembers which
- * ACP session belongs to which surface, so a page that reconnects after the
- * orphan grace expired — or after a daemon restart within one process — gets
- * its conversation back instead of a fresh brain.
- */
-const sessionRegistry = new Map<string, string>();
-
-const surfaceKey = (surface: { name: string; origin: string }): string =>
-  `${surface.origin}|${surface.name}`;
 
 export class AcpRuntime implements AgentRuntime {
   readonly name: string;
@@ -185,36 +178,16 @@ export class AcpRuntime implements AgentRuntime {
       },
     ];
 
-    // Same surface, earlier conversation? Ask the agent to load it rather
-    // than starting over — its store is the authoritative transcript.
-    const key = surfaceKey(context.surface);
-    const previous = sessionRegistry.get(key);
-    if (previous !== undefined && this.#supportsLoad) {
-      try {
-        // The replay this streams is discarded here (no live turn and no
-        // collector); the panel asks for it explicitly via replayHistory.
-        await connection.request(methods.agent.session.load, {
-          sessionId: previous,
-          cwd: this.#options.cwd ?? process.cwd(),
-          mcpServers: this.#mcpServers,
-        });
-        this.#sessionId = previous;
-        this.#log.info('ACP session resumed', {
-          data: { acpSessionId: previous, surface: context.surface.name, toolCount: context.tools.length },
-        });
-        return;
-      } catch (err) {
-        this.#log.warn('ACP session load failed; starting fresh', { err, data: { acpSessionId: previous } });
-        sessionRegistry.delete(key);
-      }
-    }
-
+    // A new AgentPort attachment is a new authority boundary and therefore a
+    // new ACP session. Origin and surface labels are display metadata, not
+    // identity: two tabs can legitimately share both. Explicit AgentPort
+    // resume keeps this AcpRuntime instance and its session id; no inference
+    // or process-global registry participates in that path.
     const session = await connection.request(methods.agent.session.new, {
       cwd: this.#options.cwd ?? process.cwd(),
       mcpServers: this.#mcpServers,
     });
     this.#sessionId = session.sessionId;
-    sessionRegistry.set(key, session.sessionId);
     this.#log.info('ACP session ready', {
       data: { acpSessionId: session.sessionId, surface: context.surface.name, toolCount: context.tools.length },
     });
