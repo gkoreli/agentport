@@ -11,7 +11,7 @@
  *   consent.js  — extension origin; the consent/approval window (ADR-009).
  */
 
-import { cp, mkdir, rm } from 'node:fs/promises';
+import { cp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as esbuild from 'esbuild';
@@ -19,6 +19,12 @@ import * as esbuild from 'esbuild';
 const here = dirname(fileURLToPath(import.meta.url));
 const outdir = join(here, 'dist');
 const watch = process.argv.includes('--watch');
+const rootPackage = JSON.parse(await readFile(join(here, '../../package.json'), 'utf8')) as { version?: unknown };
+const version = rootPackage.version;
+
+if (typeof version !== 'string' || !/^\d+(\.\d+){0,3}$/.test(version)) {
+  throw new Error(`root package version is not a Chrome extension version: ${String(version)}`);
+}
 
 await rm(outdir, { recursive: true, force: true });
 await mkdir(outdir, { recursive: true });
@@ -29,6 +35,7 @@ const shared = {
   sourcemap: 'inline',
   logLevel: 'info',
   legalComments: 'none',
+  define: { __AGENTPORT_VERSION__: JSON.stringify(version) },
 } as const satisfies Partial<esbuild.BuildOptions>;
 
 const builds: esbuild.BuildOptions[] = [
@@ -41,6 +48,10 @@ const builds: esbuild.BuildOptions[] = [
 
 async function copyStatic(): Promise<void> {
   await cp(join(here, 'static'), outdir, { recursive: true });
+  const source = JSON.parse(await readFile(join(here, 'static/manifest.json'), 'utf8')) as Record<string, unknown>;
+  delete source['_build_note'];
+  source['version'] = version;
+  await writeFile(join(outdir, 'manifest.json'), `${JSON.stringify(source, null, 2)}\n`);
 }
 
 if (watch) {

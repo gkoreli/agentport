@@ -30,7 +30,12 @@ import {
   type PageEnvelope,
   type PageInbound,
   type PageOutbound,
+  type ExtensionProviderErrorReason,
 } from './bridge.js';
+import { AGENTPORT_VERSION } from './version.js';
+
+/** Bump whenever the injected provider or page-session surface changes shape. */
+export const CONTRACT_REVISION = 1;
 
 // Handed over on the injecting <script> tag. Same-document scoping only — the
 // page can read it, and reading it buys nothing: see the note in bridge.ts.
@@ -199,7 +204,7 @@ function post<T>(body: Extract<PageOutbound, { rid: string }>): Promise<T> {
 /** Rejection reasons match `ProviderRejected` in @agentport/client. */
 class ProviderRejected extends Error {
   constructor(
-    readonly reason: string,
+    readonly reason: ExtensionProviderErrorReason,
     detail?: string,
   ) {
     // The worker's detail says WHICH denial this was ("no agents paired yet",
@@ -223,7 +228,7 @@ function onInbound(body: PageInbound): void {
     case 'err': {
       const waiter = pending.get(body.rid);
       pending.delete(body.rid);
-      waiter?.reject(new ProviderRejected(body.reason));
+      waiter?.reject(new ProviderRejected(body.reason, body.message));
       return;
     }
     case 'tool.call': {
@@ -272,10 +277,9 @@ interface ConnectResult {
   grant: { tools: ToolDefinition[]; alwaysAsk: string[]; expiresAt: number };
 }
 
-const provider: AgentProvider & {
-  resume(request: AgentConnectRequest): Promise<PageAgentSession | null>;
-} = {
-  version: '0.0.1',
+const provider = {
+  version: AGENTPORT_VERSION,
+  contract: CONTRACT_REVISION,
 
   async isAvailable(): Promise<boolean> {
     const value = await post<boolean>({ t: 'available', rid: rid('r_') });
@@ -328,7 +332,13 @@ const provider: AgentProvider & {
     session.on('closed', () => sessions.delete(result.ref));
     return session;
   },
+} satisfies AgentProvider & {
+  readonly contract: number;
+  resume(request: AgentConnectRequest): Promise<PageAgentSession | null>;
 };
+
+export type PageSessionInstance = PageSession;
+export type InjectedProvider = typeof provider;
 
 const target = globalThis as unknown as { navigator?: object; agent?: unknown };
 if (target.navigator) {

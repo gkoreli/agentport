@@ -77,7 +77,7 @@ export type PageOutbound =
 export type PageInbound =
   | { t: 'ready' }
   | { t: 'ok'; rid: string; value?: unknown }
-  | { t: 'err'; rid: string; reason: string; message: string }
+  | { t: 'err'; rid: string; reason: ExtensionProviderErrorReason; message: string }
   | { t: 'tool.call'; callId: string; ref: string; name: string; arguments: Record<string, unknown> }
   | { t: 'event'; ref: string; event: string; payload: unknown };
 
@@ -115,7 +115,16 @@ export interface AgentRow {
   online: boolean;
 }
 
+/** Reasons the extension provider may return across the page boundary. */
+export type ExtensionProviderErrorReason =
+  | 'no_agents'
+  | 'cancelled'
+  | 'denied'
+  | 'error'
+  | 'extension_updating';
+
 export type ContentToWorker =
+  | { t: 'hello'; version: string }
   | { t: 'connect'; rid: string; from: Origin; request: PageConnectRequest }
   | { t: 'resume'; rid: string; from: Origin; request: PageConnectRequest }
   | { t: 'history'; rid: string; ref: string }
@@ -126,8 +135,9 @@ export type ContentToWorker =
   | { t: 'status'; rid: string };
 
 export type WorkerToContent =
+  | { t: 'hello'; version: string; compatible: boolean }
   | { t: 'ok'; rid: string; value?: unknown }
-  | { t: 'err'; rid: string; reason: string; message: string }
+  | { t: 'err'; rid: string; reason: ExtensionProviderErrorReason; message: string }
   | { t: 'tool.call'; ref: string; callId: string; name: string; arguments: Record<string, unknown> }
   | { t: 'event'; ref: string; event: string; payload: unknown };
 

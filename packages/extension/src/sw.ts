@@ -38,6 +38,7 @@ import {
   type ConsentPayload,
   type ConsentToWorker,
   type ContentToWorker,
+  type ExtensionProviderErrorReason,
   type Origin,
   type PageConnectRequest,
   type PopupToWorker,
@@ -57,6 +58,7 @@ import { loadCerts, saveCert,
   userPublicKey,
   userSecretKey,
 } from './storage.js';
+import { AGENTPORT_VERSION } from './version.js';
 
 const log = createLogger('extension.sw');
 
@@ -737,7 +739,7 @@ function dispatchToolCall(ref: string, name: string, args: Record<string, unknow
 }
 
 class Rejected extends Error {
-  constructor(readonly reason: string, message: string) {
+  constructor(readonly reason: ExtensionProviderErrorReason, message: string) {
     super(message);
     this.name = 'Rejected';
   }
@@ -745,11 +747,44 @@ class Rejected extends Error {
 
 // --- content script port ---------------------------------------------------
 
+type ContentRequest = Exclude<ContentToWorker, { t: 'hello' }>;
+
 function handleContent(port: chrome.runtime.Port): void {
+  let contentVersion: string | undefined;
   port.onMessage.addListener((raw: unknown) => {
     if (!isRecord(raw)) return;
     const message = raw as ContentToWorker;
-    void onContentMessage(port, message).catch((err: unknown) => {
+    if (message.t === 'hello') {
+      contentVersion = typeof message.version === 'string' ? message.version : '';
+      const compatible = contentVersion === AGENTPORT_VERSION;
+      if (!compatible) {
+        log.warn('extension build mismatch during content handshake', {
+          data: { contentVersion, workerVersion: AGENTPORT_VERSION, origin: port.sender?.origin },
+        });
+      }
+      post(port, { t: 'hello', version: AGENTPORT_VERSION, compatible });
+      return;
+    }
+    if (contentVersion !== AGENTPORT_VERSION) {
+      log.warn('content request refused while extension is updating', {
+        data: {
+          contentVersion: contentVersion ?? 'missing',
+          workerVersion: AGENTPORT_VERSION,
+          messageType: message.t,
+          origin: port.sender?.origin,
+        },
+      });
+      if ('rid' in message) {
+        post(port, {
+          t: 'err',
+          rid: message.rid,
+          reason: 'extension_updating',
+          message: 'AgentPort is updating; retry with another provider',
+        });
+      }
+      return;
+    }
+    void onContentMessage(port, message as ContentRequest).catch((err: unknown) => {
       log.error('content message handler failed', { err, data: { messageType: message.t } });
       if ('rid' in message) {
         post(port, { t: 'err', rid: message.rid, reason: 'error', message: toErr(err).message });
@@ -768,7 +803,7 @@ function handleContent(port: chrome.runtime.Port): void {
   });
 }
 
-async function onContentMessage(port: chrome.runtime.Port, message: ContentToWorker): Promise<void> {
+async function onContentMessage(port: chrome.runtime.Port, message: ContentRequest): Promise<void> {
   switch (message.t) {
     case 'status': {
       const pubkey = await userPublicKey();

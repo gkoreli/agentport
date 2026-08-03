@@ -1,6 +1,5 @@
 {
   "name": "@agentport/extension",
-  "version": "0.0.1",
   "private": true,
   "type": "module",
   "description": "AgentPort wallet as an MV3 Chrome extension: key custody out of the page.",

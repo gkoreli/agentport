@@ -18,6 +18,7 @@
 
 import { component, computed, each, html, signal, when } from '@nisli/core';
 import type { AgentRow, PopupToWorker } from './bridge.js';
+import { AGENTPORT_VERSION } from './version.js';
 
 const port = chrome.runtime.connect({ name: 'agentport.popup' });
 const waiters = new Map<string, { resolve: (value: unknown) => void; reject: (err: Error) => void }>();
@@ -164,6 +165,8 @@ const Settings = component('ap-settings', () => {
   });
   return html`
     <section class="settings">
+      <h2>Version</h2>
+      <p class="mono">${AGENTPORT_VERSION}</p>
       <h2>Your key</h2>
       <p class="mono">${short}</p>
       <h2>Relay</h2>
