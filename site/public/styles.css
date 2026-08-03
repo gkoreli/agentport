@@ -85,6 +85,13 @@ a { color: var(--accent); }
 .ap-chat { flex: 1; min-height: 0; display: none; flex-direction: column; padding: 12px 14px; }
 .ap-chat.live { display: flex; }
 .ap-notice { color: var(--muted); font-size: 12px; font-family: ui-monospace, monospace; padding: 2px 4px 10px; }
+.ap-approval { border: 1px solid #4b5670; border-radius: 10px; background: #171d29; padding: 12px; margin-bottom: 10px; display: grid; gap: 6px; }
+.ap-approval-label { color: #ffd37c; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; }
+.ap-approval-tool { color: var(--muted); font: 11px/1.4 ui-monospace, monospace; }
+.ap-approval pre { margin: 3px 0; max-height: 150px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; background: #0b0d10; border: 1px solid var(--line); border-radius: 8px; padding: 8px; color: #cfd6e2; font-size: 11px; }
+.ap-approval-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.ap-approval-actions button { padding: 6px 12px; font-size: 12px; }
+.ap-approval-actions .deny { color: var(--text); background: transparent; border: 1px solid var(--line); }
 
 /* ---- ACP set (src/nisli-ui/ui/acp) ----
    The copied components ship Tailwind class lists this site deliberately does

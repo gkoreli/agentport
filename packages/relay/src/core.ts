@@ -9,6 +9,7 @@ import {
   toHex,
   verify,
   verifyCert,
+  verifyDelegation,
   type AgentCert,
   type AgentSummary,
   randomId,
@@ -527,9 +528,27 @@ export class RelayCore {
 
     const agentConn = this.#agents.get(frame.agent);
     if (!agentConn) return conn.peer.send({ t: 'session.denied', s: frame.s, reason: 'agent_offline' });
-    // Ownership is judged against the cert the live connection presented; the
-    // daemon re-checks on its side. Nothing here consults storage.
-    if (!agentConn.cert || agentConn.cert.user !== conn.pubkey) {
+    // Ownership is judged only from live, presented proofs: either the
+    // connected client is the cert's user, or that user signed a still-live
+    // delegation to this exact authenticated client key. The daemon repeats
+    // the delegation chain independently; nothing here consults storage.
+    const cert = agentConn.cert;
+    const delegation = frame.delegation;
+    const directlyOwned = cert?.user === conn.pubkey;
+    const delegated = Boolean(
+      cert &&
+        delegation &&
+        verifyDelegation(cert.user, delegation) &&
+        delegation.delegate === conn.pubkey &&
+        delegation.agent === agentConn.pubkey &&
+        typeof delegation.expiresAt === 'number' &&
+        Number.isFinite(delegation.expiresAt) &&
+        delegation.expiresAt > this.#now() &&
+        // The relay cannot authenticate a browser origin. It preserves the
+        // signed value for the daemon to compare with frame.surface.origin.
+        typeof delegation.origin === 'string',
+    );
+    if (!directlyOwned && !delegated) {
       return conn.peer.send({ t: 'session.denied', s: frame.s, reason: 'not_your_agent' });
     }
     if (this.#sessions.has(frame.s)) {

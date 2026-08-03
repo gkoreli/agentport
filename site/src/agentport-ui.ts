@@ -7,9 +7,9 @@ const VERSION = typeof __AGENTPORT_VERSION__ === 'string' ? __AGENTPORT_VERSION_
  * The demo's agent panel, in nisli — rendered by the @nisli/ui ACP set.
  *
  * Note what is no longer here: no key, no `AgentWallet`, no picker, no consent
- * screen. Those moved to where the user's key actually is — an extension, or
- * their terminal via `connect.js`. This file is an honest example of what a
- * *site* writes, and nothing more.
+ * screen. Those moved to where the user's key actually is — an extension, the
+ * hosted wallet's own origin, or their terminal in the universal fallback.
+ * This file is an honest example of what a *site* writes, and nothing more.
  *
  * The transcript is `createTranscript()` + `AcpChat` from the copied
  * `src/nisli-ui` ACP set. The session is consumed through @agentport/agui
@@ -27,10 +27,10 @@ const VERSION = typeof __AGENTPORT_VERSION__ === 'string' ? __AGENTPORT_VERSION_
  * safe here; the injected modal deliberately avoids it (see modal.ts).
  */
 
-import { component, computed, html, signal, when } from '@nisli/core';
+import { component, computed, each, html, signal, when } from '@nisli/core';
 import AgentPortConnect from './connect.js';
 import { onAguiEvent, type AguiEvent } from '@agentport/agui';
-import type { AgentSession, SessionEvents, SiteTool } from '@agentport/client';
+import type { AgentSession, ApprovalPrompt, SessionEvents, SiteTool } from '@agentport/client';
 import type { HistoryEntry } from '@agentport/protocol';
 import { AcpChat } from '../../src/nisli-ui/ui/acp/acp-chat.js';
 import { createTranscript } from '../../src/nisli-ui/lib/acp-session.js';
@@ -68,6 +68,12 @@ function kindOf(name: string): 'read' | 'edit' | 'search' | 'other' {
   return 'other';
 }
 
+interface PendingApproval {
+  id: number;
+  prompt: ApprovalPrompt;
+  resolve: (granted: boolean) => void;
+}
+
 const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) => {
   // nisli props are signals — `props.config` is Signal<SurfaceConfig>, not the
   // object. Casting instead of reading `.value` silently yields undefined
@@ -80,9 +86,11 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
   const live = signal(false);
   const busy = signal(false);
   const notice = signal('');
+  const pendingApprovals = signal<PendingApproval[]>([]);
 
   let session: AgentSession | null = null;
   let toolSeq = 0;
+  let approvalSeq = 0;
   // prompt() keeps its id private, but every turn event carries it — track the
   // live turn here so Cancel can address it.
   let currentPromptId: string | null = null;
@@ -99,8 +107,9 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
    * itself proves the adapter. AG-UI events → ACP `session/update` shapes for
    * the transcript reducer. Tool rows are terminal here, so TOOL_CALL_END's
    * rawEvent (the completed call, results included) is the one that renders;
-   * approvals were decided in the wallet, so the panel records outcomes and
-   * never draws a consent control of its own.
+   * Extension approvals arrive already decided in trusted browser chrome.
+   * Hosted-wallet delegations route approvals to this page, so the decider
+   * below renders a real card and the resulting event becomes the settled row.
    */
   const wire = (next: AgentSession) =>
     onAguiEvent(next, (event: AguiEvent) => {
@@ -154,6 +163,8 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
               rawInput: approval.call?.arguments,
             });
           } else if (event.name === 'agentport.closed') {
+            for (const approval of pendingApprovals.value) approval.resolve(false);
+            pendingApprovals.value = [];
             notice.value = `session closed (${event.value.reason})`;
             status.value = 'disconnected';
             online.value = false;
@@ -167,6 +178,18 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
           return;
       }
     });
+
+  const decide = (prompt: ApprovalPrompt): Promise<boolean> =>
+    new Promise((resolve) => {
+      pendingApprovals.value = [...pendingApprovals.value, { id: ++approvalSeq, prompt, resolve }];
+    });
+
+  const settleApproval = (id: number, granted: boolean) => {
+    const approval = pendingApprovals.value.find((candidate) => candidate.id === id);
+    if (!approval) return;
+    pendingApprovals.value = pendingApprovals.value.filter((candidate) => candidate.id !== id);
+    approval.resolve(granted);
+  };
 
   const attach = (next: AgentSession) => {
     session = next;
@@ -222,6 +245,7 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
         context: config.context,
         tools: config.tools,
         alwaysAsk: config.alwaysAsk,
+        decide,
       });
       if (!resumed) return;
       attach(resumed.session);
@@ -239,13 +263,14 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
 
   const connect = () => {
     // [SURFACE] The entire integration. An installed wallet is used if present;
-    // otherwise the drop-in widget carries the request to the user's terminal.
+    // otherwise the hosted wallet delegates, with the code flow as fallback.
     AgentPortConnect.connect({
       name: config.name,
       route: config.route,
       context: config.context,
       tools: config.tools,
       alwaysAsk: config.alwaysAsk,
+      decide,
     })
       .then(attach)
       .catch((err: Error) => {
@@ -285,6 +310,27 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
     ? `Ask your agent something — try: ${config.suggestions.join(' · ')}`
     : 'Ask your agent something.';
 
+  const approvalCards = each(
+    pendingApprovals,
+    (approval) => approval.id,
+    (approval) => {
+      const summary = computed(() => approval.value.prompt.summary);
+      const toolName = computed(() => approval.value.prompt.call?.name ?? 'Agent request');
+      const hasArguments = computed(() => approval.value.prompt.call !== undefined);
+      const argumentsText = computed(() => JSON.stringify(approval.value.prompt.call?.arguments ?? {}, null, 2));
+      return html`<section class="ap-approval" aria-live="polite">
+        <div class="ap-approval-label">Approval required</div>
+        <strong>${summary}</strong>
+        <span class="ap-approval-tool">${toolName}</span>
+        ${when(hasArguments, () => html`<pre>${argumentsText}</pre>`)}
+        <div class="ap-approval-actions">
+          <button class="deny" @click=${() => settleApproval(approval.value.id, false)}>Deny</button>
+          <button @click=${() => settleApproval(approval.value.id, true)}>Allow</button>
+        </div>
+      </section>`;
+    },
+  );
+
   return html`
     <div class="ap-head">
       <span>Agent <span class="ap-version" title="AgentPort build">v${VERSION}</span></span
@@ -299,7 +345,7 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
             Bring your own agent.<br />This site never sees your model, keys, or memory.
           </p>
           <button class="ap-connect" @click=${connect}>Connect agent</button>
-          <p class="ap-alt">No install. Your agent approves from wherever it runs.</p>
+          <p class="ap-alt">No install. Approve in your wallet popup, or use a connect code.</p>
         </div>
       `,
     )}
@@ -309,6 +355,7 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
         computed(() => notice.value !== ''),
         () => html`<div class="ap-notice">${notice}</div>`,
       )}
+      ${approvalCards}
       ${AcpChat({
         entries: transcript.entries,
         onPrompt,

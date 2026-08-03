@@ -1,0 +1,6 @@
+name = "agentport-wallet"
+compatibility_date = "2026-07-01"
+
+[assets]
+directory = "wallet/public"
+not_found_handling = "single-page-application"

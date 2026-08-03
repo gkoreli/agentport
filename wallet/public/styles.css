@@ -1,0 +1,50 @@
+:root {
+  color-scheme: dark;
+  --bg: #0b0d10;
+  --card: #14171c;
+  --line: #262c36;
+  --text: #e8ebf0;
+  --muted: #8b94a3;
+  --accent: #7c9cff;
+  --ok: #4fd18b;
+}
+* { box-sizing: border-box; }
+html, body, #wallet { min-height: 100%; }
+body { margin: 0; background: radial-gradient(circle at 50% -20%, #222c48, var(--bg) 55%); color: var(--text); font: 14px/1.5 ui-sans-serif, -apple-system, "Segoe UI", sans-serif; }
+main { width: min(480px, 100%); min-height: 100vh; margin: 0 auto; background: rgba(15, 18, 23, .94); border-inline: 1px solid rgba(255,255,255,.04); }
+header { height: 58px; padding: 0 22px; display: flex; gap: 10px; align-items: center; border-bottom: 1px solid var(--line); font-weight: 650; }
+header small { margin-left: auto; color: var(--muted); font-weight: 400; }
+.mark { width: 26px; height: 26px; display: grid; place-items: center; border-radius: 8px; background: var(--accent); color: #0b0d10; font-weight: 800; }
+section { padding: 28px 24px 32px; }
+section.center { min-height: calc(100vh - 58px); display: grid; place-content: center; justify-items: center; text-align: center; }
+h1 { margin: 0 0 8px; font-size: 24px; letter-spacing: -.35px; }
+p { color: var(--muted); margin: 0 0 22px; }
+p strong { color: var(--text); }
+.eyebrow { color: var(--accent); text-transform: uppercase; letter-spacing: .08em; font-size: 11px; font-weight: 700; margin-bottom: 7px; overflow-wrap: anywhere; }
+label { display: grid; gap: 7px; margin: 22px 0 12px; color: var(--muted); font-size: 12px; font-weight: 600; }
+input { width: 100%; background: #0b0d10; border: 1px solid var(--line); border-radius: 10px; color: var(--text); padding: 12px 13px; font: 16px/1.2 ui-monospace, monospace; letter-spacing: .08em; outline: none; }
+input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(124,156,255,.12); }
+button { border: 1px solid transparent; border-radius: 9px; padding: 9px 14px; font: inherit; font-weight: 650; cursor: pointer; }
+button:disabled { opacity: .45; cursor: default; }
+button.primary { background: var(--accent); color: #0b0d10; }
+button.ghost { background: transparent; border-color: var(--line); color: var(--text); }
+button.wide { width: 100%; }
+.actions { display: flex; justify-content: space-between; gap: 10px; margin-top: 22px; }
+.actions button:last-child { margin-left: auto; }
+.agent-list, .tool-list { margin: 20px 0; padding: 0; list-style: none; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+.agent-row, .tool-row { display: flex; gap: 11px; align-items: center; padding: 12px; background: var(--card); border-bottom: 1px solid var(--line); }
+.agent-row:last-child, .tool-row:last-child { border-bottom: 0; }
+.agent-copy, .tool-row > span { min-width: 0; flex: 1; display: grid; }
+.agent-copy strong, .tool-row strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-copy small, .tool-row small, .offer small { color: var(--muted); overflow-wrap: anywhere; }
+.presence { width: 9px; height: 9px; flex: 0 0 auto; border-radius: 50%; background: #4b5360; box-shadow: 0 0 0 3px rgba(75,83,96,.12); }
+.presence.online { background: var(--ok); box-shadow: 0 0 0 3px rgba(79,209,139,.12); }
+.tool-row { align-items: flex-start; }
+.tool-row em { color: #ffd37c; font-size: 10px; font-style: normal; white-space: nowrap; text-transform: uppercase; letter-spacing: .04em; }
+.offer { display: grid; gap: 3px; margin-top: 16px; padding: 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--card); }
+.offer button { margin-top: 12px; }
+.status { margin: 16px 0 0; min-height: 20px; font: 12px/1.5 ui-monospace, monospace; overflow-wrap: anywhere; }
+.delegation-note { font-size: 12px; border-left: 2px solid var(--accent); padding-left: 10px; }
+.spinner { width: 28px; height: 28px; margin-bottom: 16px; border: 3px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; }
+.check { width: 44px; height: 44px; display: grid; place-items: center; margin-bottom: 14px; border-radius: 50%; background: rgba(79,209,139,.14); color: var(--ok); font-size: 24px; }
+@keyframes spin { to { transform: rotate(360deg); } }

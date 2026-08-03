@@ -42,6 +42,26 @@ export interface AgentCert {
   sig: Hex;
 }
 
+/**
+ * Short-lived authority from the user's wallet key to one page identity.
+ *
+ * The page mints `delegate` ephemerally. A relay may route a session opened
+ * by that key only while this user-signed statement is live, and the daemon
+ * independently verifies the same chain before accepting the session.
+ */
+export interface SessionDelegation {
+  /** Ed25519 public key of the page identity allowed to open the session. */
+  delegate: Hex;
+  /** Ed25519 public key of the one agent this authority may reach. */
+  agent: Hex;
+  /** Browser-verified origin this authority may attach from. */
+  origin: string;
+  /** Unix ms. */
+  expiresAt: number;
+  /** Signature by the target agent's owner over the canonical delegation body. */
+  sig: Hex;
+}
+
 export interface AgentSummary {
   agent: Hex;
   name: string;
@@ -266,6 +286,8 @@ export interface SessionOpen {
   agent: Hex;
   surface: SurfaceDescriptor;
   grant: CapabilityGrant;
+  /** User-signed, short-lived authority for a page's ephemeral identity. */
+  delegation?: SessionDelegation;
   /** Filled in by the relay before forwarding; ignored if sent by a client. */
   client?: Hex;
   /** Client's ephemeral X25519 public key for sealing this session (ADR-003). */

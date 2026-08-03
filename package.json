@@ -19,6 +19,8 @@
     "build:extension": "tsx packages/extension/build.ts",
     "clean": "rm -rf packages/*/dist examples/*/dist",
     "site:build": "tsx site/build.ts",
+    "wallet:build": "tsx wallet/build.ts",
+    "wallet:check": "tsx scripts/wallet-popup-check.ts",
     "site:dev": "npm run site:build && wrangler dev",
     "deploy": "tsx scripts/deploy.ts",
     "connect": "tsx packages/daemon/src/connect-cli.ts",

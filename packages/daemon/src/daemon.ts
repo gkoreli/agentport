@@ -19,6 +19,7 @@ import {
   timingSafeEqualStr,
   toHex,
   verifyEpk,
+  verifyDelegation,
   type AgentCert,
   type CapabilityGrant,
   type Frame,
@@ -35,6 +36,8 @@ interface SessionState {
   id: string;
   /** Came from a drop-in widget, so approvals belong here, not in the page. */
   viaConnect: boolean;
+  /** A hosted wallet authorised this page identity for the attachment. */
+  delegated: boolean;
   surface: SurfaceDescriptor;
   grant: CapabilityGrant;
   tools: ToolDefinition[];
@@ -437,7 +440,7 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     this.#send({
       t: 'session.resumed',
       s: frame.s,
-      agentName: this.#options.identity.name,
+      agentName: session.delegated ? 'Personal agent' : this.#options.identity.name,
       runtime: this.#options.identity.runtime,
       surface: session.surface,
       grant: session.grant,
@@ -458,10 +461,28 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     }
 
     // Invariant 5 at the edge: with a stateless relay, the daemon re-checks
-    // that whoever opens a session IS the user this agent is bound to. The
-    // drop-in flow is exempt by construction — its consent happened here.
+    // the complete proof presented by the opener. A delegation must be signed
+    // by this agent's owner, name this agent and the relay-stamped client key,
+    // match the forwarded surface origin, and still be live. A lying relay
+    // therefore cannot turn a bad delegation into access.
     const cert = this.#options.identity.cert;
-    if (!frame.viaConnect && cert && frame.client !== cert.user) {
+    if (frame.delegation) {
+      const delegation = frame.delegation;
+      if (
+        !cert ||
+        !verifyDelegation(cert.user, delegation) ||
+        delegation.delegate !== frame.client ||
+        delegation.agent !== this.#options.identity.publicKey ||
+        typeof delegation.origin !== 'string' ||
+        delegation.origin !== frame.surface.origin ||
+        typeof delegation.expiresAt !== 'number' ||
+        !Number.isFinite(delegation.expiresAt) ||
+        delegation.expiresAt <= Date.now()
+      ) {
+        this.#send({ t: 'session.denied', s: frame.s, reason: 'bad_delegation' });
+        return;
+      }
+    } else if (!frame.viaConnect && cert && frame.client !== cert.user) {
       this.#send({ t: 'session.denied', s: frame.s, reason: 'not_your_agent' });
       return;
     }
@@ -492,6 +513,7 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     const session: SessionState = {
       id: frame.s,
       viaConnect: Boolean(frame.viaConnect),
+      delegated: Boolean(frame.delegation),
       surface: frame.surface,
       grant: frame.grant,
       tools: frame.grant.tools,
@@ -513,7 +535,9 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     this.#send({
       t: 'session.opened',
       s: frame.s,
-      agentName: this.#options.identity.name,
+      // A delegated page receives the generic label the hosted wallet showed;
+      // the user's real agent name stays inside the wallet-origin popup.
+      agentName: frame.delegation ? 'Personal agent' : this.#options.identity.name,
       runtime: this.#options.identity.runtime,
       resume: session.resumeToken,
       ...(myEpk ?? {}),
@@ -595,9 +619,11 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     if (!tool) throw new Error(`tool "${name}" is not in this session's grant`);
     if (session.grant.expiresAt <= Date.now()) throw new Error('capability grant expired');
 
-    // In a wallet session the browser enforces the site's `requiresApproval`
-    // flag. In a connect.js session there is no wallet in the browser, so the
-    // gate moves here — to the owner — rather than being silently dropped.
+    // Only the code-carrying fallback lacks browser consent and moves this
+    // gate to the daemon. A delegated session was authorised for this exact
+    // surface in the wallet-origin popup; subsequent approvals therefore go
+    // to its CLIENT panel, which is the consent boundary that replaces the
+    // viaConnect terminal gate.
     if (session.viaConnect && (tool.requiresApproval || session.grant.alwaysAsk.includes(name))) {
       const approved = await (this.#options.onLocalApproval?.(`Run ${name}`, { name, arguments: args }) ??
         Promise.resolve(false));
@@ -616,9 +642,10 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     summary: string,
     call?: { name: string; arguments: Record<string, unknown> },
   ): Promise<boolean> {
-    // In a connect.js session the browser side is an ephemeral key belonging to
-    // the site. Asking it for approval would be asking the requester for
-    // permission, so the question goes to the owner instead.
+    // The code-carrying fallback has not been authorised by a browser wallet,
+    // so its questions stay with the daemon owner. Delegated sessions are the
+    // opposite: the hosted-wallet popup authorised this exact client surface,
+    // and the real approval UI is in that client's panel, not onLocalApproval.
     if (session.viaConnect) {
       const ask = this.#options.onLocalApproval;
       if (!ask) return Promise.resolve(false);

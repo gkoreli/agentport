@@ -22,6 +22,8 @@ export interface AgentConnectRequest {
   alwaysAsk?: string[];
   /** How long the grant is valid. */
   ttlMs?: number;
+  /** Page-owned approval UI. Wallet providers with trusted chrome ignore it. */
+  decide?: ApprovalDecider;
 }
 
 export interface AgentProvider {

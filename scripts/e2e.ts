@@ -12,7 +12,7 @@ import { Relay } from '../packages/relay/src/relay.js';
 import { AgentDaemon } from '../packages/daemon/src/daemon.js';
 import { DemoWriterRuntime } from '../packages/daemon/src/runtime.js';
 import { AgentWallet, type SiteTool } from '../packages/client/src/index.js';
-import { Deferred, generateKeyPair, type Hex } from '../packages/protocol/src/index.js';
+import { Deferred, generateKeyPair, signCert, signDelegation, type Hex } from '../packages/protocol/src/index.js';
 
 let failures = 0;
 function check(label: string, condition: boolean, detail?: unknown): void {
@@ -66,6 +66,7 @@ const user = generateKeyPair();
 const agentKeys = generateKeyPair();
 
 const pairingCode = new Deferred<string>();
+const ownerLocalApprovals: string[] = [];
 const daemon = new AgentDaemon({
   relayUrl,
   identity: {
@@ -77,6 +78,10 @@ const daemon = new AgentDaemon({
   },
   createRuntime: () => new DemoWriterRuntime(),
   onPairingCode: (code) => pairingCode.resolve(code),
+  onLocalApproval: async (summary) => {
+    ownerLocalApprovals.push(summary);
+    return true;
+  },
 });
 
 console.log('1. pairing');
@@ -217,7 +222,8 @@ check('widget gets a connect code', /^[A-Z2-9]{4}-[A-Z2-9]{4}$/.test(requested.c
 
 dropInDaemon.claimConnect(requested.code);
 const dropInSession = await requested.accepted;
-check('owner saw what was being asked for', offered?.surface === 'Inkwell' && offered?.tools === 2, offered);
+const seenOffer = offered as { surface: string; tools: number } | null;
+check('owner saw what was being asked for', seenOffer?.surface === 'Inkwell' && seenOffer?.tools === 2, seenOffer);
 check('session opened without any cert', dropInSession.info.agentName === 'Terminal Agent', dropInSession.info);
 
 await dropInSession.prompt('Add a line.');
@@ -503,6 +509,185 @@ console.log('\n12. sessions outlive the relay itself');
   laterTab.close();
   await survivorDaemon.stop();
   await r2.close();
+}
+
+console.log('\n13. delegated sessions');
+{
+  const delegatedOrigin = 'https://delegated.test';
+  const delegateKeys = generateKeyPair();
+  const delegatedWallet = new AgentWallet({ relayUrl, userSecretKey: delegateKeys.secretKey, socketFactory });
+  await delegatedWallet.connect();
+  const delegation = signDelegation(user.secretKey, {
+    delegate: delegateKeys.publicKey,
+    agent: agentKeys.publicKey,
+    origin: delegatedOrigin,
+    expiresAt: Date.now() + 8 * 60 * 60 * 1000,
+  });
+  const pagePayload = { agent: agentKeys.publicKey, displayName: 'Personal agent' as const, delegation };
+  check(
+    'the delegation payload handed to the page contains no root user pubkey',
+    !('user' in pagePayload.delegation) && !JSON.stringify(pagePayload).includes(user.publicKey),
+    Object.keys(pagePayload.delegation),
+  );
+  const pageApprovals: string[] = [];
+  const delegated = await delegatedWallet.openSession({
+    agent: agentKeys.publicKey,
+    delegation,
+    surface: { name: 'Delegated Inkwell', origin: delegatedOrigin },
+    tools: inkwellTools(),
+    decide: async (prompt) => {
+      pageApprovals.push(prompt.call?.name ?? prompt.summary);
+      return true;
+    },
+  });
+  check('a user-signed delegation opens from the ephemeral page key', delegated.info.agentName === 'Personal agent', delegated.info);
+
+  doc.text = 'Delegated.';
+  const localBefore = ownerLocalApprovals.length;
+  await delegated.prompt('Approved in the panel.');
+  check('delegated approvals are routed to the client', pageApprovals.length > 0, pageApprovals);
+  check('delegated approvals never use onLocalApproval', ownerLocalApprovals.length === localBefore, ownerLocalApprovals);
+  check('the delegated client can complete its granted tool call', doc.text.endsWith('Approved in the panel.'), doc.text);
+
+  const expiredKeys = generateKeyPair();
+  const expiredWallet = new AgentWallet({ relayUrl, userSecretKey: expiredKeys.secretKey, socketFactory });
+  await expiredWallet.connect();
+  let relayExpired = '';
+  await expiredWallet
+    .openSession({
+      agent: agentKeys.publicKey,
+      delegation: signDelegation(user.secretKey, {
+        delegate: expiredKeys.publicKey,
+        agent: agentKeys.publicKey,
+        origin: 'https://expired.test',
+        expiresAt: Date.now() - 60_000,
+      }),
+      surface: { name: 'Expired', origin: 'https://expired.test' },
+      tools: [],
+    })
+    .catch((err: Error) => {
+      relayExpired = err.message;
+    });
+  check('the relay refuses an expired delegation', relayExpired.includes('not_your_agent'), relayExpired);
+
+  const wrongKeys = generateKeyPair();
+  const wrongWallet = new AgentWallet({ relayUrl, userSecretKey: wrongKeys.secretKey, socketFactory });
+  await wrongWallet.connect();
+  let wrongDelegate = '';
+  await wrongWallet
+    .openSession({
+      agent: agentKeys.publicKey,
+      delegation: signDelegation(user.secretKey, {
+        delegate: generateKeyPair().publicKey,
+        agent: agentKeys.publicKey,
+        origin: 'https://wrong.test',
+        expiresAt: Date.now() + 60_000,
+      }),
+      surface: { name: 'Wrong delegate', origin: 'https://wrong.test' },
+      tools: [],
+    })
+    .catch((err: Error) => {
+      wrongDelegate = err.message;
+    });
+  check('the relay refuses a delegation for another page key', wrongDelegate.includes('not_your_agent'), wrongDelegate);
+
+  const otherAgentKeys = generateKeyPair();
+  const otherCert = signCert(user.secretKey, {
+    user: user.publicKey,
+    agent: otherAgentKeys.publicKey,
+    name: 'Other owned agent',
+    runtime: 'demo-writer',
+    location: 'Personal VPS',
+    issuedAt: Date.now(),
+  });
+  const otherDaemon = new AgentDaemon({
+    relayUrl,
+    identity: {
+      secretKey: otherAgentKeys.secretKey,
+      publicKey: otherAgentKeys.publicKey,
+      name: 'Other owned agent',
+      runtime: 'demo-writer',
+      location: 'Personal VPS',
+      cert: otherCert,
+    },
+    createRuntime: () => new DemoWriterRuntime(),
+  });
+  await otherDaemon.start();
+  let wrongAgent = '';
+  await delegatedWallet
+    .openSession({
+      agent: otherAgentKeys.publicKey,
+      delegation,
+      surface: { name: 'Agent replay', origin: delegatedOrigin },
+      tools: [],
+    })
+    .catch((err: Error) => {
+      wrongAgent = err.message;
+    });
+  check('the relay refuses a delegation replayed toward a different owned agent', wrongAgent.includes('not_your_agent'), wrongAgent);
+
+  let wrongOrigin = '';
+  await delegatedWallet
+    .openSession({
+      agent: agentKeys.publicKey,
+      delegation,
+      surface: { name: 'Origin replay', origin: 'https://other-origin.test' },
+      tools: [],
+    })
+    .catch((err: Error) => {
+      wrongOrigin = err.message;
+    });
+  check('the daemon refuses a delegation presented from a mismatched origin', wrongOrigin.includes('bad_delegation'), wrongOrigin);
+
+  // A deliberately dishonest relay clock treats an already-expired statement
+  // as live and forwards it over real sockets. The daemon's independent real-
+  // time check must still stop the session at the edge.
+  const lyingRelay = new Relay({ port: 0, log: () => {}, now: () => 0 });
+  await lyingRelay.listening();
+  const lyingUrl = `ws://127.0.0.1:${lyingRelay.port}`;
+  const edgeDaemon = new AgentDaemon({
+    relayUrl: lyingUrl,
+    identity: {
+      secretKey: agentKeys.secretKey,
+      publicKey: agentKeys.publicKey,
+      name: "Goga's Writing Agent",
+      runtime: 'demo-writer',
+      location: 'Personal VPS',
+      cert,
+    },
+    createRuntime: () => new DemoWriterRuntime(),
+  });
+  await edgeDaemon.start();
+
+  const edgeKeys = generateKeyPair();
+  const edgeWallet = new AgentWallet({ relayUrl: lyingUrl, userSecretKey: edgeKeys.secretKey, socketFactory });
+  await edgeWallet.connect();
+  let daemonExpired = '';
+  await edgeWallet
+    .openSession({
+      agent: agentKeys.publicKey,
+      delegation: signDelegation(user.secretKey, {
+        delegate: edgeKeys.publicKey,
+        agent: agentKeys.publicKey,
+        origin: 'https://edge.test',
+        expiresAt: Date.now() - 60_000,
+      }),
+      surface: { name: 'Hostile relay bypass', origin: 'https://edge.test' },
+      tools: [],
+    })
+    .catch((err: Error) => {
+      daemonExpired = err.message;
+    });
+  check('the daemon independently refuses an expired delegation', daemonExpired.includes('bad_delegation'), daemonExpired);
+
+  delegated.close();
+  delegatedWallet.close();
+  expiredWallet.close();
+  wrongWallet.close();
+  edgeWallet.close();
+  await otherDaemon.stop();
+  await edgeDaemon.stop();
+  await lyingRelay.close();
 }
 
 // --- teardown ---------------------------------------------------------------

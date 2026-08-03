@@ -16,7 +16,9 @@ run('npm version patch --no-git-tag-version');
 const { version } = JSON.parse(readFileSync('package.json', 'utf8')) as { version: string };
 
 run('npm run site:build');
+run('npm run wallet:build');
 run('npx wrangler deploy');
+run('npx wrangler -c wrangler.wallet.toml deploy');
 
 execSync('git add package.json package-lock.json');
 run(`git commit -m "release: v${version}" -m "Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"`);

@@ -24,6 +24,7 @@ import {
   type Frame,
   type Hex,
   type SessionFrame,
+  type SessionDelegation,
   type SurfaceDescriptor,
 } from '@agentport/protocol';
 import { AgentSession, type ApprovalDecider, type SiteTool } from './session.js';
@@ -57,6 +58,8 @@ export interface WalletOptions {
 
 export interface SessionRequest {
   agent: Hex;
+  /** User-signed authority for this wallet's page identity. */
+  delegation?: SessionDelegation;
   surface: Omit<SurfaceDescriptor, 'origin'> & { origin?: string };
   tools: SiteTool[];
   /** Tool names that must be approved on every single invocation. */
@@ -341,6 +344,7 @@ export class AgentWallet extends Emitter<WalletEvents> {
       t: 'session.open',
       s: id,
       agent: request.agent,
+      ...(request.delegation ? { delegation: request.delegation } : {}),
       surface,
       grant,
       epk: sealPair.publicKey,

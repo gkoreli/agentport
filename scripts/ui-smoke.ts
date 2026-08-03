@@ -64,10 +64,12 @@ console.log('\n3. clicking Connect actually connects');
 class FakeRelay {
   static dialled: string[] = [];
   static frames: string[] = [];
+  static latest: FakeRelay | undefined;
   readyState = 1;
   #listeners: Record<string, (event?: unknown) => void> = {};
   constructor(url: string) {
     FakeRelay.dialled.push(url);
+    FakeRelay.latest = this;
     setTimeout(() => this.#listeners.open?.(), 0);
   }
   addEventListener(type: string, fn: (event?: unknown) => void) {
@@ -75,6 +77,9 @@ class FakeRelay {
   }
   #reply(frame: unknown) {
     setTimeout(() => this.#listeners.message?.({ data: JSON.stringify(frame) }), 0);
+  }
+  reply(frame: unknown) {
+    this.#reply(frame);
   }
   send(raw: string) {
     const frame = JSON.parse(raw) as { t: string };
@@ -93,6 +98,9 @@ class FakeRelay {
 }
 (globalThis as Record<string, unknown>).WebSocket = FakeRelay;
 (window as unknown as Record<string, unknown>).WebSocket = FakeRelay;
+// Exercise the documented popup-blocked tier so this existing smoke test
+// continues into the unchanged connect-code modal and fake relay.
+(window as unknown as { open: () => null }).open = () => null;
 
 const clickMount = window.document.createElement('div');
 window.document.body.appendChild(clickMount);
@@ -139,6 +147,23 @@ const rendered = () => render.textContent ?? '';
 check('a session message actually rendered', /tools lent/.test(rendered()), rendered().slice(0, 200));
 check('no function source leaked into the DOM', !/=>/.test(rendered()), rendered().slice(0, 200));
 check('empty state is gone once connected', !/Bring your own agent/.test(rendered()), rendered().slice(0, 200));
+
+console.log('\n5. delegated approvals render a real decision card');
+FakeRelay.latest?.reply({
+  t: 'approval.request',
+  s: 'sess_test',
+  id: 'approval_test',
+  summary: 'Write the document',
+  call: { name: 'inkwell.document.write', arguments: { text: 'changed' } },
+});
+await new Promise((resolve) => setTimeout(resolve, 20));
+flush();
+check('approval card shows summary and arguments', rendered().includes('Write the document') && rendered().includes('changed'), rendered().slice(0, 300));
+const allow = (clickMount as unknown as { querySelector(s: string): { click(): void } | null }).querySelector('.ap-approval-actions button:last-child');
+allow?.click();
+await new Promise((resolve) => setTimeout(resolve, 20));
+check('Allow resolves the protocol decision', FakeRelay.frames.includes('approval.response'), FakeRelay.frames);
+check('the approval card settles and disappears', !rendered().includes('Approval required'), rendered().slice(0, 260));
 
 console.log(failures === 0 ? '\nUI smoke passed' : `\n${failures} failed`);
 process.exit(failures === 0 ? 0 : 1);
