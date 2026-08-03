@@ -105,7 +105,7 @@ const daemon = new AgentDaemon({
     if (verify) {
       console.log('');
       console.log(`  Verify: ${bold(verify)}`);
-      console.log(dim('  The website shows the same three words. A mismatch means someone'));
+      console.log(dim('  The website shows the same six words. A mismatch means someone'));
       console.log(dim('  is sitting between you — decline.'));
     }
     console.log(dim(`\n  Expires ${new Date(grant.expiresAt).toLocaleTimeString()}. Nothing else about your agent is shared.`));

@@ -80,8 +80,8 @@ interface PendingConnect {
   grant: CapabilityGrant;
   expiresAt: number;
   /** The page's ephemeral sealing key, carried through to the session.open. */
-  epk?: Hex;
-  epkSig?: Hex;
+  epk: Hex;
+  epkSig: Hex;
 }
 
 export interface RelayCoreOptions {
@@ -334,6 +334,9 @@ export class RelayCore {
 
   #onConnectBegin(conn: Conn, frame: Extract<Frame, { t: 'connect.begin' }>): void {
     if (conn.role !== 'client') return this.#fail(conn, 'role', 'only clients may request a connection');
+    if (!frame.epk || !frame.epkSig) {
+      return this.#fail(conn, 'sealing_required', 'connect requests require a sealing-key proof');
+    }
     this.#sweepConnects();
     const code = pairingCode();
     const expiresAt = this.#now() + CONNECT_TTL_MS;

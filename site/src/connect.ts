@@ -66,8 +66,6 @@ interface ResumeRecord {
   token: string;
   relay: string;
   surface: string;
-  /** The session was sealed; refuse to resume it as plaintext. */
-  sealed?: boolean;
 }
 
 function rememberSession(record: ResumeRecord): void {
@@ -130,7 +128,6 @@ const provider: AgentProvider & {
         token: record.token,
         tools,
         decide: () => true,
-        requireSealed: record.sealed,
       });
       resumed.session.on('closed', () => forgetSession(request.name));
       return resumed;
@@ -192,7 +189,6 @@ const provider: AgentProvider & {
           token,
           relay: RELAY,
           surface: request.name,
-          sealed: Boolean(session.info.verify),
         });
       }
       session.on('closed', () => forgetSession(request.name));

@@ -25,10 +25,10 @@ export function toHex(bytes: Uint8Array): Hex {
 
 export function fromHex(hex: Hex): Uint8Array {
   if (hex.length % 2 !== 0) throw new Error('odd-length hex string');
+  if (!/^[0-9a-f]*$/i.test(hex)) throw new Error('invalid hex string');
   const out = new Uint8Array(hex.length / 2);
   for (let i = 0; i < out.length; i++) {
     const byte = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
-    if (Number.isNaN(byte)) throw new Error('invalid hex string');
     out[i] = byte;
   }
   return out;

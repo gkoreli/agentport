@@ -3,7 +3,7 @@ import { Window } from 'happy-dom';
 
 const window = new Window({ url: 'https://inkwell.test/' });
 const g = globalThis as Record<string, unknown>;
-for (const key of ['window', 'document', 'HTMLElement', 'Element', 'Node', 'customElements', 'navigator', 'location', 'CustomEvent', 'Event', 'HTMLInputElement', 'ShadowRoot', 'DocumentFragment', 'Text', 'Comment']) {
+for (const key of ['window', 'document', 'HTMLElement', 'Element', 'Node', 'customElements', 'navigator', 'location', 'CustomEvent', 'Event', 'KeyboardEvent', 'HTMLInputElement', 'ShadowRoot', 'DocumentFragment', 'Text', 'Comment', 'MutationObserver', 'ResizeObserver', 'requestAnimationFrame', 'cancelAnimationFrame']) {
   g[key] = (window as unknown as Record<string, unknown>)[key];
 }
 
@@ -15,7 +15,8 @@ const check = (label: string, ok: boolean, detail?: unknown) => {
 
 const { openConnectModal } = await import('../site/src/modal.js');
 const { mountPanel } = await import('../site/src/agentport-ui.js');
-const { signal, flush } = await import('@nisli/core');
+const { signal, flush, html } = await import('@nisli/core');
+const { answerProofBinding, generateKeyPair, generateSealKeyPair, signEpk } = await import('../packages/protocol/src/index.js');
 void signal;
 
 console.log('1. connect modal');
@@ -66,6 +67,8 @@ class FakeRelay {
   static frames: string[] = [];
   readyState = 1;
   #listeners: Record<string, (event?: unknown) => void> = {};
+  #client = '';
+  #agent = generateKeyPair();
   constructor(url: string) {
     FakeRelay.dialled.push(url);
     setTimeout(() => this.#listeners.open?.(), 0);
@@ -77,16 +80,37 @@ class FakeRelay {
     setTimeout(() => this.#listeners.message?.({ data: JSON.stringify(frame) }), 0);
   }
   send(raw: string) {
-    const frame = JSON.parse(raw) as { t: string };
+    const frame = JSON.parse(raw) as Record<string, unknown> & { t: string };
     FakeRelay.frames.push(frame.t);
     if (frame.t === 'hello') this.#reply({ t: 'challenge', nonce: 'a'.repeat(32) });
-    if (frame.t === 'identify') this.#reply({ t: 'ready', role: 'client', pubkey: 'x' });
+    if (frame.t === 'identify') {
+      this.#client = String(frame.pubkey);
+      this.#reply({ t: 'ready', role: 'client', pubkey: frame.pubkey });
+    }
     if (frame.t === 'connect.begin') {
       this.#reply({ t: 'connect.pending', code: 'TEST-CODE', expiresAt: Date.now() + 60_000 });
-      // Complete the session too, so the panel actually renders messages —
-      // without this the render assertions below inspect an empty log and
-      // pass vacuously.
-      this.#reply({ t: 'session.opened', s: 'sess_test', agentName: 'Test Agent', runtime: 'demo' });
+      // Complete the session too, so the panel can exercise its live AG-UI
+      // path rather than stopping at a successful connection handshake.
+      const mine = generateSealKeyPair();
+      const surface = frame.surface as Parameters<typeof answerProofBinding>[3];
+      const grant = frame.grant as Parameters<typeof answerProofBinding>[4];
+      this.#reply({
+        t: 'session.opened',
+        s: 'sess_test',
+        agentName: 'Test Agent',
+        runtime: 'demo',
+        epk: mine.publicKey,
+        epkSig: signEpk(
+          this.#agent.secretKey,
+          'sess_test',
+          mine.publicKey,
+          answerProofBinding('connect', this.#client, String(frame.epk), surface, grant, {
+            agentName: 'Test Agent',
+            runtime: 'demo',
+          }),
+        ),
+        agent: this.#agent.publicKey,
+      });
     }
   }
   close() {}
@@ -136,9 +160,100 @@ flush();
 const render = clickMount as unknown as { textContent: string };
 const rendered = () => render.textContent ?? '';
 
-check('a session message actually rendered', /tools lent/.test(rendered()), rendered().slice(0, 200));
+check('the connected-session notice rendered', /tools lent/.test(rendered()), rendered().slice(0, 200));
 check('no function source leaked into the DOM', !/=>/.test(rendered()), rendered().slice(0, 200));
 check('empty state is gone once connected', !/Bring your own agent/.test(rendered()), rendered().slice(0, 200));
+
+console.log('\n5. panel AG-UI path');
+const panelInput = clickMount.querySelector('[data-slot="chat-composer-input"]') as HTMLTextAreaElement;
+panelInput.value = 'Tighten the opening.';
+panelInput.dispatchEvent(new Event('input', { bubbles: true }));
+flush();
+const encryptedBeforePrompt = FakeRelay.frames.filter((type) => type === 'enc').length;
+(clickMount.querySelector('[data-slot="chat-composer-form"]') as HTMLFormElement).dispatchEvent(
+  new Event('submit', { bubbles: true, cancelable: true }),
+);
+await Promise.resolve();
+await Promise.resolve();
+flush();
+check('panel prompt is rendered through the semantic transcript', rendered().includes('Tighten the opening.'), rendered().slice(-240));
+check('panel run is busy before the first agent token', clickMount.querySelector('[data-slot="chat"]')?.getAttribute('data-state') === 'busy');
+check('Stop is available before the first agent token', clickMount.querySelector('[data-slot="chat-generation-stop"]') !== null);
+const encryptedAfterPrompt = FakeRelay.frames.filter((type) => type === 'enc').length;
+check('panel prompt crossed the sealed session', encryptedAfterPrompt > encryptedBeforePrompt, FakeRelay.frames);
+(clickMount.querySelector('[data-slot="chat-generation-stop"]') as HTMLButtonElement).click();
+await Promise.resolve();
+check(
+  'early Stop emits a sealed cancellation',
+  FakeRelay.frames.filter((type) => type === 'enc').length > encryptedAfterPrompt,
+  FakeRelay.frames,
+);
+
+console.log('\n6. protocol-neutral chat');
+const { createChatStore } = await import('../src/nisli-ui/lib/chat.js');
+const { Chat } = await import('../src/nisli-ui/ui/chat/chat.js');
+const chatMount = window.document.createElement('div');
+window.document.body.appendChild(chatMount);
+const chatStore = createChatStore();
+const chatBusy = signal(false);
+const prompts: string[] = [];
+let chatController: import('../src/nisli-ui/ui/chat/chat.js').ChatController | undefined;
+html`${Chat({
+  entries: chatStore.entries,
+  busy: chatBusy,
+  suggestions: ['Summarize this'],
+  onPrompt: (prompt) => {
+    prompts.push(prompt);
+    return true;
+  },
+  bind: (controller) => {
+    chatController = controller;
+  },
+})}`.mount(chatMount as unknown as HTMLElement);
+flush();
+
+chatStore.addUserMessage('Please revise this paragraph.');
+chatStore.apply({ type: 'run.start' });
+chatStore.apply({ type: 'reasoning.start', id: 'reason-1' });
+chatStore.apply({ type: 'reasoning.delta', id: 'reason-1', content: { type: 'text', text: 'Checking tone…' } });
+chatStore.apply({ type: 'tool.start', id: 'tool-1', name: 'inkwell.document.read' });
+chatStore.apply({ type: 'tool.input', id: 'tool-1', input: '{"section":1}' });
+chatStore.apply({ type: 'tool.end', id: 'tool-1', output: [{ type: 'text', text: 'Read 1 section' }] });
+chatStore.apply({ type: 'message.start', id: 'answer-1', role: 'assistant' });
+chatStore.apply({ type: 'message.delta', id: 'answer-1', content: { type: 'text', text: 'Here is a tighter version.' } });
+chatStore.apply({ type: 'message.end', id: 'answer-1' });
+chatStore.apply({ type: 'run.end' });
+flush();
+
+check('semantic entries render without protocol-shaped state', chatMount.querySelectorAll('[data-slot="chat-message"]').length === 2);
+check('reasoning has a native disclosure', chatMount.querySelector('[data-slot="chat-reasoning"]')?.tagName === 'DETAILS');
+check('tool lifecycle renders by stable id', chatMount.querySelector('[data-slot="chat-tool-call"]')?.getAttribute('data-status') === 'complete');
+check('suggestions are actionable buttons', chatMount.querySelector('[data-slot="chat-suggestion"]')?.tagName === 'BUTTON');
+
+chatBusy.value = true;
+flush();
+(chatMount.querySelector('[data-slot="chat-suggestion"]') as HTMLButtonElement).click();
+await Promise.resolve();
+flush();
+check('busy suggestion becomes a visible queue item', chatMount.querySelector('[data-slot="chat-queued"]') !== null);
+check('external sends enter the same queue', chatController?.send('External follow-up') === true);
+flush();
+check('both queued prompts are visible', chatMount.querySelectorAll('[data-slot="chat-queued"]').length === 2);
+
+chatBusy.value = false;
+flush();
+await Promise.resolve();
+await Promise.resolve();
+flush();
+check('the queue drains one prompt at a time', prompts.length === 1 && prompts[0] === 'Summarize this', prompts);
+chatBusy.value = true;
+flush();
+chatBusy.value = false;
+flush();
+await Promise.resolve();
+await Promise.resolve();
+flush();
+check('external queued sends preserve order', prompts.length === 2 && prompts[1] === 'External follow-up', prompts);
 
 console.log(failures === 0 ? '\nUI smoke passed' : `\n${failures} failed`);
 process.exit(failures === 0 ? 0 : 1);

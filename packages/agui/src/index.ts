@@ -119,6 +119,7 @@ export type AguiEvent =
 export interface AguiAdapter {
   events: AsyncIterable<AguiEvent>;
   run(text: string): Promise<string>;
+  cancel(runId: string): boolean;
 }
 
 type Emit = (event: AguiEvent) => void;
@@ -171,7 +172,9 @@ class Translator {
 
     let result: Promise<string>;
     try {
-      result = this.#session.prompt(text);
+      const request = this.#session.startPrompt(text);
+      pending.promptId = request.id;
+      result = request.result;
     } catch (error) {
       pending.settled = true;
       this.#removePending(pending);
@@ -200,6 +203,13 @@ class Translator {
         return Promise.reject(error);
       },
     );
+  }
+
+  cancel(runId: string): boolean {
+    const pending = this.#pendingRuns.find((run) => run.runId === runId && !run.settled);
+    if (!pending?.promptId) return false;
+    this.#session.cancel(pending.promptId);
+    return true;
   }
 
   stop(): void {
@@ -288,9 +298,11 @@ class Translator {
     const existing = this.#prompts.get(promptId);
     if (existing) return existing;
 
-    const pending = this.#pendingRuns.find((run) => run.promptId === undefined);
+    const pending =
+      this.#pendingRuns.find((run) => run.promptId === promptId) ??
+      this.#pendingRuns.find((run) => run.promptId === undefined);
     if (pending) {
-      pending.promptId = promptId;
+      pending.promptId ??= promptId;
       const prompt: PromptState = {
         runId: pending.runId,
         external: false,
@@ -391,7 +403,11 @@ export function aguiStream(session: AgentSession): AguiAdapter {
   const events = new EventQueue();
   const translator = new Translator(session, (event) => events.push(event), () => events.end());
   events.onReturn(() => translator.stop());
-  return { events, run: (text) => translator.run(text) };
+  return {
+    events,
+    run: (text) => translator.run(text),
+    cancel: (runId) => translator.cancel(runId),
+  };
 }
 
 /** Subscribe without a stream abstraction; returns a listener teardown function. */

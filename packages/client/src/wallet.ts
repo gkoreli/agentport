@@ -3,20 +3,23 @@ import {
   Emitter,
   PROTOCOL_VERSION,
   SEALED_TYPES,
+  answerProofBinding,
   authChallengeMessage,
   decodeFrame,
-  deriveSealKey,
+  deriveSealChannel,
   encodeFrame,
   fingerprintWords,
   generateSealKeyPair,
   isSessionFrame,
   openSealed,
+  openProofBinding,
   publicKeyOf,
   randomId,
   seal,
   sign,
   signCert,
   signEpk,
+  resumeProofBinding,
   verifyEpk,
   type AgentCert,
   type AgentSummary,
@@ -24,6 +27,7 @@ import {
   type Frame,
   type Hex,
   type SessionFrame,
+  type SealChannel,
   type SurfaceDescriptor,
 } from '@agentport/protocol';
 import { AgentSession, type ApprovalDecider, type SiteTool } from './session.js';
@@ -91,7 +95,7 @@ export class AgentWallet extends Emitter<WalletEvents> {
   #waiters = new Map<string, Deferred<Frame>[]>();
   #resumeTokens = new Map<string, string>();
   /** Per-attachment symmetric keys; the relay never holds these (ADR-003). */
-  #sealKeys = new Map<string, Uint8Array>();
+  #sealChannels = new Map<string, SealChannel>();
   #verifyWords = new Map<string, string>();
   /** The agent behind each session — resume routes by it (stateless relay). */
   #agentKeys = new Map<string, Hex>();
@@ -217,7 +221,12 @@ export class AgentWallet extends Emitter<WalletEvents> {
       surface,
       grant,
       epk: sealPair.publicKey,
-      epkSig: signEpk(this.#options.userSecretKey, 'connect', sealPair.publicKey),
+      epkSig: signEpk(
+        this.#options.userSecretKey,
+        'connect',
+        sealPair.publicKey,
+        openProofBinding('connect', surface, grant),
+      ),
     });
     const pending = (await this.#await('connect.pending')) as Extract<Frame, { t: 'connect.pending' }>;
 
@@ -228,7 +237,17 @@ export class AgentWallet extends Emitter<WalletEvents> {
       }
       const opened = reply as Extract<Frame, { t: 'session.opened' }>;
       if (opened.resume) this.#resumeTokens.set(opened.s, opened.resume);
-      this.#establishSeal(opened.s, sealPair, opened, undefined);
+      this.#establishSeal(
+        opened.s,
+        sealPair,
+        opened,
+        undefined,
+        answerProofBinding('connect', this.publicKey, sealPair.publicKey, surface, grant, {
+          agentName: opened.agentName,
+          runtime: opened.runtime,
+          resume: opened.resume,
+        }),
+      );
       if (opened.agent) this.#agentKeys.set(opened.s, opened.agent);
       return this.#makeSession(opened.s, surface, grant, opened, request);
     })();
@@ -247,12 +266,6 @@ export class AgentWallet extends Emitter<WalletEvents> {
     token: string;
     tools: SiteTool[];
     decide?: ApprovalDecider;
-    /**
-     * Refuse to come back unsealed. Set when the original session was sealed:
-     * a peer that "loses" the key exchange must not be able to downgrade a
-     * private session to plaintext by omission.
-     */
-    requireSealed?: boolean;
   }): Promise<{ session: AgentSession; missed: number }> {
     // A real page refresh fires this while the OLD tab's socket close is
     // still in flight to the relay, which then refuses with already_attached
@@ -281,7 +294,6 @@ export class AgentWallet extends Emitter<WalletEvents> {
     token: string;
     tools: SiteTool[];
     decide?: ApprovalDecider;
-    requireSealed?: boolean;
   }): Promise<{ session: AgentSession; missed: number }> {
     const sealPair = generateSealKeyPair();
     const resumedReply = this.#request('session.resumed', 'session.denied');
@@ -292,7 +304,12 @@ export class AgentWallet extends Emitter<WalletEvents> {
         agent: request.agent,
         token: request.token,
         epk: sealPair.publicKey,
-        epkSig: signEpk(this.#options.userSecretKey, request.id, sealPair.publicKey),
+        epkSig: signEpk(
+          this.#options.userSecretKey,
+          request.id,
+          sealPair.publicKey,
+          resumeProofBinding(request.agent, request.token),
+        ),
       });
       const reply = await resumedReply.promise;
       if (reply.t === 'session.denied') {
@@ -301,13 +318,17 @@ export class AgentWallet extends Emitter<WalletEvents> {
       // The DAEMON answers a resume (stateless relay), and its answer carries
       // its fresh epk — one round trip, one frame, no separate rekey step.
       const resumed = reply as Extract<Frame, { t: 'session.resumed' }>;
-      if (resumed.epk && resumed.epkSig) {
-        this.#establishSeal(request.id, sealPair, resumed, request.agent);
-      } else if (request.requireSealed) {
-        throw new ResumeError('unsealed');
-      } else {
-        this.#log(`session ${request.id} resumed UNSEALED — the agent sent no key`);
-      }
+      this.#establishSeal(
+        request.id,
+        sealPair,
+        resumed,
+        request.agent,
+        answerProofBinding('resume', this.publicKey, sealPair.publicKey, resumed.surface, resumed.grant, {
+          agentName: resumed.agentName,
+          runtime: resumed.runtime,
+          missed: resumed.missed,
+        }),
+      );
       this.#agentKeys.set(request.id, request.agent);
       const session = this.#makeSession(
         resumed.s,
@@ -344,7 +365,12 @@ export class AgentWallet extends Emitter<WalletEvents> {
       surface,
       grant,
       epk: sealPair.publicKey,
-      epkSig: signEpk(this.#options.userSecretKey, id, sealPair.publicKey),
+      epkSig: signEpk(
+        this.#options.userSecretKey,
+        id,
+        sealPair.publicKey,
+        openProofBinding('open', surface, grant, request.agent),
+      ),
     });
     const reply = await this.#await('session.opened', 'session.denied');
     if (reply.t === 'session.denied') {
@@ -354,7 +380,17 @@ export class AgentWallet extends Emitter<WalletEvents> {
     if (opened.resume) this.#resumeTokens.set(id, opened.resume);
     // A paired wallet knows exactly which agent it called, so the epk proof is
     // checked against the cert's key — the relay cannot substitute anything.
-    this.#establishSeal(id, sealPair, opened, request.agent);
+    this.#establishSeal(
+      id,
+      sealPair,
+      opened,
+      request.agent,
+      answerProofBinding('open', this.publicKey, sealPair.publicKey, surface, grant, {
+        agentName: opened.agentName,
+        runtime: opened.runtime,
+        resume: opened.resume,
+      }),
+    );
     this.#agentKeys.set(id, request.agent);
 
     return this.#makeSession(id, surface, grant, opened, request);
@@ -393,16 +429,16 @@ export class AgentWallet extends Emitter<WalletEvents> {
     sealPair: { publicKey: Hex; secretKey: Hex },
     reply: { epk?: Hex; epkSig?: Hex; agent?: Hex },
     expectedAgent: Hex | undefined,
+    answerBinding: unknown,
   ): void {
     if (!reply.epk || !reply.epkSig) {
-      this.#log(`session ${sessionId} is NOT sealed — peer sent no epk`);
-      return;
+      throw new Error('agent omitted its sealing-key proof — refusing plaintext session');
     }
     const verifier = expectedAgent ?? reply.agent;
-    if (!verifier || !verifyEpk(verifier, sessionId, reply.epk, reply.epkSig)) {
-      throw new Error('agent epk proof failed — refusing to run the session unsealed');
+    if (!verifier || !verifyEpk(verifier, sessionId, reply.epk, reply.epkSig, answerBinding)) {
+      throw new Error('agent sealing-key proof failed — aborting session');
     }
-    this.#sealKeys.set(sessionId, deriveSealKey(sealPair.secretKey, reply.epk, sessionId));
+    this.#sealChannels.set(sessionId, deriveSealChannel(sealPair.secretKey, reply.epk, sessionId, 'client'));
     this.#verifyWords.set(sessionId, fingerprintWords(sealPair.publicKey, reply.epk));
   }
 
@@ -424,7 +460,7 @@ export class AgentWallet extends Emitter<WalletEvents> {
     });
     session.on('closed', () => {
       this.#sessions.delete(id);
-      this.#sealKeys.delete(id);
+      this.#sealChannels.delete(id);
       this.#verifyWords.delete(id);
       this.#agentKeys.delete(id);
     });
@@ -441,12 +477,20 @@ export class AgentWallet extends Emitter<WalletEvents> {
 
   /** Session content leaves sealed whenever the attachment has a key. */
   #sendSession(frame: SessionFrame): void {
-    const key = this.#sealKeys.get(frame.s);
-    if (key && SEALED_TYPES.has(frame.t)) this.#sendRaw(seal(key, frame));
-    else this.#sendRaw(frame);
+    if (!SEALED_TYPES.has(frame.t)) {
+      this.#sendRaw(frame);
+      return;
+    }
+    const channel = this.#sealChannels.get(frame.s);
+    if (!channel) throw new Error(`refusing to send ${frame.t} without a sealing channel`);
+    this.#sendRaw(seal(channel.send, frame));
   }
 
-  async #onFrame(frame: Frame): Promise<void> {
+  async #onFrame(frame: Frame, openedFromSeal = false): Promise<void> {
+    if (SEALED_TYPES.has(frame.t) && !openedFromSeal) {
+      this.#log(`dropped plaintext session content (${frame.t})`);
+      return;
+    }
     if (frame.t === 'challenge') {
       this.#sendRaw({
         t: 'identify',
@@ -465,14 +509,14 @@ export class AgentWallet extends Emitter<WalletEvents> {
     }
 
     if (frame.t === 'enc') {
-      const key = this.#sealKeys.get(frame.s);
-      if (!key) {
-        this.#log(`sealed frame for ${frame.s} but no key — dropping`);
+      const channel = this.#sealChannels.get(frame.s);
+      if (!channel) {
+        this.#log(`sealed frame for ${frame.s} but no channel — dropping`);
         return;
       }
       let inner: SessionFrame;
       try {
-        inner = openSealed(key, frame);
+        inner = openSealed(channel.receive, frame);
       } catch (err) {
         this.#log(`failed to open sealed frame on ${frame.s}: ${err instanceof Error ? err.message : String(err)}`);
         return;
@@ -483,7 +527,7 @@ export class AgentWallet extends Emitter<WalletEvents> {
         this.#log(`agent sealed a frame it may not originate (${inner.t}) — dropping`);
         return;
       }
-      await this.#sessions.get(frame.s)?.handle(inner);
+      await this.#onFrame(inner, true);
       return;
     }
 

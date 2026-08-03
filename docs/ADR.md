@@ -64,24 +64,32 @@ fix is routine: WalletConnect v2 and Paseo both run E2E boxes over untrusted
 relays (Paseo: Curve25519 ECDH + XSalsa20-Poly1305, relay sees only
 IPs/timing/sizes/session ids).
 
-**Decision.** NaCl-box-style sealing with modern spellings, all from `@noble`
-libraries already in the dependency tree — no invented crypto:
+**Decision.** A Noise-inspired channel using the browser-safe `@noble`
+primitives already in the dependency tree. Noise's `CipherState`, `Split`,
+prologue, and failure rules are the normative design reference; libsodium's
+`crypto_kx` and `secretstream` APIs are the secondary implementation reference:
 
-- Per-session **ephemeral X25519** keypairs, exchanged in the session-open
-  frames, each signed over `(sessionId, epk)` by the sender's long-term Ed25519
-  identity key. Ephemeral keys give forward secrecy; signatures stop the relay
-  swapping keys. Resume re-runs the exchange (fresh key per attachment).
-- Shared secret → **HKDF-SHA256** (session id as info) → one symmetric key.
-- Every session frame collapses to `{t:'enc', s, n: nonce, c: ciphertext}`
-  under **XChaCha20-Poly1305**. The relay sees that a session talks and how
-  much — not what, and not even which frame types.
+- Per-attachment **ephemeral X25519** keypairs, exchanged in the session-open
+  frames. Ed25519 proofs bind the epks to the canonical handshake context:
+  session/mode, both peers, surface, capability grant, and resume authority as
+  applicable. The relay cannot swap keys or rewrite lifecycle metadata without
+  invalidating the handshake. Resume re-runs the exchange.
+- Shared secret → **HKDF-SHA256** (session id and direction as info) → separate
+  client→agent and agent→client keys. Each direction owns a strict monotonic
+  64-bit nonce; tampering, replay, reordering, or exhaustion fails closed.
+- Every content frame collapses to `{t:'enc', s, n: nonce, c: ciphertext}`
+  under **XChaCha20-Poly1305**, with the visible session id authenticated as
+  associated data. Lifecycle frames stay visible because the relay routes
+  them. The relay cannot see content or its frame type.
+- Sealing is mandatory on open and resume. Missing key material, invalid key
+  proofs, plaintext content, and malformed ciphertext are rejection states;
+  there is no compatibility or downgrade path.
 - **Drop-in first contact is TOFU**, honestly labeled: the page key is
   ephemeral and first seen through the relay, so a malicious relay could MITM
-  first contact. Mitigations: a short **fingerprint word pair** (derived from
-  both epks) shown in the browser modal *and* the daemon consent screen —
-  matching words = no MITM, mathematically; plus **key pinning** after first
-  contact (SSH model). Paired wallets (known keys both sides) are immune from
-  the start.
+  first contact. A six-word, 48-bit short authentication string derived from
+  both epks is shown in the browser modal *and* the daemon consent screen for
+  deliberate out-of-band comparison. Paired wallets know the agent key and
+  authenticate the exchange without relying on that comparison.
 
 **Consequences.** Relay-side `mayOriginate()` per-frame-type enforcement cannot
 see inside ciphertext; type-level policy moves to the endpoints, which already
@@ -89,7 +97,7 @@ enforce it (daemon refuses tools outside the grant; client ignores frames a
 peer may not send). The relay keeps its structural checks: only stamped
 participants speak, sessions only open toward owned agents. A relay you have
 made blind cannot be a policy engine — that division is correct, not a loss.
-After this ships, "Cloudflare hosts the relay" carries the same trust weight as
+With this shipped, "Cloudflare hosts the relay" carries the same trust weight as
 "Tailscale routes packets through DERP": none.
 
 ---
@@ -439,3 +447,236 @@ the input edge (ADR-006), ACP at the runtime (ADR-004), AG-UI at the output
 edge (this), AgentPort as the trust-and-transport middle none of them define.
 One sentence: WebMCP tools in, AG-UI events out, your agent in the middle,
 nobody in between.
+
+---
+
+## ADR-018: Security architecture is explicit, fail-closed, and enforced at the edges — accepted
+
+**Context.** ADR-003 decides how session content is sealed, but cryptography is
+only one part of AgentPort's security boundary. Ownership, consent, capability
+scope, resume authority, transcript provenance, endpoint policy, metadata
+disclosure, and prompt injection span several packages. Keeping those claims
+only in implementation comments or agent working notes makes contradictions
+easy and security review unnecessarily difficult.
+
+This record is the authoritative current security model. Earlier ADRs explain
+why individual decisions were made; if a historical statement conflicts with
+this record or the shipped protocol, this record and the executable invariants
+win. AgentPort is not independently audited, and must not be described as such.
+
+**Decision.** AgentPort treats the relay and the site as mutually untrusted
+intermediaries, keeps authority and durable user data at the endpoints, and
+fails closed whenever authentication, sealing, grant, or message-state checks
+cannot be proved. There is no plaintext, compatibility, or heuristic recovery
+path for session content.
+
+### Security tenets
+
+1. **No silent downgrade.** All conversation, history, tool, and approval
+   frames are sealed. Missing or invalid key material never selects a weaker
+   transport.
+2. **Authenticate the entire decision context.** Ephemeral-key proofs bind the
+   mode, peers, surface, capability grant, and resume authority applicable to
+   that exchange. Cleartext lifecycle metadata may be observed, but cannot be
+   rewritten undetectably.
+3. **Least authority, for one attachment.** A grant names the only site tools
+   available, records approval policy, and expires. The daemon and client both
+   enforce it; the relay is not a capability authority.
+4. **Authority and durable data live at the edges.** User and device secret
+   keys, resume authority, transcripts, and runtime state do not belong to the
+   relay. The relay keeps only live-socket routing state.
+5. **Consent renders outside the requester where a trusted surface exists.**
+   Paired-wallet consent belongs in extension chrome; drop-in consent belongs
+   at the daemon. An arbitrary site must not be able to impersonate approval.
+6. **Metadata is disclosed honestly.** Encryption hides content, not traffic
+   analysis or the lifecycle fields required for rendezvous and consent.
+7. **Security properties are executable.** A routing, identity, grant,
+   sealing, resume, or persistence change is incomplete without an adversarial
+   end-to-end check for the affected invariant.
+8. **Replacement removes the old path.** A new security mechanism is consumed
+   immediately and the superseded mechanism is deleted in the same change.
+
+### Assets and trust boundaries
+
+| Component | Holds or sees | Security position |
+|---|---|---|
+| Site/surface | Its tool implementations and results; prompts and agent output intentionally delivered to its tab | Untrusted requester and application-side plaintext consumer. The wallet/client is the cryptographic endpoint. Site content and tool results are hostile input. In the in-page demo the site can also reach the demo wallet key, which is why that arrangement is not a production custody boundary. |
+| Wallet/client | User identity key, owned-agent certs, grant decision, site-tool dispatch, attachment keys | Trusted endpoint. Production custody and approvals belong behind the extension boundary. |
+| Relay | Public identities and certs, lifecycle frames, live routing state, ciphertext metadata | Untrusted for content confidentiality and integrity; relied on only for availability, rendezvous, identity stamping, and best-effort routing. Endpoint checks remain valid against a lying relay. |
+| Daemon | Agent device key and cert, grants, resume tokens, attachment keys, transcript/runtime session mapping | Trusted endpoint and final policy authority. It re-checks ownership, grant expiry, tool membership, approvals, resume authority, and client frame types. |
+| ACP runtime | Plaintext conversation and the user's own runtime capabilities | User-selected trusted computing base, but model output and retrieved content are not trusted instructions. Runtime auto-approval is forbidden. |
+| Network observer | TLS records outside the relay; timing and endpoints | TLS protects each relay leg. E2EE additionally protects content from the TLS-terminating relay. |
+
+The protected assets are the user and agent secret keys, attachment secrets,
+conversation content, tool arguments/results, approval decisions, resume
+authority, capability scope, transcript, and the user's runtime capabilities.
+
+### Adversaries covered
+
+- A curious or malicious relay that records, drops, reorders, replays,
+  modifies, or substitutes frames and ephemeral keys.
+- A network observer on either relay leg.
+- A site attempting to exceed its grant, forge agent-originated frames,
+  bypass approval, resume another session, or reach an agent it does not own.
+- A non-participant socket attempting to inject session traffic.
+- Replayed ciphertext, handshake proofs, resume attempts, and modified
+  lifecycle metadata.
+- Hostile page text or tool results attempting prompt injection. This risk is
+  contained by explicit approval and grant boundaries, not solved by E2EE.
+
+### Cryptographic channel
+
+ADR-003 and `packages/protocol/src/{channel,seal}.ts` define the channel. Each
+open or resume attachment creates fresh X25519 keys. Ed25519 signatures prove
+the ephemeral keys against canonical, domain-separated handshake bindings.
+X25519 output is rejected if all-zero. HKDF-SHA256 derives independent
+client-to-agent and agent-to-client keys. XChaCha20-Poly1305 seals content with
+the visible session id as mandatory associated data.
+
+Each direction starts at nonce zero and accepts exactly the next 64-bit
+counter. State advances only after successful AEAD authentication. Tampering,
+replay, reordering, nonce exhaustion, wrong associated data, and malformed
+ciphertext therefore fail closed. Loss or reordering can sacrifice
+availability: the attachment must resume with fresh keys rather than guess at
+counter recovery.
+
+The channel provides per-attachment forward secrecy: later compromise of an
+identity key does not recover recorded content if ephemeral secrets were not
+also captured. It does **not** provide an intra-attachment ratchet or
+post-compromise security. Compromise of a live wallet, daemon, runtime, or
+attachment key exposes the content available to that endpoint.
+
+Paired sessions authenticate the agent key already certified to the wallet and
+the daemon re-checks that the stamped client owns it. Drop-in first contact is
+TOFU: its ephemeral page identity first arrives through the relay. The
+six-word, 48-bit short authentication string only detects a MITM when the user
+actually compares both consent surfaces. It is not identity pinning.
+
+### What the relay can observe
+
+Content frames expose only `{t: "enc", s, n, c}` plus WebSocket/TLS metadata.
+The relay can observe session id, direction, timing, frequency, ciphertext
+length, and the network endpoints connected to it. AgentPort does not pad
+frames or conceal traffic shape.
+
+Lifecycle traffic remains clear and includes, depending on the flow:
+
+- protocol version and socket role;
+- public identity keys, ownership certs, signatures, presence, and pairing or
+  connect codes;
+- surface name, claimed origin and route;
+- the capability grant: tool names, descriptions, schemas, approval flags,
+  `alwaysAsk`, and expiry;
+- client, agent, and ephemeral public keys and their proofs;
+- agent name/runtime, session status, denial and close reasons, and missed
+  frame counts;
+- the resume bearer token while a resume/open response is in transit.
+
+These fields are authenticated where they affect the session decision, but
+they are not confidential. The relay stores none of them durably; seeing a
+resume token in transit is different from minting, judging, or retaining it.
+The daemon owns resume authority and rejects token guessing with a bounded
+attempt count, constant-time comparison, and a generic unprovable-session
+response.
+
+### Capability, content, and provenance boundaries
+
+- The daemon rejects expired grants and tools absent from the grant. The
+  client dispatches only tools registered for that session. Approval defaults
+  to denial; drop-in approval moves to the daemon rather than disappearing.
+- Because the relay cannot inspect encrypted inner types, both endpoints
+  enforce which content-frame types the peer may originate. Relay-side role
+  checks remain for visible lifecycle frames and session membership.
+- The conversation's durable copy belongs to the agent runtime on the user's
+  machine. The relay never buffers content and the site never persists a
+  transcript across reload. History restoration asks the daemon/runtime.
+- The site may persist only the session id, agent address, relay address,
+  surface selector, and resume token required to reattach. The extension also
+  records the origin/name lookup key and grant expiry in extension-only session
+  storage. A resume token is a bearer secret scoped to its existing session
+  and still bounded by the original grant and expiry.
+- Session attachment keys live in endpoint memory and are removed when the
+  session closes. JavaScript cannot guarantee physical zeroization; the design
+  therefore relies on ephemerality, non-persistence, and short ownership.
+
+### Fail-closed rules
+
+- Invalid certs, identity signatures, peer ownership, or session membership
+  are rejected.
+- Missing/invalid ephemeral keys or proofs abort open/resume.
+- Plaintext content frames are dropped; content is never retried unsealed.
+- AEAD failure, counter mismatch, or forbidden inner frame type is dropped
+  without advancing receive state.
+- Expired grants, unknown tools, declined approval, invalid resume authority,
+  and attempts to replace a live attachment are denied.
+- Malformed JSON and frames without an object envelope and string type are
+  rejected. Exhaustive per-frame runtime schema validation is a blocking gap
+  recorded below.
+- Transport failure may interrupt the operation; it never changes the
+  security tier.
+
+### Enforcement and evidence
+
+| Invariant | Primary enforcement | Required evidence |
+|---|---|---|
+| Ownership cert cannot be forged or rebound | protocol signature helpers; relay identify; daemon owner re-check | invalid cert/binding checks in `scripts/e2e.ts` |
+| Relay-stamped identity is authoritative | relay session routing; daemon open/resume handling | self-reported identity substitution test |
+| Grant is the tool boundary | daemon `callTool`; client session dispatcher | ungranted and expired tool checks |
+| Only participants and valid roles speak | relay membership/origination checks; endpoint inner-type allowlists | cross-role and non-participant injection checks |
+| Content is always sealed | protocol sealing; wallet and daemon send/receive boundaries | on-path observer plus plaintext-proof stripping checks |
+| Handshake metadata cannot be rewritten | canonical epk proof bindings | grant-rewrite and missing/invalid proof checks |
+| Ciphertext is ordered and authentic | channel counter and AEAD state | tamper, replay, wrong-AAD, and counter tests |
+| Resume preserves authority and rekeys | daemon-owned token/grant state; fresh endpoint epks | theft, live-session replacement, expiry, and rekey checks |
+| Conversation remains at the edge | daemon/runtime history; relay count-and-drop behavior | refresh replay proves history came from agent side |
+
+`npm run e2e` is the minimum acceptance test for these invariants, alongside
+the TypeScript builds for protocol, browser, Worker, and examples. A test whose
+assertion cannot fail for the claimed property does not count as evidence.
+
+### Known blocking gaps
+
+- `decodeFrame()` currently validates only JSON, an object envelope, and a
+  string `t`; TypeScript wire types do not validate hostile runtime input.
+  Exhaustive, size-bounded schemas for every frame must replace that shallow
+  boundary before the protocol is called production-hardened.
+- The E2E suite covers ownership denial, grant restriction, approval refusal,
+  on-path observation, tampering, replay, proof stripping, grant rewriting,
+  resume-token theft, and edge-owned history. It does not yet directly attack
+  invalid cert rebinding, self-reported identity replacement, grant expiry,
+  every cross-role/non-participant route, or compare old and resumed
+  attachment keys. Those rows above remain required test work, not implied
+  coverage.
+- Production key custody and origin attestation still depend on completing the
+  extension boundary. The in-page wallet remains demo-only.
+- There is no revocation UI, and prompt injection containment for the runtime's
+  unrelated personal tools remains incomplete (ADR-014).
+
+### Explicit limitations and non-goals
+
+AgentPort does not protect against a compromised endpoint, malicious or
+compromised runtime, vulnerable browser extension, stolen unlocked device,
+dependency compromise, or a user approving a dangerous action. It does not
+hide IP addresses, timing, message sizes, lifecycle metadata, or denial of
+service. It does not make hostile site content safe for an agent with unrelated
+personal tools. It currently provides no post-quantum security.
+
+The in-page wallet is a demo tier, not production key custody. Claimed origin
+in drop-in mode is self-reported; only the extension boundary can attest the
+embedding origin. The approval boundary is the primary control for prompt
+injection until stronger isolation of the runtime's own tools ships.
+
+### Change discipline
+
+Any change to identity, pairing, lifecycle fields, grants, routing, sealing,
+resume, consent placement, persistence, or transcript handling must update
+this record and its adversarial tests in the same change. New cryptographic
+design must cite an open standard or established implementation, preserve
+browser compatibility, and receive focused review. Backward compatibility may
+justify a new explicit protocol version; it never justifies accepting
+plaintext or unauthenticated content under the current version.
+
+**Consequences.** Security claims now have one reviewable source tied to code
+and executable evidence. The cost is intentional: protocol changes carry a
+documentation and adversarial-test obligation, metadata cannot be hand-waved
+as encrypted, and availability is allowed to fail before confidentiality or
+authority does.

@@ -16,7 +16,7 @@ const session = new AgentSession({
   id: 'session-check',
   surface: { name: 'AG-UI check', origin: 'https://example.test' },
   grant: { tools: [tool], alwaysAsk: [], expiresAt: Date.now() + 60_000 },
-  info: { agentName: 'Fake agent', runtime: 'fake', verify: 'coral-anvil-fern' },
+  info: { agentName: 'Fake agent', runtime: 'fake', verify: 'coral-anvil-fern-river-slate-owl' },
   tools: [tool],
   decide: async () => true,
   send: (frame) => sent.push(frame),
@@ -43,6 +43,14 @@ const collecting = (async () => {
 
 const successfulRun = adapter.run('save this');
 const firstPrompt = lastPromptId();
+await Promise.resolve();
+const firstRun = streamEvents.find((event): event is Extract<AguiEvent, { type: 'RUN_STARTED' }> => event.type === 'RUN_STARTED');
+assert.ok(firstRun);
+assert.equal(adapter.cancel(firstRun.runId), true);
+assert.ok(sent.some((frame) =>
+  typeof frame === 'object' && frame !== null && 't' in frame && frame.t === 'prompt.cancel' &&
+  'id' in frame && frame.id === firstPrompt,
+));
 await session.handle({ t: 'thought', s: session.id, promptId: firstPrompt, text: 'Checking the note' });
 await session.handle({ t: 'delta', s: session.id, promptId: firstPrompt, text: 'Saved ' });
 await session.handle({ t: 'delta', s: session.id, promptId: firstPrompt, text: 'it.' });

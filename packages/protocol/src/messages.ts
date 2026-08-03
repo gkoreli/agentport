@@ -193,9 +193,9 @@ export interface ConnectBegin {
   surface: SurfaceDescriptor;
   grant: CapabilityGrant;
   /** Ephemeral X25519 key for sealing; carried through to the session.open. */
-  epk?: Hex;
-  /** Signature by the page's (ephemeral) identity over epkProofMessage('connect', epk). */
-  epkSig?: Hex;
+  epk: Hex;
+  /** Signature by the page identity over the epk and canonical request context. */
+  epkSig: Hex;
 }
 
 export interface ConnectPending {
@@ -215,10 +215,10 @@ export interface ConnectOffer {
   surface: SurfaceDescriptor;
   grant: CapabilityGrant;
   /** The requesting page's authenticated identity key, stamped by the relay. */
-  client?: Hex;
+  client: Hex;
   /** The page's ephemeral sealing key, forwarded so consent can show fingerprint words. */
-  epk?: Hex;
-  epkSig?: Hex;
+  epk: Hex;
+  epkSig: Hex;
 }
 
 export interface ConnectAccept {
@@ -269,9 +269,9 @@ export interface SessionOpen {
   /** Filled in by the relay before forwarding; ignored if sent by a client. */
   client?: Hex;
   /** Client's ephemeral X25519 public key for sealing this session (ADR-003). */
-  epk?: Hex;
-  /** Signature by the client's identity key over epkProofMessage(s, epk). */
-  epkSig?: Hex;
+  epk: Hex;
+  /** Signature by the client identity over the epk and canonical open context. */
+  epkSig: Hex;
   /**
    * Set by the relay when this session came from a drop-in widget rather than
    * a wallet. The requesting page has no key and no agent list, so approvals
@@ -293,9 +293,9 @@ export interface SessionOpened {
    */
   resume?: string;
   /** Agent's ephemeral X25519 public key; answers the client's `epk`. */
-  epk?: Hex;
-  /** Signature by the agent's device key over epkProofMessage(s, epk). */
-  epkSig?: Hex;
+  epk: Hex;
+  /** Signature by the agent identity over both epks and canonical open context. */
+  epkSig: Hex;
   /**
    * Stamped by the relay: the agent's identity key, so a drop-in client (which
    * chose no agent and knows none) can verify `epkSig`. A paired wallet
@@ -316,8 +316,9 @@ export interface SessionResume {
   agent: Hex;
   token: string;
   /** Fresh ephemeral key — a resumed attachment never reuses the old one. */
-  epk?: Hex;
-  epkSig?: Hex;
+  epk: Hex;
+  /** Signature over the epk and canonical resume request context. */
+  epkSig: Hex;
   /** Stamped by the relay before forwarding; ignored if sent by a client. */
   client?: Hex;
 }
@@ -342,8 +343,9 @@ export interface SessionResumed {
   /** Frames the agent sent while nobody was listening (daemon-counted). */
   missed: number;
   /** The daemon's fresh sealing key for this attachment, proof-signed. */
-  epk?: Hex;
-  epkSig?: Hex;
+  epk: Hex;
+  /** Signature over both epks and canonical resume response context. */
+  epkSig: Hex;
 }
 
 export interface SessionDenied {

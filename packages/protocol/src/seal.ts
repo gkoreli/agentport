@@ -19,22 +19,29 @@
  *     are derived from both epks, so the browser and the daemon consent
  *     screen showing the same words proves nobody sat in the middle.
  *
- * All primitives come from the audited @noble libraries; nothing here invents
- * cryptography, it only fixes the recipe (the NaCl-box lineage: X25519 +
- * HKDF-SHA256 + XChaCha20-Poly1305).
+ * The channel state follows Noise's transport rules: independent keys per
+ * direction, a monotonic 64-bit nonce, increment only after successful AEAD,
+ * and terminal failure at nonce exhaustion. The session id is AEAD associated
+ * data, binding ciphertext to its visible routing envelope.
+ *
+ * References for maintainers:
+ * - Noise CipherState and Split: https://noiseprotocol.org/noise.html#the-cipherstate-object
+ * - libsodium directional kx: https://doc.libsodium.org/key_exchange
+ * - libsodium ordered streams: https://doc.libsodium.org/secret-key_cryptography/secretstream
+ *
+ * All primitives come from the audited @noble libraries already required by
+ * the browser-safe protocol package. Do not replace this state machine with a
+ * random-nonce convenience wrapper or add a plaintext compatibility path.
  */
 
-import { x25519 } from '@noble/curves/ed25519';
-import { hkdf } from '@noble/hashes/hkdf';
 import { sha256 } from '@noble/hashes/sha256';
-import { xchacha20poly1305 } from '@noble/ciphers/chacha';
-import { fromHex, randomBytes, sign, toHex, verify, type KeyPair } from './crypto.js';
-import type { Hex, SessionFrame } from './messages.js';
+import { decrypt, deriveSecureChannel, encrypt, generateEphemeralKeyPair, type CipherState, type SecureChannel } from './channel.js';
+import { canonicalJson, sign, verify, type KeyPair } from './crypto.js';
+import type { CapabilityGrant, Hex, SessionFrame, SurfaceDescriptor } from './messages.js';
 
 /** One session attachment's ephemeral encryption keypair. Never reuse. */
 export function generateSealKeyPair(): KeyPair {
-  const secretKey = x25519.utils.randomPrivateKey();
-  return { secretKey: toHex(secretKey), publicKey: toHex(x25519.getPublicKey(secretKey)) };
+  return generateEphemeralKeyPair();
 }
 
 /**
@@ -42,51 +49,104 @@ export function generateSealKeyPair(): KeyPair {
  * the session id (or 'connect' before one exists) so a proof cannot be
  * replayed into a different session.
  */
-export function epkProofMessage(scope: string, epk: Hex): string {
-  return `agentport-epk:${scope}:${epk}`;
+export function epkProofMessage(scope: string, epk: Hex, binding: unknown): string {
+  return `agentport-epk-v1:${canonicalJson({ scope, epk, binding })}`;
 }
 
-export function signEpk(identitySecretKey: Hex, scope: string, epk: Hex): Hex {
-  return sign(identitySecretKey, epkProofMessage(scope, epk));
+export function signEpk(identitySecretKey: Hex, scope: string, epk: Hex, binding: unknown): Hex {
+  return sign(identitySecretKey, epkProofMessage(scope, epk, binding));
 }
 
-export function verifyEpk(identityPublicKey: Hex, scope: string, epk: Hex, sig: Hex): boolean {
-  return verify(identityPublicKey, epkProofMessage(scope, epk), sig);
+export function verifyEpk(identityPublicKey: Hex, scope: string, epk: Hex, sig: Hex, binding: unknown): boolean {
+  return verify(identityPublicKey, epkProofMessage(scope, epk, binding), sig);
+}
+
+/**
+ * Noise calls this handshake context the prologue: clear lifecycle metadata is
+ * not secret, but both endpoints must authenticate the same view so the relay
+ * cannot rewrite a capability grant, origin, mode, peer, or resume authority.
+ */
+export function openProofBinding(
+  mode: 'open' | 'connect',
+  surface: SurfaceDescriptor,
+  grant: CapabilityGrant,
+  agent?: Hex,
+): unknown {
+  return { mode, surface, grant, ...(agent ? { agent } : {}) };
+}
+
+export function resumeProofBinding(agent: Hex, token: string): unknown {
+  return { mode: 'resume', agent, token };
+}
+
+export function answerProofBinding(
+  mode: 'open' | 'connect' | 'resume',
+  client: Hex,
+  clientEpk: Hex,
+  surface: SurfaceDescriptor,
+  grant: CapabilityGrant,
+  details: { agentName: string; runtime: string; resume?: string; missed?: number },
+): unknown {
+  return { mode, client, clientEpk, surface, grant, details };
 }
 
 /**
  * Both sides call this with their own secret and the peer's public key and
- * arrive at the same 32-byte key. The session id goes into HKDF so two
- * sessions between the same peers never share a key even if an epk were
- * (wrongly) reused.
+ * arrive at the same directional keys. The session id goes into HKDF so two
+ * sessions never share transport keys even if an epk were wrongly reused.
  */
-export function deriveSealKey(mySecretKey: Hex, theirPublicKey: Hex, sessionId: string): Uint8Array {
-  const shared = x25519.getSharedSecret(fromHex(mySecretKey), fromHex(theirPublicKey));
-  return hkdf(sha256, shared, undefined, `agentport-seal:${sessionId}`, 32);
+export type SealCipherState = CipherState;
+export type SealChannel = SecureChannel;
+
+/**
+ * Derive independent transport keys for each direction, as Noise Split and
+ * libsodium crypto_kx do. Separate keys make counter nonces safe even though
+ * both directions begin at zero.
+ */
+export function deriveSealChannel(
+  mySecretKey: Hex,
+  theirPublicKey: Hex,
+  sessionId: string,
+  role: 'client' | 'agent',
+): SealChannel {
+  return deriveSecureChannel(
+    mySecretKey,
+    theirPublicKey,
+    'agentport-seal-v1',
+    sessionId,
+    role === 'client' ? 'initiator' : 'responder',
+  );
 }
 
 /** The only shape the relay sees for sealed traffic. */
 export interface SealedFrame {
   t: 'enc';
   s: string;
-  /** 24-byte XChaCha20 nonce, hex. Random per frame; the space is big enough. */
+  /** 24-byte XChaCha20 nonce; its final 8 bytes are a monotonic counter. */
   n: Hex;
-  /** Ciphertext + Poly1305 tag over the canonical JSON of the inner frame. */
+  /** Ciphertext + Poly1305 tag over the inner frame JSON. */
   c: Hex;
 }
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
-export function seal(key: Uint8Array, frame: SessionFrame): SealedFrame {
-  const nonce = randomBytes(24);
-  const ciphertext = xchacha20poly1305(key, nonce).encrypt(encoder.encode(JSON.stringify(frame)));
-  return { t: 'enc', s: frame.s, n: toHex(nonce), c: toHex(ciphertext) };
+function associatedData(sessionId: string): Uint8Array {
+  return encoder.encode(`agentport-seal-v1:${sessionId}`);
 }
 
-/** Throws on tampering — Poly1305 rejects, we do not guess. */
-export function openSealed(key: Uint8Array, sealed: SealedFrame): SessionFrame {
-  const plaintext = xchacha20poly1305(key, fromHex(sealed.n)).decrypt(fromHex(sealed.c));
+export function seal(state: SealCipherState, frame: SessionFrame): SealedFrame {
+  const sealed = encrypt(state, encoder.encode(JSON.stringify(frame)), associatedData(frame.s));
+  return { t: 'enc', s: frame.s, n: sealed.nonce, c: sealed.ciphertext };
+}
+
+/** Throws on tampering, replay, reordering, or nonce exhaustion. */
+export function openSealed(state: SealCipherState, sealed: SealedFrame): SessionFrame {
+  const plaintext = decrypt(
+    state,
+    { nonce: sealed.n, ciphertext: sealed.c },
+    associatedData(sealed.s),
+  );
   const frame = JSON.parse(decoder.decode(plaintext)) as SessionFrame;
   if (frame.s !== sealed.s) throw new Error('sealed frame session id mismatch');
   return frame;
@@ -116,10 +176,11 @@ export const SEALED_TYPES = new Set<string>([
 // ---------------------------------------------------------------------------
 
 /**
- * 256 short, phonetically distinct words. Three of them encode 24 bits of the
- * hash over both ephemeral keys. Matching words on the browser modal and the
- * daemon consent screen means both sides hold the same two keys — i.e. the
- * relay did not substitute its own.
+ * 256 short, phonetically distinct words. Six encode 48 bits of the hash over
+ * both ephemeral keys. This is a short authentication string for deliberate
+ * human comparison, not a substitute for a pinned identity. Forty-eight bits
+ * makes an online relay's chosen-prefix search impractical while keeping the
+ * consent check readable.
  */
 const WORDS = (
   'acid apex aqua arch atom aunt axis bald barn bath bead bear belt bird bison blade ' +
@@ -146,5 +207,5 @@ if (WORDS.length !== 256) throw new Error(`fingerprint wordlist must be 256 word
 export function fingerprintWords(epkA: Hex, epkB: Hex): string {
   const [lo, hi] = [epkA, epkB].sort();
   const digest = sha256(encoder.encode(`agentport-verify:${lo}:${hi}`));
-  return `${WORDS[digest[0]!]}-${WORDS[digest[1]!]}-${WORDS[digest[2]!]}`;
+  return [...digest.slice(0, 6)].map((byte) => WORDS[byte]!).join('-');
 }

@@ -90,8 +90,8 @@ covered by `scripts/e2e.ts`.
 
 Verified against a real agent: Claude Code over ACP on a VPS reads and writes
 through the site's lent tools, with every gated write approved in the browser.
-See
-[AGENTS.md](./AGENTS.md) for architecture, security invariants, and the
-roadmap.
+See [ADR-018](./docs/ADR.md#adr-018-security-architecture-is-explicit-fail-closed-and-enforced-at-the-edges)
+for the security architecture and threat model, and [AGENTS.md](./AGENTS.md)
+for the implementation map and roadmap.
 
 Apache-2.0.

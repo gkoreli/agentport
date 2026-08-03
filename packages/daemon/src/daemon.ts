@@ -4,18 +4,21 @@ import {
   Emitter,
   PROTOCOL_VERSION,
   SEALED_TYPES,
+  answerProofBinding,
   authChallengeMessage,
   decodeFrame,
-  deriveSealKey,
+  deriveSealChannel,
   encodeFrame,
   fingerprintWords,
   generateSealKeyPair,
   openSealed,
+  openProofBinding,
   randomBytes,
   randomId,
   seal,
   sign,
   signEpk,
+  resumeProofBinding,
   timingSafeEqualStr,
   toHex,
   verifyEpk,
@@ -25,6 +28,7 @@ import {
   type HistoryEntry,
   type KeyPair,
   type SessionFrame,
+  type SealChannel,
   type SurfaceDescriptor,
   type ToolDefinition,
 } from '@agentport/protocol';
@@ -49,7 +53,7 @@ interface SessionState {
   approvals: Map<string, Deferred<boolean>>;
   prompts: Map<string, AbortController>;
   /** Symmetric key sealing this attachment's content frames (ADR-003). */
-  sealKey?: Uint8Array;
+  sealChannel: SealChannel;
   /**
    * Session authority lives HERE (ADR-016): the daemon mints the resume
    * token, judges resume attempts, survives relay restarts, and counts what
@@ -226,8 +230,8 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
 
   /**
    * All session content leaves through here: sealed whenever the attachment
-   * has a key, so the relay carries ciphertext. Lifecycle frames and sessions
-   * opened by a peer that never sent an epk fall back to plaintext.
+   * has a key, so the relay carries ciphertext. Lifecycle frames remain clear
+   * because the relay needs them for routing.
    */
   #sendSession(session: SessionState, frame: SessionFrame): void {
     if (session.detachedAt !== undefined && SEALED_TYPES.has(frame.t)) {
@@ -236,13 +240,19 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
       session.missed++;
       return;
     }
-    if (session.sealKey && SEALED_TYPES.has(frame.t)) this.#send(seal(session.sealKey, frame));
-    else this.#send(frame);
+    if (SEALED_TYPES.has(frame.t)) {
+      const sealed = seal(session.sealChannel.send, frame);
+      this.#send(sealed);
+    } else this.#send(frame);
   }
 
   // -------------------------------------------------------------------------
 
-  async #onFrame(frame: Frame): Promise<void> {
+  async #onFrame(frame: Frame, openedFromSeal = false): Promise<void> {
+    if (SEALED_TYPES.has(frame.t) && !openedFromSeal) {
+      this.#log(`dropped plaintext session content (${frame.t})`);
+      return;
+    }
     switch (frame.t) {
       case 'challenge': {
         const identity = this.#options.identity;
@@ -274,16 +284,26 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
         // fingerprint words BEFORE anyone approves. Reused at session.open,
         // matched by the client epk the open carries.
         let verify: string | undefined;
-        if (frame.epk && frame.epkSig && frame.client) {
-          if (!verifyEpk(frame.client, 'connect', frame.epk, frame.epkSig)) {
-            this.#send({ t: 'connect.reject', code: frame.code, reason: 'bad_epk_proof' });
-            return;
-          }
-          const mine = generateSealKeyPair();
-          this.#offerSeals.set(frame.epk, mine);
-          verify = fingerprintWords(frame.epk, mine.publicKey);
+        if (
+          !frame.epk ||
+          !frame.epkSig ||
+          !frame.client ||
+          !verifyEpk(
+            frame.client,
+            'connect',
+            frame.epk,
+            frame.epkSig,
+            openProofBinding('connect', frame.surface, frame.grant),
+          )
+        ) {
+          this.#send({ t: 'connect.reject', code: frame.code, reason: 'bad_epk_proof' });
+          return;
         }
+        const mine = generateSealKeyPair();
+        this.#offerSeals.set(frame.epk, mine);
+        verify = fingerprintWords(frame.epk, mine.publicKey);
         const accepted = (await this.#options.onConnectOffer?.({ ...frame, verify })) ?? false;
+        if (!accepted) this.#offerSeals.delete(frame.epk);
         this.#send(
           accepted
             ? { t: 'connect.accept', code: frame.code }
@@ -315,13 +335,13 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
 
       case 'enc': {
         const session = this.#sessions.get(frame.s);
-        if (!session?.sealKey) {
-          this.#log(`sealed frame for ${frame.s} but no key — dropping`);
+        if (!session?.sealChannel) {
+          this.#log(`sealed frame for ${frame.s} but no channel — dropping`);
           return;
         }
         let inner: SessionFrame;
         try {
-          inner = openSealed(session.sealKey, frame);
+          inner = openSealed(session.sealChannel.receive, frame);
         } catch (err) {
           this.#log(`failed to open sealed frame on ${frame.s}: ${err instanceof Error ? err.message : String(err)}`);
           return;
@@ -332,7 +352,7 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
           this.#log(`client sealed a frame it may not originate (${inner.t}) — dropping`);
           return;
         }
-        return this.#onFrame(inner);
+        return this.#onFrame(inner, true);
       }
 
 
@@ -422,13 +442,24 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
       this.#send({ t: 'session.denied', s: frame.s, reason: 'grant_expired' });
       return;
     }
-    if (!frame.client || !frame.epk || !frame.epkSig || !verifyEpk(frame.client, frame.s, frame.epk, frame.epkSig)) {
+    if (
+      !frame.client ||
+      !frame.epk ||
+      !frame.epkSig ||
+      !verifyEpk(
+        frame.client,
+        frame.s,
+        frame.epk,
+        frame.epkSig,
+        resumeProofBinding(frame.agent, frame.token),
+      )
+    ) {
       this.#send({ t: 'session.denied', s: frame.s, reason: 'bad_epk_proof' });
       return;
     }
 
     const mine = generateSealKeyPair();
-    session.sealKey = deriveSealKey(mine.secretKey, frame.epk, frame.s);
+    session.sealChannel = deriveSealChannel(mine.secretKey, frame.epk, frame.s, 'agent');
     session.clientKey = frame.client;
     session.detachedAt = undefined;
     const missed = session.missed;
@@ -443,7 +474,16 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
       grant: session.grant,
       missed,
       epk: mine.publicKey,
-      epkSig: signEpk(this.#options.identity.secretKey, frame.s, mine.publicKey),
+      epkSig: signEpk(
+        this.#options.identity.secretKey,
+        frame.s,
+        mine.publicKey,
+        answerProofBinding('resume', frame.client, frame.epk, session.surface, session.grant, {
+          agentName: this.#options.identity.name,
+          runtime: this.#options.identity.runtime,
+          missed,
+        }),
+      ),
     });
     this.#log(`session ${frame.s} resumed (${missed} frame(s) missed while detached)`);
   }
@@ -469,24 +509,47 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     // Sealing handshake. The epk proof is signed by the client identity the
     // relay stamped, over a scope that stops replay into another session
     // ('connect' pre-session for the drop-in flow, the session id otherwise).
-    let sealKey: Uint8Array | undefined;
-    let myEpk: { epk: string; epkSig: string } | undefined;
-    if (frame.epk && frame.epkSig && frame.client) {
-      const scope = frame.viaConnect ? 'connect' : frame.s;
-      if (!verifyEpk(frame.client, scope, frame.epk, frame.epkSig)) {
-        this.#send({ t: 'session.denied', s: frame.s, reason: 'bad_epk_proof' });
+    if (!frame.epk || !frame.epkSig || !frame.client) {
+      this.#send({ t: 'session.denied', s: frame.s, reason: 'sealing_required' });
+      return;
+    }
+    const scope = frame.viaConnect ? 'connect' : frame.s;
+    const requestBinding = frame.viaConnect
+      ? openProofBinding('connect', frame.surface, frame.grant)
+      : openProofBinding('open', frame.surface, frame.grant, frame.agent);
+    if (!verifyEpk(frame.client, scope, frame.epk, frame.epkSig, requestBinding)) {
+      this.#send({ t: 'session.denied', s: frame.s, reason: 'bad_epk_proof' });
+      return;
+    }
+    // Reuse the keypair minted at consent time so the fingerprint the user
+    // just compared is the fingerprint the session actually uses.
+    let mine: KeyPair;
+    if (frame.viaConnect) {
+      const approved = this.#offerSeals.get(frame.epk);
+      if (!approved) {
+        this.#send({ t: 'session.denied', s: frame.s, reason: 'connect_not_approved' });
         return;
       }
-      // Reuse the keypair minted at consent time so the fingerprint the user
-      // just compared is the fingerprint the session actually uses.
-      const mine = this.#offerSeals.get(frame.epk) ?? generateSealKeyPair();
+      mine = approved;
       this.#offerSeals.delete(frame.epk);
-      sealKey = deriveSealKey(mine.secretKey, frame.epk, frame.s);
-      myEpk = {
-        epk: mine.publicKey,
-        epkSig: signEpk(this.#options.identity.secretKey, frame.s, mine.publicKey),
-      };
+    } else {
+      mine = generateSealKeyPair();
     }
+    const sealChannel = deriveSealChannel(mine.secretKey, frame.epk, frame.s, 'agent');
+    const resumeToken = toHex(randomBytes(24));
+    const myEpk = {
+      epk: mine.publicKey,
+      epkSig: signEpk(
+        this.#options.identity.secretKey,
+        frame.s,
+        mine.publicKey,
+        answerProofBinding(frame.viaConnect ? 'connect' : 'open', frame.client, frame.epk, frame.surface, frame.grant, {
+          agentName: this.#options.identity.name,
+          runtime: this.#options.identity.runtime,
+          resume: resumeToken,
+        }),
+      ),
+    };
 
     const runtime = this.#options.createRuntime();
     const session: SessionState = {
@@ -500,8 +563,8 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
       toolCalls: new Map(),
       approvals: new Map(),
       prompts: new Map(),
-      sealKey,
-      resumeToken: toHex(randomBytes(24)),
+      sealChannel,
+      resumeToken,
       clientKey: frame.client,
       missed: 0,
       resumeAttempts: 0,
@@ -516,7 +579,7 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
       agentName: this.#options.identity.name,
       runtime: this.#options.identity.runtime,
       resume: session.resumeToken,
-      ...(myEpk ?? {}),
+      ...myEpk,
     });
     this.emit('session', frame.s);
     this.#log(`session ${frame.s} opened by ${frame.surface.name} (${frame.surface.origin}) with ${session.tools.length} tool(s)`);

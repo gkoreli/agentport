@@ -12,7 +12,17 @@ import { Relay } from '../packages/relay/src/relay.js';
 import { AgentDaemon } from '../packages/daemon/src/daemon.js';
 import { DemoWriterRuntime } from '../packages/daemon/src/runtime.js';
 import { AgentWallet, type SiteTool } from '../packages/client/src/index.js';
-import { Deferred, generateKeyPair, type Hex } from '../packages/protocol/src/index.js';
+import {
+  Deferred,
+  generateKeyPair,
+  type Hex,
+} from '../packages/protocol/src/index.js';
+import {
+  decrypt,
+  deriveSecureChannel,
+  encrypt,
+  generateEphemeralKeyPair,
+} from '../packages/protocol/src/channel.js';
 
 let failures = 0;
 function check(label: string, condition: boolean, detail?: unknown): void {
@@ -25,6 +35,56 @@ function check(label: string, condition: boolean, detail?: unknown): void {
 }
 
 const socketFactory = (url: string) => new NodeWebSocket(url) as never;
+
+// --- transport state in isolation ------------------------------------------
+
+console.log('0. secure channel state');
+{
+  const initiatorKeys = generateEphemeralKeyPair();
+  const responderKeys = generateEphemeralKeyPair();
+  const initiator = deriveSecureChannel(
+    initiatorKeys.secretKey,
+    responderKeys.publicKey,
+    'agentport-test-v1',
+    'attachment-1',
+    'initiator',
+  );
+  const responder = deriveSecureChannel(
+    responderKeys.secretKey,
+    initiatorKeys.publicKey,
+    'agentport-test-v1',
+    'attachment-1',
+    'responder',
+  );
+  const bytes = new TextEncoder().encode('channel payload');
+  const aad = new TextEncoder().encode('routing context');
+  const ciphertext = encrypt(initiator.send, bytes, aad);
+  const plaintext = decrypt(responder.receive, ciphertext, aad);
+  check('opposite roles derive interoperable directional state', new TextDecoder().decode(plaintext) === 'channel payload');
+
+  let replay = '';
+  try {
+    decrypt(responder.receive, ciphertext, aad);
+  } catch (err) {
+    replay = (err as Error).message;
+  }
+  check('the receive counter rejects replay exactly', replay.includes('nonce out of sequence'), replay);
+
+  const freshResponder = deriveSecureChannel(
+    responderKeys.secretKey,
+    initiatorKeys.publicKey,
+    'agentport-test-v1',
+    'attachment-1',
+    'responder',
+  );
+  let wrongContext = '';
+  try {
+    decrypt(freshResponder.receive, ciphertext, new TextEncoder().encode('different context'));
+  } catch (err) {
+    wrongContext = (err as Error).message;
+  }
+  check('associated-data mismatch fails authentication', wrongContext.length > 0, wrongContext);
+}
 
 // --- the "browser" document the site owns -----------------------------------
 
@@ -332,25 +392,59 @@ await resumeDaemon.stop();
 // --- 10. the relay is blind: an on-path observer learns nothing --------------
 // The adversary model made literal: a recording proxy sits between the wallet
 // and the relay, seeing exactly what the relay (or anyone else on the path
-// inside TLS termination) sees. If sealing works, the conversation text, tool
-// names and frame types never appear on the wire in either direction.
+// inside TLS termination) sees. Lifecycle metadata, including the grant's tool
+// names, is intentionally visible and authenticated. Conversation text, tool
+// invocations/results, and inner content-frame types must remain sealed.
 console.log('\n10. the relay is blind (ADR-003)');
 {
   const { WebSocketServer: TapServer } = await import('ws');
   const observed: string[] = [];
+  let attack: 'none' | 'tamper-and-replay' | 'strip-client-proof' | 'strip-agent-proof' | 'rewrite-grant' = 'none';
+  let attackedContent = false;
   const tap = new TapServer({ port: 0, host: '127.0.0.1' });
   tap.on('connection', (inbound) => {
     const upstream = new NodeWebSocket(relayUrl);
     const up: string[] = [];
     upstream.on('open', () => { for (const m of up.splice(0)) upstream.send(m); });
     inbound.on('message', (data) => {
-      observed.push(data.toString());
-      if (upstream.readyState === NodeWebSocket.OPEN) upstream.send(data.toString());
-      else up.push(data.toString());
+      let message = data.toString();
+      observed.push(message);
+      const parsed = JSON.parse(message) as Record<string, unknown>;
+      if (attack === 'strip-client-proof' && parsed.t === 'session.open') {
+        delete parsed.epk;
+        delete parsed.epkSig;
+        message = JSON.stringify(parsed);
+      }
+      if (attack === 'rewrite-grant' && parsed.t === 'session.open') {
+        const grant = parsed.grant as { expiresAt: number };
+        grant.expiresAt += 60_000;
+        message = JSON.stringify(parsed);
+      }
+      const send = (value: string) => {
+        if (upstream.readyState === NodeWebSocket.OPEN) upstream.send(value);
+        else up.push(value);
+      };
+      if (attack === 'tamper-and-replay' && !attackedContent && parsed.t === 'enc') {
+        attackedContent = true;
+        const ciphertext = String(parsed.c);
+        const final = ciphertext.at(-1) === '0' ? '1' : '0';
+        send(JSON.stringify({ ...parsed, c: `${ciphertext.slice(0, -1)}${final}` }));
+        send(message);
+        send(message);
+        return;
+      }
+      send(message);
     });
     upstream.on('message', (data) => {
-      observed.push(data.toString());
-      inbound.send(data.toString());
+      let message = data.toString();
+      observed.push(message);
+      const parsed = JSON.parse(message) as Record<string, unknown>;
+      if (attack === 'strip-agent-proof' && parsed.t === 'session.opened') {
+        delete parsed.epk;
+        delete parsed.epkSig;
+        message = JSON.stringify(parsed);
+      }
+      inbound.send(message);
     });
     inbound.on('close', () => upstream.close());
     upstream.on('close', () => inbound.close());
@@ -360,11 +454,13 @@ console.log('\n10. the relay is blind (ADR-003)');
 
   const sealKeys = generateKeyPair();
   const sealPairing = new Deferred<string>();
+  const sealLogs: string[] = [];
   const sealDaemon = new AgentDaemon({
     relayUrl,
     identity: { ...sealKeys, name: 'Sealed Agent', runtime: 'demo-writer' },
     createRuntime: () => new DemoWriterRuntime(),
     onPairingCode: (code) => sealPairing.resolve(code),
+    log: (message) => sealLogs.push(message),
   });
   await sealDaemon.start();
 
@@ -381,17 +477,58 @@ console.log('\n10. the relay is blind (ADR-003)');
     tools: inkwellTools(),
     decide: () => true,
   });
-  check('the sealed session has fingerprint words', /^\w+-\w+-\w+$/.test(sealedSession.info.verify ?? ''), sealedSession.info.verify);
+  check('the sealed session has fingerprint words', /^(?:\w+-){5}\w+$/.test(sealedSession.info.verify ?? ''), sealedSession.info.verify);
+  attack = 'tamper-and-replay';
   await sealedSession.prompt(SECRET);
+  attack = 'none';
 
   const wire = observed.join('\n');
   check('conversation text never crossed the wire in the clear', !wire.includes('launch codes'));
-  check('tool names never crossed the wire in session traffic', !wire.includes('replaceSelection') || !observed.some((m) => m.includes('"t":"tool.call"')));
+  check('grant tool names are disclosed as lifecycle metadata', wire.includes('inkwell.document.replaceSelection'));
+  check('tool invocations never crossed the wire in the clear', !observed.some((m) => m.includes('"t":"tool.call"')));
   check('content frame types are hidden', !observed.some((m) => /"t":"(delta|prompt|tool\.call|tool\.result|approval)/.test(m)));
   check('sealed frames did cross it', observed.filter((m) => m.includes('"t":"enc"')).length >= 4, observed.filter((m) => m.includes('"t":"enc"')).length);
+  check('tampered ciphertext was rejected without desynchronising the channel', sealLogs.some((line) => line.includes('failed to open sealed frame')), sealLogs);
+  check('a replayed authenticated frame was rejected', sealLogs.some((line) => line.includes('nonce out of sequence')), sealLogs);
 
   sealedSession.close();
+
+  attack = 'strip-agent-proof';
+  let strippedAgentProof = '';
+  await observedWallet.openSession({
+    agent: sealKeys.publicKey,
+    surface: { name: 'Downgrade Test' },
+    tools: inkwellTools(),
+    decide: () => true,
+  }).catch((err: Error) => { strippedAgentProof = err.message; });
+  check('omitting the agent sealing proof aborts instead of downgrading', strippedAgentProof.includes('omitted its sealing-key proof'), strippedAgentProof);
   observedWallet.close();
+
+  attack = 'strip-client-proof';
+  const downgradeWallet = new AgentWallet({ relayUrl: tapUrl, userSecretKey: sealUser.secretKey, socketFactory });
+  await downgradeWallet.connect();
+  let strippedClientProof = '';
+  await downgradeWallet.openSession({
+    agent: sealKeys.publicKey,
+    surface: { name: 'Downgrade Test' },
+    tools: inkwellTools(),
+    decide: () => true,
+  }).catch((err: Error) => { strippedClientProof = err.message; });
+  check('omitting the client sealing proof is denied by the daemon', strippedClientProof.includes('sealing_required'), strippedClientProof);
+  downgradeWallet.close();
+
+  attack = 'rewrite-grant';
+  const integrityWallet = new AgentWallet({ relayUrl: tapUrl, userSecretKey: sealUser.secretKey, socketFactory });
+  await integrityWallet.connect();
+  let rewrittenGrant = '';
+  await integrityWallet.openSession({
+    agent: sealKeys.publicKey,
+    surface: { name: 'Integrity Test' },
+    tools: inkwellTools(),
+    decide: () => true,
+  }).catch((err: Error) => { rewrittenGrant = err.message; });
+  check('rewriting clear lifecycle metadata invalidates the handshake', rewrittenGrant.includes('bad_epk_proof'), rewrittenGrant);
+  integrityWallet.close();
   await sealDaemon.stop();
   tap.close();
 }
@@ -487,10 +624,9 @@ console.log('\n12. sessions outlive the relay itself');
     token: survivorToken,
     tools: inkwellTools(),
     decide: () => true,
-    requireSealed: true,
   });
   check('the session resumed through a relay that never saw it', after.info.agentName === 'Survivor Agent');
-  check('and it resumed SEALED', /^\w+-\w+-\w+$/.test(after.info.verify ?? ''), after.info.verify);
+  check('and it resumed SEALED', /^(?:\w+-){5}\w+$/.test(after.info.verify ?? ''), after.info.verify);
   const memory = await after.history();
   check(
     'the conversation survived both the refresh and the relay',

@@ -37,11 +37,16 @@ export interface SessionInfo {
   agentName: string;
   runtime: string;
   /**
-   * Fingerprint words for this attachment's sealing keys, e.g. "coral-anvil-fern".
+   * Fingerprint words for this attachment's sealing keys.
    * Render them: the daemon consent screen shows the same words, and a match
-   * proves the relay did not sit in the key exchange. Absent = unsealed.
+   * proves the relay did not sit in the key exchange. All sessions are sealed.
    */
   verify?: string;
+}
+
+export interface PromptRequest {
+  id: string;
+  result: Promise<string>;
 }
 
 /**
@@ -90,12 +95,21 @@ export class AgentSession extends Emitter<SessionEvents> {
 
   /** Send a prompt; resolves with the full assistant text for that turn. */
   prompt(text: string, context?: Record<string, unknown>): Promise<string> {
-    if (this.#closed) return Promise.reject(new Error('session is closed'));
+    return this.startPrompt(text, context).result;
+  }
+
+  /**
+   * Start a prompt while exposing its cancellation identity immediately.
+   * Renderers need this before the first token arrives; waiting for a delta
+   * makes a visible Stop control lie during slow and tool-only turns.
+   */
+  startPrompt(text: string, context?: Record<string, unknown>): PromptRequest {
     const id = `p_${Math.random().toString(36).slice(2, 10)}`;
+    if (this.#closed) return { id, result: Promise.reject(new Error('session is closed')) };
     const deferred = new Deferred<string>();
     this.#transcripts.set(id, { text: '', deferred });
     this.#send({ t: 'prompt', s: this.id, id, text, ...(context ? { context } : {}) });
-    return deferred.promise;
+    return { id, result: deferred.promise };
   }
 
   /**

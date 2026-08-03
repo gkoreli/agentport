@@ -171,8 +171,6 @@ const resuming = reloaded.resumeSession({
   token: token!,
   tools,
   decide: () => true,
-  // The original session was sealed; refuse a plaintext comeback.
-  requireSealed: Boolean(session.info.verify),
 });
 setTimeout(() => page.disconnect(), 1000);
 const { session: resumed } = await resuming;

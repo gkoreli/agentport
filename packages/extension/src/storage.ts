@@ -97,8 +97,7 @@ export async function originAlias(origin: string): Promise<string> {
 //
 // The service worker's in-memory session table dies with the worker (MV3
 // evicts idle workers); the relay-side session does not. These records carry
-// just enough to re-attach — session id, resume token, and whether the
-// session was sealed (so a resume can refuse to come back as plaintext).
+// just enough to re-attach — session id, agent identity, and resume token.
 // `chrome.storage.session` on purpose: extension-contexts only, page JS can
 // never reach it, and it dies with the browser session exactly like the
 // grant-scoped token it holds.
@@ -110,7 +109,6 @@ export interface StoredResume {
   token: string;
   origin: string;
   name: string;
-  sealed: boolean;
   expiresAt: number;
 }
 

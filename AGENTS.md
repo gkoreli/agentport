@@ -71,6 +71,9 @@ router 404s unknown paths before the Worker ever sees the upgrade.
 
 ## Invariants — do not regress these
 
+ADR-018 is the authoritative security architecture and threat model. This
+section is the short implementation checklist, not a second protocol spec.
+
 1. **The relay cannot forge a binding — and stores nothing** (ADR-016). Certs
    are verified when a connection presents them and live only as long as the
    socket. The durable copies are at the edges: the daemon's identity file and
@@ -88,10 +91,12 @@ router 404s unknown paths before the Worker ever sees the upgrade.
    connection's presented cert against the opener's stamped key, and the
    daemon re-checks `client === cert.user` itself — the invariant holds even
    against a lying relay.
-6. **Keys never cross the wire.** Only public keys, signatures, and certs.
+6. **Secret keys never cross the wire.** Only public keys, signatures, and
+   certs identify endpoints; attachment secrets remain in endpoint memory.
 
-Every one of these has a check in `scripts/e2e.ts`. If you change routing or
-auth, add one.
+These are mandatory acceptance properties. ADR-018 maps them to current
+evidence and names the remaining blocking coverage gaps. If you change routing
+or auth, add the adversarial check in the same change.
 
 ## Running it
 
@@ -146,19 +151,22 @@ One deliberate split, in both the extension and the site:
 `scripts/ui-smoke.ts` renders both under happy-dom and asserts the shadow root
 stays unreachable via `.shadowRoot`.
 
-The agent panel's transcript is the `@nisli/ui` ACP set, copied as source into
-`src/nisli-ui` by `npx nisli-ui add acp-chat` (config: `nisli-ui.json`). Two
-things to know before touching it:
+The agent panel's transcript is the protocol-neutral Nisli chat set in
+`src/nisli-ui/ui/chat`, backed by the semantic store in
+`src/nisli-ui/lib/chat.ts`. Protocol names do not belong in this component API:
 
-- **`wire()` in `site/src/agentport-ui.ts` is the adapter.** AgentPort frames
-  are not ACP frames; the panel maps session events onto ACP `session/update`
-  shapes and folds them with `createTranscript()`. A richer daemon channel
-  (structured tool calls, diffs) should land in that adapter, not in new
-  rendering code.
+- **`applyEvent()` in `site/src/agentport-ui.ts` is the boundary.** The page
+  consumes `@agentport/agui` and translates its events into semantic chat
+  updates (`message.*`, `reasoning.*`, `tool.*`, `run.*`). A richer transport
+  event should land in that adapter, not in protocol-specific rendering code.
 - **Styling is the `data-slot` contract, not Tailwind.** The copied components
-  carry Tailwind class lists this site deliberately does not build; the "ACP
-  set" section of `site/public/styles.css` styles `[data-slot]` selectors in
-  the site's own palette. Do not add a Tailwind pipeline for this.
+  carry utility class lists this site deliberately does not build; the chat
+  section of `site/public/styles.css` styles semantic `[data-slot]` selectors
+  in the site's own palette. Do not add a Tailwind pipeline for this.
+- The chat composes Nisli's generic `message`, `bubble`, `button`, and
+  `message-scroller` primitives. Extend those primitives instead of creating a
+  second implementation of scrolling, message layout, or buttons inside the
+  chat set.
 
 ## Tenets
 
@@ -219,9 +227,10 @@ Both legs are `wss://` — browser→relay and daemon→relay — so everything 
 TLS-encrypted in transit, and the daemon dials OUT (no inbound port, no
 firewall rule, nothing listening on the user's machine).
 
-The relay terminates TLS, which means **it can currently read session frames**.
-That is the one unresolved privacy gap in the system; see the E2E encryption
-item below. Ownership certs and public keys are all it is supposed to hold.
+The relay terminates TLS, so TLS alone would let it read session content.
+ADR-003 closes that gap by sealing content between the browser and daemon;
+ADR-018 records the complete security model and the lifecycle metadata that
+remains visible.
 
 Tailscale would not help here and is deliberately not used: a website running
 in someone's browser cannot join a tailnet, and the whole point is that any
@@ -234,9 +243,11 @@ mints an ephemeral X25519 keypair, proves it with an Ed25519 signature from its
 identity key (`epk`/`epkSig` on session.open/opened/resume, scope-bound so
 proofs cannot be replayed across sessions), derives a key via HKDF-SHA256, and
 every content frame crosses the relay as `{t:'enc', s, n, c}` under
-XChaCha20-Poly1305. The relay sees which session talks and how much — never
-what, and not even which frame type. Resume re-keys (`session.rekey`/`rekeyed`,
-relay-synthesised) so every attachment has a fresh key: forward secrecy.
+XChaCha20-Poly1305. The relay cannot see content or its inner frame type.
+Lifecycle frames remain clear: notably surface metadata, the capability grant
+(including tool names), public identities and keys, agent/runtime labels, and
+resume authority in transit. Resume uses endpoint-generated fresh keys carried
+by `session.resume`/`session.resumed`; the relay only forwards them.
 
 Because the relay can no longer see inner frame types, its per-type
 `mayOriginate` check applies only to lifecycle frames; for sealed content the
@@ -245,7 +256,7 @@ same rule is enforced at the endpoints (`CLIENT_SEALABLE` in the daemon,
 stamped participants may speak, sessions only open toward owned agents.
 
 Drop-in first contact is TOFU (the page's identity is itself ephemeral), so
-both consent surfaces show three **fingerprint words** derived from the two
+both consent surfaces show six **fingerprint words** derived from the two
 epks — the daemon consent screen and the page (`session.info.verify`). A match
 means no relay sat in the key exchange. e2e section 10 proves the property
 with a literal on-path observer: a recording proxy between wallet and relay

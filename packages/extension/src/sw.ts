@@ -24,7 +24,7 @@
  *   - the page's session survives navigation and worker eviction without any
  *     re-consent, because the grant never lapsed: first by re-binding the
  *     worker-held session, then by resuming through the relay with a stored
- *     token (sealed sessions refuse to come back unsealed).
+ *     token (every resumed attachment performs a fresh mandatory handshake).
  */
 
 import { AgentWallet, ResumeError, type AgentSession, type SiteTool } from '@agentport/client';
@@ -137,7 +137,6 @@ async function resumeEntry(wallet: AgentWallet, entry: SessionEntry): Promise<vo
     agent: entry.agent,
     token: entry.token,
     tools,
-    requireSealed: Boolean(entry.session.info.verify),
     decide: (prompt) => askApproval(entry.origin, entry.who, prompt),
   });
   const old = entry.session;
@@ -568,7 +567,6 @@ async function openSession(
       token: entry.token,
       origin,
       name: request.name,
-      sealed: Boolean(session.info.verify),
       expiresAt: session.grant.expiresAt,
     });
   }
@@ -614,9 +612,6 @@ async function resumeFromStore(
       agent: record.agent,
       token: record.token,
       tools,
-      // A sealed session must not be resumable as plaintext by a relay that
-      // "forgets" to rekey.
-      requireSealed: record.sealed,
       decide: (prompt) => askApproval(origin, who, prompt),
     });
     who.name = session.info.agentName;

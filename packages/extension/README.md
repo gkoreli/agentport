@@ -177,10 +177,10 @@ consent, in two layers:
    document from the same origin + surface reclaims it (2-minute grace) —
    nothing crosses the network.
 2. **Relay-token resume.** If the worker itself was evicted and restarted, a
-   resume record `{sessionId, token, sealed}` in `chrome.storage.session`
+   resume record `{sessionId, agent, token}` in `chrome.storage.session`
    (extension contexts only, dies with the browser) lets it re-attach via
-   `wallet.resumeSession`, with `requireSealed` set so a sealed session can
-   never be downgraded to plaintext by a forgetful relay.
+   `wallet.resumeSession`. Every resumed attachment performs a mandatory fresh
+   sealing handshake; plaintext resume is not a protocol state.
 
 The socket itself is kept alive by a 20s storage touch while sessions exist
 plus a `chrome.alarms` wake, and a dropped socket is redialed with backoff
