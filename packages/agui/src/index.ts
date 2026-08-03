@@ -1,4 +1,4 @@
-import type { AgentSession, SessionEvents } from '@agentport/client';
+import type { AgentSessionHandle, SessionEvents } from '@agentport/client';
 
 interface BaseEvent {
   timestamp?: number;
@@ -139,7 +139,7 @@ interface PendingRun {
 }
 
 class Translator {
-  readonly #session: AgentSession;
+  readonly #session: AgentSessionHandle;
   readonly #emit: Emit;
   readonly #finish: () => void;
   readonly #prompts = new Map<string, PromptState>();
@@ -149,7 +149,7 @@ class Translator {
   #nextTool = 0;
   #stopped = false;
 
-  constructor(session: AgentSession, emit: Emit, finish: () => void) {
+  constructor(session: AgentSessionHandle, emit: Emit, finish: () => void) {
     this.#session = session;
     this.#emit = emit;
     this.#finish = finish;
@@ -399,7 +399,7 @@ class EventQueue implements AsyncIterableIterator<AguiEvent> {
 }
 
 /** Translate one live AgentPort attachment into an AG-UI-compatible event stream. */
-export function aguiStream(session: AgentSession): AguiAdapter {
+export function aguiStream(session: AgentSessionHandle): AguiAdapter {
   const events = new EventQueue();
   const translator = new Translator(session, (event) => events.push(event), () => events.end());
   events.onReturn(() => translator.stop());
@@ -411,7 +411,7 @@ export function aguiStream(session: AgentSession): AguiAdapter {
 }
 
 /** Subscribe without a stream abstraction; returns a listener teardown function. */
-export function onAguiEvent(session: AgentSession, callback: (event: AguiEvent) => void): () => void {
+export function onAguiEvent(session: AgentSessionHandle, callback: (event: AguiEvent) => void): () => void {
   const translator = new Translator(session, callback, () => undefined);
   return () => translator.stop();
 }

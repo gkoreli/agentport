@@ -22,6 +22,7 @@ import { ResumeError,
   type AgentConnectRequest,
   type AgentProvider,
   type AgentSession,
+  type AgentSessionHandle,
 } from '@agentport/client';
 import { generateKeyPair, toErr } from '@agentport/protocol';
 import { openConnectModal } from './modal.js';
@@ -229,7 +230,7 @@ export function getProvider(): AgentProvider {
 }
 
 type InstalledProvider = AgentProvider & {
-  resume?: (request: AgentConnectRequest) => Promise<AgentSession | null>;
+  resume?: (request: AgentConnectRequest) => Promise<AgentSessionHandle | null>;
 };
 
 /**
@@ -286,4 +287,4 @@ const AgentPort = {
 (globalThis as unknown as { AgentPort: typeof AgentPort }).AgentPort = AgentPort;
 
 export default AgentPort;
-export type { AgentConnectRequest, AgentSession };
+export type { AgentConnectRequest, AgentSession, AgentSessionHandle };

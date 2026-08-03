@@ -1,6 +1,6 @@
 import type { AgentSummary } from '@agentport/protocol';
 import type { AgentWallet } from './wallet.js';
-import type { AgentSession, ApprovalDecider, SiteTool } from './session.js';
+import type { AgentSessionHandle, ApprovalDecider, SiteTool } from './session.js';
 
 /**
  * `navigator.agent` — the one primitive this project adds.
@@ -29,7 +29,7 @@ export interface AgentProvider {
   /** True when a wallet is reachable and the user has at least one agent. */
   isAvailable(): Promise<boolean>;
   /** Runs the picker + consent flow, then returns a live session. */
-  connect(request: AgentConnectRequest): Promise<AgentSession>;
+  connect(request: AgentConnectRequest): Promise<AgentSessionHandle>;
 }
 
 /** UI the wallet delegates to. In an extension these are browser-chrome dialogs. */

@@ -16,7 +16,7 @@ import {
   createWalletProvider,
   installProvider,
   ProviderRejected,
-  type AgentSession,
+  type AgentSessionHandle,
   type AgentConnectRequest,
   type ApprovalPrompt,
   type SiteTool,
@@ -190,9 +190,9 @@ function line(kind: string, text: string): HTMLDivElement {
   return div;
 }
 
-let session: AgentSession | null = null;
+let session: AgentSessionHandle | null = null;
 
-function attach(next: AgentSession): void {
+function attach(next: AgentSessionHandle): void {
   session = next;
   $('empty').style.display = 'none';
   log.style.display = 'flex';

@@ -27,7 +27,7 @@ const VERSION = typeof __AGENTPORT_VERSION__ === 'string' ? __AGENTPORT_VERSION_
 import { component, computed, html, onCleanup, signal, when } from '@nisli/core';
 import AgentPortConnect from './connect.js';
 import { aguiStream, type AguiAdapter, type AguiEvent } from '@agentport/agui';
-import type { AgentSession, SessionEvents, SiteTool } from '@agentport/client';
+import type { AgentSessionHandle, SessionEvents, SiteTool } from '@agentport/client';
 import { toErr, type HistoryEntry } from '@agentport/protocol';
 import { Chat, createChatStore, type ChatController } from '../../src/nisli-ui/ui/chat/index.js';
 import { siteLogger } from './observe.js';
@@ -80,7 +80,7 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
   const busy = signal(false);
   const notice = signal('');
 
-  let session: AgentSession | null = null;
+  let session: AgentSessionHandle | null = null;
   let adapter: AguiAdapter | null = null;
   let eventIterator: AsyncIterator<AguiEvent> | null = null;
   let chatController: ChatController | null = null;
@@ -211,7 +211,7 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
     void previous?.return?.();
   };
 
-  const attach = (next: AgentSession): void => {
+  const attach = (next: AgentSessionHandle): void => {
     detachEvents();
     chat.reset();
     toolSeq = 0;
@@ -272,7 +272,7 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
    */
   const restore = async () => {
     const attempt = ++attachmentEpoch;
-    let resumedSession: AgentSession | null = null;
+    let resumedSession: AgentSessionHandle | null = null;
     try {
       const resumed = await AgentPortConnect.resume({
         name: config.name,

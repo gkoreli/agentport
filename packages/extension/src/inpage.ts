@@ -13,8 +13,15 @@
  * in-page demo wallet works unmodified against the extension.
  */
 
-import type { AgentConnectRequest, SiteTool } from '@agentport/client';
-import type { ToolDefinition } from '@agentport/protocol';
+import type {
+  AgentConnectRequest,
+  AgentProvider,
+  AgentSessionHandle,
+  PromptRequest,
+  SessionEvents,
+  SiteTool,
+} from '@agentport/client';
+import { randomId, type HistoryEntry, type ToolDefinition } from '@agentport/protocol';
 import {
   ENVELOPE,
   TO_PAGE,
@@ -31,35 +38,22 @@ const CHANNEL = (document.currentScript as HTMLScriptElement | null)?.dataset['c
 
 type Listener = (payload: never) => void;
 
-interface PageSessionEvents {
-  delta: { promptId: string; text: string };
-  thought: { promptId: string; text: string };
-  done: { promptId: string; stopReason: string; error?: string };
-  tool: { name: string; arguments: Record<string, unknown>; ok: boolean; result?: unknown; error?: string };
-  closed: { reason: string };
-}
-
 /** The page's view of a session. Structurally the useful part of
  *  `AgentSession`, minus everything that would require key or socket access.
  *
  *  `info` is deliberately generic (ADR-009): `agentName` is a label like
  *  "Personal agent", never the user's real agent name, and `alias` is stable
  *  for THIS origin only — two sites comparing aliases learn nothing. */
-export interface PageAgentSession {
+export interface PageAgentSession extends AgentSessionHandle {
   readonly id: string;
   readonly info: { agentName: string; runtime: string; alias?: string };
-  readonly grant: { tools: ToolDefinition[]; expiresAt: number };
-  readonly closed: boolean;
-  prompt(text: string, context?: Record<string, unknown>): Promise<string>;
-  cancel(promptId: string): void;
-  close(reason?: string): void;
-  on<K extends keyof PageSessionEvents>(event: K, listener: (value: PageSessionEvents[K]) => void): () => void;
+  readonly grant: { tools: ToolDefinition[]; alwaysAsk: string[]; expiresAt: number };
 }
 
 class PageSession implements PageAgentSession {
   readonly id: string;
   readonly info: { agentName: string; runtime: string; alias?: string };
-  readonly grant: { tools: ToolDefinition[]; expiresAt: number };
+  readonly grant: { tools: ToolDefinition[]; alwaysAsk: string[]; expiresAt: number };
 
   readonly tools = new Map<string, SiteTool>();
   #listeners = new Map<string, Set<Listener>>();
@@ -69,7 +63,7 @@ class PageSession implements PageAgentSession {
   constructor(init: {
     ref: string;
     info: { agentName: string; runtime: string; alias?: string };
-    grant: { tools: ToolDefinition[]; expiresAt: number };
+    grant: { tools: ToolDefinition[]; alwaysAsk: string[]; expiresAt: number };
     tools: SiteTool[];
   }) {
     this.id = init.ref;
@@ -95,7 +89,7 @@ class PageSession implements PageAgentSession {
   /** Same contract as AgentSession.startPrompt: the id is known before the
    *  first token, minted here and honoured by the wallet, so renderers can
    *  show a truthful Stop control and correlate every event. */
-  startPrompt(text: string, context?: Record<string, unknown>): { id: string; result: Promise<string> } {
+  startPrompt(text: string, context?: Record<string, unknown>): PromptRequest {
     const promptId = rid('p_');
     if (this.#closed) return { id: promptId, result: Promise.reject(new Error('session is closed')) };
     const result = new Promise<string>((resolve, reject) => {
@@ -120,8 +114,8 @@ class PageSession implements PageAgentSession {
   }
 
   /** The conversation, replayed from the agent's own store via the wallet. */
-  history(): Promise<unknown[]> {
-    return post<unknown[]>({ t: 'history', rid: rid('r_'), ref: this.id }).then((entries) =>
+  history(): Promise<HistoryEntry[]> {
+    return post<HistoryEntry[]>({ t: 'history', rid: rid('r_'), ref: this.id }).then((entries) =>
       Array.isArray(entries) ? entries : [],
     );
   }
@@ -132,14 +126,14 @@ class PageSession implements PageAgentSession {
     this.finish(reason);
   }
 
-  on<K extends keyof PageSessionEvents>(event: K, listener: (value: PageSessionEvents[K]) => void): () => void {
+  on<K extends keyof SessionEvents>(event: K, listener: (value: SessionEvents[K]) => void): () => void {
     let set = this.#listeners.get(event);
     if (!set) this.#listeners.set(event, (set = new Set()));
     set.add(listener as Listener);
     return () => set!.delete(listener as Listener);
   }
 
-  emit<K extends keyof PageSessionEvents>(event: K, value: PageSessionEvents[K]): void {
+  emit<K extends keyof SessionEvents>(event: K, value: SessionEvents[K]): void {
     for (const listener of [...(this.#listeners.get(event) ?? [])]) (listener as (v: unknown) => void)(value);
   }
 
@@ -161,7 +155,7 @@ class PageSession implements PageAgentSession {
         });
         return;
       case 'tool':
-        this.emit('tool', payload as PageSessionEvents['tool']);
+        this.emit('tool', payload as SessionEvents['tool']);
         return;
       case 'closed':
         this.finish(String(payload['reason'] ?? 'closed'));
@@ -186,7 +180,7 @@ const pending = new Map<string, { resolve: (value: unknown) => void; reject: (er
 const sessions = new Map<string, PageSession>();
 
 function rid(prefix: string): string {
-  return prefix + Math.random().toString(36).slice(2, 12);
+  return randomId(prefix);
 }
 
 function send(body: PageOutbound): void {
@@ -275,10 +269,12 @@ window.addEventListener('message', (event: MessageEvent) => {
 interface ConnectResult {
   ref: string;
   info: { agentName: string; runtime: string; alias?: string };
-  grant: { tools: ToolDefinition[]; expiresAt: number };
+  grant: { tools: ToolDefinition[]; alwaysAsk: string[]; expiresAt: number };
 }
 
-const provider = {
+const provider: AgentProvider & {
+  resume(request: AgentConnectRequest): Promise<PageAgentSession | null>;
+} = {
   version: '0.0.1',
 
   async isAvailable(): Promise<boolean> {

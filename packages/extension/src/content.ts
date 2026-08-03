@@ -401,7 +401,7 @@ async function sendFromWidget(text: string): Promise<void> {
   ui.widget.say('user', text);
   streamingMessage = ui.widget.say('agent', '');
   try {
-    const full = await request<string>((rid) => ({ t: 'prompt', rid, ref, promptId: `p_${rid}`, text }));
+    const full = await request<string>((rid) => ({ t: 'prompt', rid, ref, promptId: mintId('p_'), text }));
     // Deltas already painted the bubble; the returned text is only used to
     // notice a turn that produced nothing at all.
     if (!full) ui.widget.note('(no output)');

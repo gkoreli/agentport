@@ -7,6 +7,8 @@ export {
   type ApprovalPrompt,
   type SessionEvents,
   type SessionInfo,
+  type AgentSessionHandle,
+  type PromptRequest,
 } from './session.js';
 export {
   createWalletProvider,

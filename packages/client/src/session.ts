@@ -2,6 +2,8 @@ import {
   Deferred,
   Emitter,
   createLogger,
+  isPromptId,
+  randomId,
   toErr,
   type ApprovalRequest,
   type CapabilityGrant,
@@ -52,13 +54,27 @@ export interface PromptRequest {
   result: Promise<string>;
 }
 
+/** The page-safe contract shared by direct wallets and extension proxies. */
+export interface AgentSessionHandle {
+  readonly id: string;
+  readonly grant: CapabilityGrant;
+  readonly info: SessionInfo;
+  readonly closed: boolean;
+  prompt(text: string, context?: Record<string, unknown>): Promise<string>;
+  startPrompt(text: string, context?: Record<string, unknown>): PromptRequest;
+  history(): Promise<HistoryEntry[]>;
+  cancel(promptId: string): void;
+  close(reason?: string): void;
+  on<K extends keyof SessionEvents>(event: K, listener: (value: SessionEvents[K]) => void): () => void;
+}
+
 /**
  * One live attachment between this page and one agent.
  *
  * The page owns the tools; the agent may only call what the grant contains,
  * and the relay enforces that only session participants can speak.
  */
-export class AgentSession extends Emitter<SessionEvents> {
+export class AgentSession extends Emitter<SessionEvents> implements AgentSessionHandle {
   readonly id: string;
   readonly surface: SurfaceDescriptor;
   readonly grant: CapabilityGrant;
@@ -113,7 +129,9 @@ export class AgentSession extends Emitter<SessionEvents> {
     // Ids are client-minted correlation handles with no security meaning, so
     // a bridged caller (the extension's page proxy) may supply its own and
     // see it echoed on every event.
-    const id = promptId ?? `p_${Math.random().toString(36).slice(2, 10)}`;
+    const id = promptId ?? randomId('p_');
+    if (!isPromptId(id)) throw new Error('invalid prompt id');
+    if (this.#transcripts.has(id)) throw new Error('prompt id is already active');
     if (this.#closed) return { id, result: Promise.reject(new Error('session is closed')) };
     const deferred = new Deferred<string>();
     this.#transcripts.set(id, { text: '', deferred });

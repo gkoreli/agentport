@@ -517,8 +517,12 @@ async function infoFor(entry: SessionEntry): Promise<{ agentName: string; runtim
   return { agentName: 'Personal agent', runtime: 'agent', alias: await originAlias(entry.origin) };
 }
 
-function grantFor(entry: SessionEntry): { tools: ToolDefinition[]; expiresAt: number } {
-  return { tools: entry.session.grant.tools, expiresAt: entry.session.grant.expiresAt };
+function grantFor(entry: SessionEntry): { tools: ToolDefinition[]; alwaysAsk: string[]; expiresAt: number } {
+  return {
+    tools: entry.session.grant.tools,
+    alwaysAsk: entry.session.grant.alwaysAsk,
+    expiresAt: entry.session.grant.expiresAt,
+  };
 }
 
 /** Streaming events and teardown follow the entry's CURRENT port and CURRENT
@@ -834,9 +838,8 @@ async function onContentMessage(port: chrome.runtime.Port, message: ContentToWor
       }
       // The page minted the prompt id; run the turn under it so every event
       // the page sees already carries the id it knows.
-      entry.session
-        .startPrompt(message.text, message.context, message.promptId)
-        .result.then(
+      const request = entry.session.startPrompt(message.text, message.context, message.promptId);
+      request.result.then(
           (text) => post(port, { t: 'ok', rid: message.rid, value: text }),
           (err: unknown) => {
             log.error('session prompt failed', { sessionId: entry.session.id, err });

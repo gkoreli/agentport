@@ -6,7 +6,8 @@
   "description": "AgentPort wallet as an MV3 Chrome extension: key custody out of the page.",
   "scripts": {
     "build": "tsx build.ts",
-    "typecheck": "tsc -p tsconfig.json"
+    "typecheck": "tsc -p tsconfig.json",
+    "check": "tsx check.ts"
   },
   "dependencies": {
     "@agentport/client": "0.0.1",

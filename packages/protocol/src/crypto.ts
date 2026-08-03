@@ -106,7 +106,12 @@ export function authChallengeMessage(nonce: string): string {
 }
 
 export function randomId(prefix = ''): string {
-  return prefix + toHex(randomBytes(8));
+  return prefix + toHex(randomBytes(12));
+}
+
+/** Prompt ids are opaque correlation handles, with one strict wire shape. */
+export function isPromptId(value: unknown): value is string {
+  return typeof value === 'string' && /^p_[0-9a-f]{24}$/.test(value);
 }
 
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no I/O/0/1

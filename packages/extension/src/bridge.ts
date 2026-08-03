@@ -22,7 +22,7 @@
  * further out than the relay).
  */
 
-import type { ToolDefinition } from '@agentport/protocol';
+import { isPromptId, randomId, type ToolDefinition } from '@agentport/protocol';
 
 /** Envelope discriminator. Present on every frame in both directions. */
 export const ENVELOPE = 'agentport/ext/1';
@@ -271,14 +271,14 @@ export function readPageOutbound(value: unknown): PageOutbound | undefined {
       const ref = str(value['ref'], 64);
       const promptId = str(value['promptId'], 64);
       const text = str(value['text'], LIMITS.textLength);
-      if (!rid || !ref || !promptId || text === undefined) return undefined;
+      if (!rid || !ref || !isPromptId(promptId) || text === undefined) return undefined;
       const context = plainJson(value['context']);
       return { t, rid, ref, promptId, text, ...(isRecord(context) ? { context } : {}) };
     }
     case 'prompt.cancel': {
       const ref = str(value['ref'], 64);
       const promptId = str(value['promptId'], 64);
-      return ref && promptId ? { t, ref, promptId } : undefined;
+      return ref && isPromptId(promptId) ? { t, ref, promptId } : undefined;
     }
     case 'tool.result': {
       const callId = str(value['callId'], 64);
@@ -300,9 +300,5 @@ export function readPageOutbound(value: unknown): PageOutbound | undefined {
 
 /** Ids minted on the trusted side. Never derived from anything the page sent. */
 export function mintId(prefix: string): string {
-  const bytes = new Uint8Array(12);
-  crypto.getRandomValues(bytes);
-  let hex = '';
-  for (const b of bytes) hex += b.toString(16).padStart(2, '0');
-  return `${prefix}${hex}`;
+  return randomId(prefix);
 }
