@@ -22,6 +22,11 @@ export default {
       return env.RELAY.get(id).fetch(request);
     }
 
+    if (url.pathname === '/pair') {
+      url.pathname = '/pair.html';
+      return env.ASSETS.fetch(new Request(url, request));
+    }
+
     return env.ASSETS.fetch(request);
   },
 };
