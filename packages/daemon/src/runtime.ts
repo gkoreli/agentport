@@ -17,9 +17,13 @@ export interface TurnContext {
   /** Streamed to the user as status/reasoning, rendered separately. */
   think(text: string): void;
   /** Invoke one of the site's tools. Rejects if the site refuses or errors. */
-  callTool(name: string, args: Record<string, unknown>): Promise<unknown>;
+  callTool(name: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<unknown>;
   /** Ask the user to approve something. Resolves false if declined. */
-  requestApproval(summary: string, call?: { name: string; arguments: Record<string, unknown> }): Promise<boolean>;
+  requestApproval(
+    summary: string,
+    call?: { name: string; arguments: Record<string, unknown> },
+    signal?: AbortSignal,
+  ): Promise<boolean>;
   /** Aborts when the client cancels the prompt or closes the session. */
   signal: AbortSignal;
 }

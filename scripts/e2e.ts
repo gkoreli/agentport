@@ -8,9 +8,12 @@
  */
 
 import { WebSocket as NodeWebSocket } from 'ws';
+import { Client as McpClient } from '@modelcontextprotocol/sdk/client/index.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { Relay } from '../packages/relay/src/relay.js';
 import { AgentDaemon } from '../packages/daemon/src/daemon.js';
-import { DemoWriterRuntime } from '../packages/daemon/src/runtime.js';
+import { McpBridge } from '../packages/daemon/src/mcp-bridge.js';
+import { DemoWriterRuntime, type AgentRuntime, type TurnContext } from '../packages/daemon/src/runtime.js';
 import { AgentWallet, type SiteTool } from '../packages/client/src/index.js';
 import {
   Deferred,
@@ -86,6 +89,46 @@ console.log('0. secure channel state');
     wrongContext = (err as Error).message;
   }
   check('associated-data mismatch fails authentication', wrongContext.length > 0, wrongContext);
+}
+
+console.log('\n0b. official MCP transport');
+{
+  const bridge = new McpBridge({ sink: () => {} });
+  await bridge.start();
+  const cancelled = new Deferred<boolean>();
+  const registration = bridge.register(
+    'sdk-check',
+    [
+      { name: 'page.read', description: 'read', inputSchema: { type: 'object', properties: {} } },
+      { name: 'page.slow', description: 'slow', inputSchema: { type: 'object', properties: {} } },
+    ],
+    async (name, _args, signal) => {
+      if (name === 'page.read') return { text: 'ok' };
+      return new Promise((_, reject) => {
+        signal.addEventListener('abort', () => {
+          cancelled.resolve(true);
+          reject(new Error('cancelled'));
+        }, { once: true });
+      });
+    },
+  );
+  const mcp = new McpClient({ name: 'agentport-e2e', version: '0.0.1' });
+  const transport = new StreamableHTTPClientTransport(new URL(registration.url), {
+    requestInit: { headers: { Authorization: `Bearer ${registration.token}` } },
+  });
+  await mcp.connect(transport);
+  const listed = await mcp.listTools();
+  check('official SDK lists the temporary grant', listed.tools.map((tool) => tool.name).join(',') === 'page_read,page_slow');
+  const read = await mcp.callTool({ name: 'page_read', arguments: {} });
+  check('official SDK returns structured tool content', read.structuredContent?.['text'] === 'ok', read);
+  await mcp.callTool({ name: 'page_slow', arguments: {} }, undefined, { timeout: 30 }).catch(() => {});
+  const didCancel = await Promise.race([
+    cancelled.promise,
+    new Promise<false>((resolve) => setTimeout(() => resolve(false), 500)),
+  ]);
+  check('MCP timeout aborts the exact in-flight surface call', didCancel === true);
+  await mcp.close();
+  await bridge.stop();
 }
 
 // --- the "browser" document the site owns -----------------------------------
@@ -834,6 +877,106 @@ console.log('\n13. delegated sessions');
   await otherDaemon.stop();
   await edgeDaemon.stop();
   await lyingRelay.close();
+}
+
+// --- 14. a vanished page cannot wedge or duplicate an ACP owner -------------
+console.log('\n14. detached tool calls fail and replacement is single-owner');
+{
+  const isolated = new Relay({ port: 0, sink: () => {} });
+  await isolated.listening();
+  const isolatedUrl = `ws://127.0.0.1:${isolated.port}`;
+  const isolatedUser = generateKeyPair();
+  const isolatedAgent = generateKeyPair();
+  const isolatedCert = signCert(isolatedUser.secretKey, {
+    user: isolatedUser.publicKey,
+    agent: isolatedAgent.publicKey,
+    name: 'Detach Agent',
+    runtime: 'blocking-test',
+    issuedAt: Date.now(),
+  });
+  const toolReachedPage = new Deferred<void>();
+  const toolRejected = new Deferred<string>();
+  let runtimeCloses = 0;
+
+  class BlockingRuntime implements AgentRuntime {
+    readonly name = 'blocking-test';
+    async prompt(_text: string, ctx: TurnContext): Promise<void> {
+      try {
+        await ctx.callTool('page.read', {});
+      } catch (err) {
+        toolRejected.resolve(err instanceof Error ? err.message : String(err));
+      }
+    }
+    closeSession(): void {
+      runtimeCloses++;
+    }
+  }
+
+  const detachDaemon = new AgentDaemon({
+    relayUrl: isolatedUrl,
+    identity: {
+      ...isolatedAgent,
+      name: 'Detach Agent',
+      runtime: 'blocking-test',
+      cert: isolatedCert,
+    },
+    createRuntime: () => new BlockingRuntime(),
+  });
+  await detachDaemon.start();
+
+  let clientSocket: NodeWebSocket | undefined;
+  const disconnectingFactory = (url: string) => {
+    clientSocket = new NodeWebSocket(url);
+    return clientSocket as never;
+  };
+  const firstWallet = new AgentWallet({
+    relayUrl: isolatedUrl,
+    userSecretKey: isolatedUser.secretKey,
+    socketFactory: disconnectingFactory,
+  });
+  await firstWallet.connect();
+  const hangingTool: SiteTool = {
+    name: 'page.read',
+    description: 'A page call whose document disappears while it is running',
+    inputSchema: { type: 'object', properties: {} },
+    handler: () => {
+      toolReachedPage.resolve();
+      return new Promise(() => {});
+    },
+  };
+  const firstSession = await firstWallet.openSession({
+    agent: isolatedAgent.publicKey,
+    surface: { name: 'Reloading Page', origin: 'https://reload.test' },
+    tools: [hangingTool],
+  });
+  void firstSession.prompt('read').catch(() => {});
+  await toolReachedPage.promise;
+  clientSocket!.terminate();
+
+  const detachedError = await Promise.race([
+    toolRejected.promise,
+    new Promise<string>((resolve) => setTimeout(() => resolve('timeout'), 2_000)),
+  ]);
+  check('a tool awaiting a vanished page is rejected promptly', detachedError === 'client detached', detachedError);
+
+  const replacementWallet = new AgentWallet({
+    relayUrl: isolatedUrl,
+    userSecretKey: isolatedUser.secretKey,
+    socketFactory,
+  });
+  await replacementWallet.connect();
+  const replacement = await replacementWallet.openSession({
+    agent: isolatedAgent.publicKey,
+    surface: { name: 'Reloading Page', origin: 'https://reload.test' },
+    tools: [hangingTool],
+  });
+  check('replacement retires the orphan runtime before opening', runtimeCloses === 1, runtimeCloses);
+
+  replacement.close();
+  firstWallet.close();
+  replacementWallet.close();
+  await detachDaemon.stop();
+  await isolated.close();
 }
 
 // --- teardown ---------------------------------------------------------------

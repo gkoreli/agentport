@@ -360,6 +360,10 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
         const session = this.#sessions.get(frame.s);
         if (session && session.detachedAt === undefined) {
           session.detachedAt = Date.now();
+          // A page-owned tool or approval cannot finish after its execution
+          // context disappears. Keeping these promises pending wedges the ACP
+          // turn forever and can make the model retry the same MCP call.
+          this.#cancelInFlight(session, 'client detached');
           this.#log.info('session detached; holding it for resume', {
             sessionId: frame.s,
             data: { graceMs: DETACH_GRACE_MS },
@@ -580,6 +584,23 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
       this.#send({ t: 'session.denied', s: frame.s, reason: 'bad_epk_proof' });
       return;
     }
+
+    // If extension state was lost during an update, it cannot present the old
+    // resume token and opens a replacement attachment instead. Retire only an
+    // orphan belonging to the same authenticated client and surface before
+    // the ACP adapter loads that surface's persisted session. Two live ACP
+    // processes must never own one persisted agent session concurrently.
+    for (const existing of [...this.#sessions.values()]) {
+      if (
+        existing.id !== frame.s &&
+        existing.detachedAt !== undefined &&
+        existing.clientKey === frame.client &&
+        existing.surface.origin === frame.surface.origin &&
+        existing.surface.name === frame.surface.name
+      ) {
+        await this.#closeSession(existing, 'replaced_by_new_attachment', false);
+      }
+    }
     // Reuse the keypair minted at consent time so the fingerprint the user
     // just compared is the fingerprint the session actually uses.
     let mine: KeyPair;
@@ -703,9 +724,9 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
         record('thought', text);
         this.#sendSession(session, { t: 'thought', s: session.id, promptId: frame.id, text });
       },
-      callTool: async (name, args) => {
+      callTool: async (name, args, signal) => {
         try {
-          const result = await this.#callTool(session, name, args);
+          const result = await this.#callTool(session, name, args, signal);
           record('tool', name);
           return result;
         } catch (err) {
@@ -713,8 +734,8 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
           throw err;
         }
       },
-      requestApproval: async (summary, call) => {
-        const granted = await this.#requestApproval(session, summary, call);
+      requestApproval: async (summary, call, signal) => {
+        const granted = await this.#requestApproval(session, summary, call, signal);
         record('approval', `${summary} — ${granted ? 'allowed' : 'declined'}`);
         return granted;
       },
@@ -742,7 +763,12 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     }
   }
 
-  async #callTool(session: SessionState, name: string, args: Record<string, unknown>): Promise<unknown> {
+  async #callTool(
+    session: SessionState,
+    name: string,
+    args: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): Promise<unknown> {
     const tool = session.tools.find((candidate) => candidate.name === name);
     if (!tool) throw new Error(`tool "${name}" is not in this session's grant`);
     if (session.grant.expiresAt <= Date.now()) throw new Error('capability grant expired');
@@ -761,14 +787,21 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     const id = randomId('call_');
     const deferred = new Deferred<unknown>();
     session.toolCalls.set(id, deferred);
-    this.#sendSession(session, { t: 'tool.call', s: session.id, id, name, arguments: args });
-    return deferred.promise;
+    const abort = () => {
+      if (!session.toolCalls.delete(id)) return;
+      deferred.reject(signal?.reason instanceof Error ? signal.reason : new Error('tool call cancelled'));
+    };
+    if (signal?.aborted) abort();
+    else signal?.addEventListener('abort', abort, { once: true });
+    if (!signal?.aborted) this.#sendSession(session, { t: 'tool.call', s: session.id, id, name, arguments: args });
+    return deferred.promise.finally(() => signal?.removeEventListener('abort', abort));
   }
 
   #requestApproval(
     session: SessionState,
     summary: string,
     call?: { name: string; arguments: Record<string, unknown> },
+    signal?: AbortSignal,
   ): Promise<boolean> {
     // The code-carrying fallback has not been authorised by a browser wallet,
     // so its questions stay with the daemon owner. Delegated sessions are the
@@ -783,14 +816,28 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     const id = randomId('appr_');
     const deferred = new Deferred<boolean>();
     session.approvals.set(id, deferred);
-    this.#sendSession(session, { t: 'approval.request', s: session.id, id, summary, ...(call ? { call } : {}) });
-    return deferred.promise;
+    const abort = () => {
+      if (!session.approvals.delete(id)) return;
+      deferred.resolve(false);
+    };
+    if (signal?.aborted) abort();
+    else signal?.addEventListener('abort', abort, { once: true });
+    if (!signal?.aborted) {
+      this.#sendSession(session, { t: 'approval.request', s: session.id, id, summary, ...(call ? { call } : {}) });
+    }
+    return deferred.promise.finally(() => signal?.removeEventListener('abort', abort));
+  }
+
+  #cancelInFlight(session: SessionState, reason: string): void {
+    for (const controller of session.prompts.values()) controller.abort();
+    for (const pending of session.toolCalls.values()) pending.reject(new Error(reason));
+    session.toolCalls.clear();
+    for (const pending of session.approvals.values()) pending.resolve(false);
+    session.approvals.clear();
   }
 
   async #closeSession(session: SessionState, reason: string, notify = true): Promise<void> {
-    for (const controller of session.prompts.values()) controller.abort();
-    for (const pending of session.toolCalls.values()) pending.reject(new Error('session closed'));
-    for (const pending of session.approvals.values()) pending.resolve(false);
+    this.#cancelInFlight(session, 'session closed');
     try {
       await session.runtime.closeSession?.();
     } catch (err) {
