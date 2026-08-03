@@ -2,7 +2,7 @@
   "name": "@agentport/cli",
   "version": "0.1.0",
   "description": "Bring your own agent to any website. Run this where your agent lives; pair once from your browser.",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "repository": "github:gkoreli/agentport",
   "type": "module",
   "bin": {
