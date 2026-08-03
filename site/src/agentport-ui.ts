@@ -1,3 +1,8 @@
+declare const __AGENTPORT_VERSION__: string | undefined;
+
+/** Baked in by site/build.ts; 'dev' under tsx/test runners with no define. */
+const VERSION = typeof __AGENTPORT_VERSION__ === 'string' ? __AGENTPORT_VERSION__ : 'dev';
+
 /**
  * The demo's agent panel, in nisli — rendered by the @nisli/ui ACP set.
  *
@@ -282,7 +287,8 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
 
   return html`
     <div class="ap-head">
-      <span>Agent</span><span class="ap-status" class:online=${online}>${status}</span>
+      <span>Agent <span class="ap-version" title="AgentPort build">v${VERSION}</span></span
+      ><span class="ap-status" class:online=${online}>${status}</span>
     </div>
 
     ${when(

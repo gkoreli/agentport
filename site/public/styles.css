@@ -76,6 +76,7 @@ a { color: var(--accent); }
 /* ---- agent panel ---- */
 .agent-panel { border-left: 1px solid var(--line); background: var(--panel); display: flex; flex-direction: column; min-height: 0; }
 .ap-head { padding: 14px 18px; border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; align-items: center; font-size: 13px; font-weight: 600; }
+.ap-version { font-weight: 400; font-size: 10px; color: var(--dim, #9a97a3); margin-left: 6px; letter-spacing: .02em; }
 .ap-status { font-weight: 400; color: var(--muted); font-size: 12px; }
 .ap-status.online::before { content: "● "; color: var(--ok); }
 .ap-empty { padding: 44px 26px; text-align: center; }

@@ -20,7 +20,7 @@
     "clean": "rm -rf packages/*/dist examples/*/dist",
     "site:build": "tsx site/build.ts",
     "site:dev": "npm run site:build && wrangler dev",
-    "deploy": "npm run site:build && wrangler deploy",
+    "deploy": "tsx scripts/deploy.ts",
     "connect": "tsx packages/daemon/src/connect-cli.ts",
     "ui:smoke": "tsx scripts/ui-smoke.ts",
     "integration": "tsx scripts/integration.ts"
