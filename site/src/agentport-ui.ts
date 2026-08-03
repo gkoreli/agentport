@@ -67,11 +67,6 @@ function displayJson(value: unknown): string {
   }
 }
 
-interface PendingApproval {
-  id: number;
-  prompt: ApprovalPrompt;
-  resolve: (granted: boolean) => void;
-}
 
 const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) => {
   // nisli props are signals — `props.config` is Signal<SurfaceConfig>, not the
@@ -85,7 +80,6 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
   const live = signal(false);
   const busy = signal(false);
   const notice = signal('');
-  const pendingApprovals = signal<PendingApproval[]>([]);
 
   let session: AgentSessionHandle | null = null;
   let adapter: AguiAdapter | null = null;

@@ -388,7 +388,10 @@ async function runToolCall(call: Extract<WorkerToContent, { t: 'tool.call' }>): 
 
 let overlayInstance: Overlay | undefined;
 let widgetRef: string | undefined;
-let streamingMessage: string | undefined;
+let widgetPromptId: string | undefined;
+let widgetToolSeq = 0;
+const widgetTextMessages = new Set<string>();
+const widgetReasoningMessages = new Set<string>();
 
 function overlay(): Overlay {
   if (!overlayInstance) {
@@ -397,9 +400,15 @@ function overlay(): Overlay {
       detach: () => {
         if (widgetRef) tell({ t: 'close', ref: widgetRef, reason: 'user_detached' });
         widgetRef = undefined;
+        widgetPromptId = undefined;
         overlay().widget.reset();
       },
-      send: (text) => void sendFromWidget(text),
+      send: sendFromWidget,
+      cancel: () => {
+        if (widgetRef && widgetPromptId) {
+          tell({ t: 'prompt.cancel', ref: widgetRef, promptId: widgetPromptId });
+        }
+      },
     });
   }
   return overlayInstance;
@@ -438,48 +447,104 @@ async function attachWidget(): Promise<void> {
     widgetRef = value.ref;
     ui.widget.agentName.value = value.info.agentName;
     ui.widget.phase.value = 'attached';
-    ui.widget.note(
+    ui.widget.notice(
       usingWebMcp
         ? `Attached with ${webmcpTools.length} tool(s) this site published via WebMCP.`
         : `Attached with the generic page toolset. Reads are free; anything that changes the page asks first.`,
     );
   } catch (err) {
     ui.widget.phase.value = 'idle';
-    ui.widget.note(err instanceof Error ? err.message : String(err));
+    ui.widget.notice(err instanceof Error ? err.message : String(err));
   }
 }
 
-async function sendFromWidget(text: string): Promise<void> {
+function sendFromWidget(text: string): boolean {
   const ui = overlay();
   const ref = widgetRef;
-  if (!ref) return;
-  ui.widget.say('user', text);
-  streamingMessage = ui.widget.say('agent', '');
-  try {
-    const full = await request<string>((rid) => ({ t: 'prompt', rid, ref, promptId: mintId('p_'), text }));
-    // Deltas already painted the bubble; the returned text is only used to
-    // notice a turn that produced nothing at all.
-    if (!full) ui.widget.note('(no output)');
-  } catch (err) {
-    ui.widget.note(err instanceof Error ? err.message : String(err));
-  } finally {
-    streamingMessage = undefined;
-  }
+  if (!ref || widgetPromptId) return false;
+  const promptId = mintId('p_');
+  widgetPromptId = promptId;
+  ui.widget.addUserMessage(text);
+  ui.widget.apply({ type: 'run.start' });
+  request<string>((rid) => ({ t: 'prompt', rid, ref, promptId, text })).then(
+    (full) => {
+      // `done` normally settles the run first. This fallback is for a worker
+      // that returned a result after losing its event subscription.
+      if (widgetPromptId !== promptId) return;
+      if (full && !widgetTextMessages.has(promptId)) {
+        widgetTextMessages.add(promptId);
+        ui.widget.apply({ type: 'message.start', id: promptId, role: 'assistant' });
+        ui.widget.apply({ type: 'message.delta', id: promptId, content: { type: 'text', text: full } });
+        ui.widget.apply({ type: 'message.end', id: promptId });
+      }
+      ui.widget.apply({ type: 'run.end' });
+      widgetPromptId = undefined;
+    },
+    (err: Error) => {
+      if (widgetPromptId !== promptId) return;
+      ui.widget.apply({ type: 'run.error', error: err.message });
+      ui.widget.notice(err.message);
+      widgetPromptId = undefined;
+    },
+  );
+  return true;
 }
 
 function onWidgetEvent(event: string, payload: unknown): void {
   const ui = overlay();
   if (!isRecord(payload)) return;
-  if (event === 'delta' && streamingMessage) ui.widget.appendTo(streamingMessage, String(payload['text'] ?? ''));
-  else if (event === 'tool') ui.widget.note(`${payload['ok'] ? '✓' : '✗'} ${String(payload['name'])}`);
-  else if (event === 'closed') onWidgetClosed(String(payload['reason'] ?? 'closed'));
+  const promptId = typeof payload['promptId'] === 'string' ? payload['promptId'] : undefined;
+  if (event === 'delta' && promptId) {
+    if (!widgetTextMessages.has(promptId)) {
+      widgetTextMessages.add(promptId);
+      ui.widget.apply({ type: 'message.start', id: promptId, role: 'assistant' });
+    }
+    ui.widget.apply({ type: 'message.delta', id: promptId, content: { type: 'text', text: String(payload['text'] ?? '') } });
+  } else if (event === 'thought' && promptId) {
+    const id = `${promptId}:reasoning`;
+    if (!widgetReasoningMessages.has(id)) {
+      widgetReasoningMessages.add(id);
+      ui.widget.apply({ type: 'reasoning.start', id });
+    }
+    ui.widget.apply({ type: 'reasoning.delta', id, content: { type: 'text', text: String(payload['text'] ?? '') } });
+  } else if (event === 'tool') {
+    const id = `tool-${widgetToolSeq++}`;
+    const ok = payload['ok'] === true;
+    ui.widget.apply({
+      type: 'tool.start',
+      id,
+      name: String(payload['name'] ?? 'Tool call'),
+      input: JSON.stringify(payload['arguments'] ?? {}, null, 2),
+    });
+    ui.widget.apply({
+      type: 'tool.end',
+      id,
+      status: ok ? 'complete' : 'error',
+      output: ok && payload['result'] !== undefined
+        ? [{ type: 'text', text: JSON.stringify(payload['result'], null, 2) }]
+        : undefined,
+      error: ok ? undefined : String(payload['error'] ?? 'Tool call failed'),
+    });
+  } else if (event === 'done' && promptId) {
+    if (widgetTextMessages.delete(promptId)) ui.widget.apply({ type: 'message.end', id: promptId });
+    const reasoningId = `${promptId}:reasoning`;
+    if (widgetReasoningMessages.delete(reasoningId)) ui.widget.apply({ type: 'reasoning.end', id: reasoningId });
+    const failed = payload['stopReason'] === 'error';
+    ui.widget.apply(failed
+      ? { type: 'run.error', error: String(payload['error'] ?? 'Agent run failed') }
+      : { type: 'run.end' });
+    if (widgetPromptId === promptId) widgetPromptId = undefined;
+  } else if (event === 'closed') onWidgetClosed(String(payload['reason'] ?? 'closed'));
 }
 
 function onWidgetClosed(reason: string): void {
   widgetRef = undefined;
+  widgetPromptId = undefined;
+  widgetTextMessages.clear();
+  widgetReasoningMessages.clear();
   const ui = overlay();
   ui.widget.reset();
-  ui.widget.note(`Detached: ${reason}`);
+  ui.widget.notice(`Detached: ${reason}`);
 }
 
 // --- boot ------------------------------------------------------------------

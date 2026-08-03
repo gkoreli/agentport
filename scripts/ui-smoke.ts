@@ -16,7 +16,7 @@ const check = (label: string, ok: boolean, detail?: unknown) => {
 const { openConnectModal } = await import('../site/src/modal.js');
 const { mountPanel } = await import('../site/src/agentport-ui.js');
 const { signal, flush, html } = await import('@nisli/core');
-const { answerProofBinding, generateKeyPair, generateSealKeyPair, signEpk } = await import('../packages/protocol/src/index.js');
+const { answerProofBinding, deriveSealChannel, generateKeyPair, generateSealKeyPair, openSealed, seal, signEpk } = await import('../packages/protocol/src/index.js');
 void signal;
 
 console.log('1. connect modal');
@@ -87,6 +87,14 @@ class FakeRelay {
   send(raw: string) {
     const frame = JSON.parse(raw) as Record<string, unknown> & { t: string };
     FakeRelay.frames.push(frame.t);
+    if (frame.t === 'enc' && this.#channel) {
+      try {
+        // Surface the inner type so assertions can see through the sealing.
+        FakeRelay.frames.push(`enc:${(openSealed(this.#channel.receive, frame as never) as { t: string }).t}`);
+      } catch {
+        // counter frames the fake does not consume stay opaque; fine.
+      }
+    }
     if (frame.t === 'hello') this.#reply({ t: 'challenge', nonce: 'a'.repeat(32) });
     if (frame.t === 'identify') {
       this.#client = String(frame.pubkey);
@@ -97,6 +105,7 @@ class FakeRelay {
       // Complete the session too, so the panel can exercise its live AG-UI
       // path rather than stopping at a successful connection handshake.
       const mine = generateSealKeyPair();
+      this.#channel = deriveSealChannel(mine.secretKey, String(frame.epk), 'sess_test', 'agent');
       const surface = frame.surface as Parameters<typeof answerProofBinding>[3];
       const grant = frame.grant as Parameters<typeof answerProofBinding>[4];
       this.#reply({
@@ -119,6 +128,14 @@ class FakeRelay {
     }
   }
   close() {}
+
+  #channel: ReturnType<typeof deriveSealChannel> | undefined;
+
+  /** Send a session content frame the way a real daemon would: sealed. */
+  sealedReply(frame: { t: string; s: string }) {
+    if (!this.#channel) throw new Error('sealedReply before the handshake');
+    this.reply(seal(this.#channel.send, frame as never));
+  }
 }
 (globalThis as Record<string, unknown>).WebSocket = FakeRelay;
 (window as unknown as Record<string, unknown>).WebSocket = FakeRelay;
@@ -264,7 +281,7 @@ flush();
 check('external queued sends preserve order', prompts.length === 2 && prompts[1] === 'External follow-up', prompts);
 
 console.log('\n7. delegated approvals render a real decision card');
-FakeRelay.latest?.reply({
+FakeRelay.latest?.sealedReply({
   t: 'approval.request',
   s: 'sess_test',
   id: 'approval_test',
@@ -277,7 +294,7 @@ check('approval card shows summary and arguments', rendered().includes('Write th
 const allow = (clickMount as unknown as { querySelector(s: string): { click(): void } | null }).querySelector('.ap-approval-actions button:last-child');
 allow?.click();
 await new Promise((resolve) => setTimeout(resolve, 20));
-check('Allow resolves the protocol decision', FakeRelay.frames.includes('approval.response'), FakeRelay.frames);
+check('Allow resolves the protocol decision', FakeRelay.frames.includes('enc:approval.response'), FakeRelay.frames);
 check('the approval card settles and disappears', !rendered().includes('Approval required'), rendered().slice(0, 260));
 
 console.log(failures === 0 ? '\nUI smoke passed' : `\n${failures} failed`);

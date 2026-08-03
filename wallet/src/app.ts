@@ -37,7 +37,6 @@ const WalletApp = component('agentport-wallet-app', () => {
   const wallet = new AgentWallet({
     relayUrl: relayUrl(),
     userSecretKey: identity.secretKey,
-    log: (message) => console.info(`[agentport-wallet] ${message}`),
   });
   let walletReady = false;
 

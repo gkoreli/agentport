@@ -11,7 +11,7 @@
   "dependencies": {
     "@agentport/client": "0.0.1",
     "@agentport/protocol": "0.0.1",
-    "@nisli/core": "^0.54.1"
+    "@nisli/core": "file:../../../nisli/packages/core"
   },
   "devDependencies": {
     "@types/chrome": "^0.0.287"
