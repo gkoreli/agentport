@@ -109,8 +109,11 @@ export class AgentSession extends Emitter<SessionEvents> {
    * Renderers need this before the first token arrives; waiting for a delta
    * makes a visible Stop control lie during slow and tool-only turns.
    */
-  startPrompt(text: string, context?: Record<string, unknown>): PromptRequest {
-    const id = `p_${Math.random().toString(36).slice(2, 10)}`;
+  startPrompt(text: string, context?: Record<string, unknown>, promptId?: string): PromptRequest {
+    // Ids are client-minted correlation handles with no security meaning, so
+    // a bridged caller (the extension's page proxy) may supply its own and
+    // see it echoed on every event.
+    const id = promptId ?? `p_${Math.random().toString(36).slice(2, 10)}`;
     if (this.#closed) return { id, result: Promise.reject(new Error('session is closed')) };
     const deferred = new Deferred<string>();
     this.#transcripts.set(id, { text: '', deferred });

@@ -154,7 +154,7 @@ window.addEventListener('message', (event: MessageEvent) => {
     case 'prompt': {
       const record = ownedBy(body.ref, 'page');
       if (!record) return void toPage({ t: 'err', rid: body.rid, reason: 'denied', message: 'unknown session' });
-      request<string>((rid) => ({ t: 'prompt', rid, ref: record.ref, text: body.text, context: body.context })).then(
+      request<string>((rid) => ({ t: 'prompt', rid, ref: record.ref, promptId: body.promptId, text: body.text, context: body.context })).then(
         (text) => toPage({ t: 'ok', rid: body.rid, value: text }),
         (err: Error) => toPage({ t: 'err', rid: body.rid, reason: 'error', message: err.message }),
       );
@@ -401,7 +401,7 @@ async function sendFromWidget(text: string): Promise<void> {
   ui.widget.say('user', text);
   streamingMessage = ui.widget.say('agent', '');
   try {
-    const full = await request<string>((rid) => ({ t: 'prompt', rid, ref, text }));
+    const full = await request<string>((rid) => ({ t: 'prompt', rid, ref, promptId: `p_${rid}`, text }));
     // Deltas already painted the bubble; the returned text is only used to
     // notice a turn that produced nothing at all.
     if (!full) ui.widget.note('(no output)');

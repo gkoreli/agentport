@@ -89,11 +89,19 @@ class PageSession implements PageAgentSession {
    * `done`, which is where `cancel` gets its id from.
    */
   prompt(text: string, context?: Record<string, unknown>): Promise<string> {
-    if (this.#closed) return Promise.reject(new Error('session is closed'));
-    return new Promise<string>((resolve, reject) => {
+    return this.startPrompt(text, context).result;
+  }
+
+  /** Same contract as AgentSession.startPrompt: the id is known before the
+   *  first token, minted here and honoured by the wallet, so renderers can
+   *  show a truthful Stop control and correlate every event. */
+  startPrompt(text: string, context?: Record<string, unknown>): { id: string; result: Promise<string> } {
+    const promptId = rid('p_');
+    if (this.#closed) return { id: promptId, result: Promise.reject(new Error('session is closed')) };
+    const result = new Promise<string>((resolve, reject) => {
       const turn = { reject };
       this.#turns.add(turn);
-      post<string>({ t: 'prompt', rid: rid('r_'), ref: this.id, text, ...(context ? { context } : {}) }).then(
+      post<string>({ t: 'prompt', rid: rid('r_'), ref: this.id, promptId, text, ...(context ? { context } : {}) }).then(
         (full) => {
           this.#turns.delete(turn);
           resolve(typeof full === 'string' ? full : '');
@@ -104,6 +112,7 @@ class PageSession implements PageAgentSession {
         },
       );
     });
+    return { id: promptId, result };
   }
 
   cancel(promptId: string): void {

@@ -67,7 +67,7 @@ export type PageOutbound =
   /** Reclaim a session this origin+surface already holds, after a navigation. */
   | { t: 'resume'; rid: string; request: PageConnectRequest }
   | { t: 'history'; rid: string; ref: string }
-  | { t: 'prompt'; rid: string; ref: string; text: string; context?: Record<string, unknown> }
+  | { t: 'prompt'; rid: string; ref: string; promptId: string; text: string; context?: Record<string, unknown> }
   | { t: 'prompt.cancel'; ref: string; promptId: string }
   | { t: 'tool.result'; callId: string; ok: boolean; result?: unknown; error?: string }
   | { t: 'close'; ref: string; reason?: string }
@@ -119,7 +119,7 @@ export type ContentToWorker =
   | { t: 'connect'; rid: string; from: Origin; request: PageConnectRequest }
   | { t: 'resume'; rid: string; from: Origin; request: PageConnectRequest }
   | { t: 'history'; rid: string; ref: string }
-  | { t: 'prompt'; rid: string; ref: string; text: string; context?: Record<string, unknown> }
+  | { t: 'prompt'; rid: string; ref: string; promptId: string; text: string; context?: Record<string, unknown> }
   | { t: 'prompt.cancel'; ref: string; promptId: string }
   | { t: 'tool.result'; ref: string; callId: string; ok: boolean; result?: unknown; error?: string }
   | { t: 'close'; ref: string; reason?: string }
@@ -269,10 +269,11 @@ export function readPageOutbound(value: unknown): PageOutbound | undefined {
     case 'prompt': {
       const rid = str(value['rid'], 64);
       const ref = str(value['ref'], 64);
+      const promptId = str(value['promptId'], 64);
       const text = str(value['text'], LIMITS.textLength);
-      if (!rid || !ref || text === undefined) return undefined;
+      if (!rid || !ref || !promptId || text === undefined) return undefined;
       const context = plainJson(value['context']);
-      return { t, rid, ref, text, ...(isRecord(context) ? { context } : {}) };
+      return { t, rid, ref, promptId, text, ...(isRecord(context) ? { context } : {}) };
     }
     case 'prompt.cancel': {
       const ref = str(value['ref'], 64);

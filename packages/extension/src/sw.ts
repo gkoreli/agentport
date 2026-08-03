@@ -832,11 +832,11 @@ async function onContentMessage(port: chrome.runtime.Port, message: ContentToWor
         post(port, { t: 'err', rid: message.rid, reason: 'denied', message: 'unknown session' });
         return;
       }
-      // The prompt id the caller chose is local to it; the session mints its
-      // own, and we translate on the way back out.
+      // The page minted the prompt id; run the turn under it so every event
+      // the page sees already carries the id it knows.
       entry.session
-        .prompt(message.text, message.context)
-        .then(
+        .startPrompt(message.text, message.context, message.promptId)
+        .result.then(
           (text) => post(port, { t: 'ok', rid: message.rid, value: text }),
           (err: unknown) => {
             log.error('session prompt failed', { sessionId: entry.session.id, err });
