@@ -430,9 +430,15 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
       }
 
       case 'tool.result': {
-        const pending = this.#sessions.get(frame.s)?.toolCalls.get(frame.id);
+        const session = this.#sessions.get(frame.s);
+        if (!session) return;
+        const pending = session.toolCalls.get(frame.id);
         if (!pending) return;
-        this.#sessions.get(frame.s)!.toolCalls.delete(frame.id);
+        session.toolCalls.delete(frame.id);
+        this.#log.info('surface tool result received', {
+          sessionId: frame.s,
+          data: { toolCallId: frame.id, ok: frame.ok },
+        });
         if (frame.ok) pending.resolve(frame.result);
         else pending.reject(new Error(frame.error ?? 'tool call failed'));
         return;
@@ -763,16 +769,34 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     // to its CLIENT panel, which is the consent boundary that replaces the
     // viaConnect terminal gate.
     if (session.viaConnect && (tool.requiresApproval || session.grant.alwaysAsk.includes(name))) {
+      this.#log.info('surface tool awaiting terminal approval', { sessionId: session.id, data: { tool: name } });
       const approved = await (this.#options.onLocalApproval?.(`Run ${name}`, { name, arguments: args }) ??
         Promise.resolve(false));
+      this.#log.info('terminal approval resolved', {
+        sessionId: session.id,
+        data: { tool: name, granted: approved },
+      });
       if (!approved) throw new Error('declined by owner');
     }
 
     const id = randomId('call_');
     const deferred = new Deferred<unknown>();
     session.toolCalls.set(id, deferred);
+    this.#log.info('surface tool call dispatched', {
+      sessionId: session.id,
+      data: {
+        tool: name,
+        toolCallId: id,
+        browserApprovalRequired: !session.viaConnect &&
+          (tool.requiresApproval === true || session.grant.alwaysAsk.includes(name)),
+      },
+    });
     const abort = () => {
       if (!session.toolCalls.delete(id)) return;
+      this.#log.warn('surface tool call cancelled', {
+        sessionId: session.id,
+        data: { tool: name, toolCallId: id },
+      });
       deferred.reject(signal?.reason instanceof Error ? signal.reason : new Error('tool call cancelled'));
     };
     if (signal?.aborted) abort();

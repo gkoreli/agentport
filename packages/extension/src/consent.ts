@@ -3,8 +3,7 @@
  *
  * Opened by the service worker via `chrome.windows.create` for two questions:
  * a connection request (pick an agent, review the tools, Approve/Decline) and
- * a per-call approval when notifications are unavailable or were clicked
- * through for detail. A site can neither draw this window nor read it nor
+ * every per-call approval. A site can neither draw this window nor read it nor
  * click into it; the origin it displays is Chrome's own view of the asking
  * frame (`port.sender`), never anything the page said about itself.
  *

@@ -152,12 +152,18 @@ export class McpBridge {
       if (!original) {
         return { content: [{ type: 'text', text: `unknown tool ${request.params.name}` }], isError: true };
       }
+      const startedAt = Date.now();
+      this.#log.info('MCP tool call started', { sessionId, data: { tool: original } });
       try {
         const result = await registration.invoke(
           original,
           (request.params.arguments ?? {}) as Record<string, unknown>,
           extra.signal,
         );
+        this.#log.info('MCP tool call completed', {
+          sessionId,
+          data: { tool: original, durationMs: Date.now() - startedAt },
+        });
         return {
           content: [{ type: 'text', text: JSON.stringify(result ?? null) }],
           structuredContent: result && typeof result === 'object' && !Array.isArray(result)
@@ -167,7 +173,11 @@ export class McpBridge {
         };
       } catch (err) {
         const error = toErr(err);
-        this.#log.warn('site tool call failed through MCP', { sessionId, err, data: { tool: original } });
+        this.#log.warn(extra.signal.aborted ? 'MCP tool call cancelled' : 'MCP tool call failed', {
+          sessionId,
+          err,
+          data: { tool: original, durationMs: Date.now() - startedAt },
+        });
         return { content: [{ type: 'text', text: error.message }], isError: true };
       }
     });

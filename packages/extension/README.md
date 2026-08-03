@@ -91,10 +91,10 @@ Rules the two boundaries enforce, mirroring the invariants in `AGENTS.md`:
    (ADR-009). A connection request opens a popup **window** on the extension
    origin (`chrome.windows.create`) showing the origin as Chrome reported it
    (`port.sender`, labelled verified), the agent picker with online/offline,
-   and the requested tools with gated ones marked. Per-call approvals go to a
-   `chrome.notifications` notification with Approve/Decline buttons, falling
-   back to the same window when notifications are unavailable (clicking the
-   notification body also opens the window for full arguments). A site can
+   and the requested tools with gated ones marked. Every per-call approval
+   opens the same extension-origin window with full arguments. OS notifications
+   are deliberately not used because a platform may suppress one after Chrome
+   reports successful creation, leaving the request unanswered. A site can
    cover any in-page overlay and imitate any in-page dialog; it cannot draw,
    read, or click a browser window it does not own. The in-page widget shows
    status only — it never renders an approve control. Escape and a closed
@@ -197,9 +197,6 @@ keeps its ref and never notices.
   counts WebSocket traffic as activity. A long silent session can still be
   evicted; the alarm redials and the resume records re-attach on the next
   wake, so the session survives the gap rather than the socket.
-- **Notification buttons are platform-dependent.** Some OSes collapse
-  notification actions; clicking the notification body opens the consent
-  window as the fallback decision surface.
 - **`isAvailable()` answers from local state**, not from the relay: dialing the
   relay to answer a page's probe would let any site force a socket and learn
   that the user has agents before consenting to anything.

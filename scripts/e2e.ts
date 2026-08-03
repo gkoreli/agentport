@@ -95,7 +95,8 @@ console.log('0. secure channel state');
 
 console.log('\n0b. official MCP transport');
 {
-  const bridge = new McpBridge({ sink: () => {} });
+  const bridgeLogs: LogEntry[] = [];
+  const bridge = new McpBridge({ sink: (entry) => bridgeLogs.push(entry) });
   await bridge.start();
   const cancelled = new Deferred<boolean>();
   const registration = bridge.register(
@@ -129,6 +130,14 @@ console.log('\n0b. official MCP transport');
     new Promise<false>((resolve) => setTimeout(() => resolve(false), 500)),
   ]);
   check('MCP timeout aborts the exact in-flight surface call', didCancel === true);
+  // The invoker observes abort before its rejected promise returns through the
+  // MCP request handler's catch block; one event-loop turn joins that causal
+  // chain before inspecting the emitted terminal span.
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  check('MCP logs completed tool spans without arguments', bridgeLogs.some((entry) =>
+    entry.message === 'MCP tool call completed' && entry.data?.['tool'] === 'page.read'));
+  check('MCP logs cancelled tool spans without arguments', bridgeLogs.some((entry) =>
+    entry.message === 'MCP tool call cancelled' && entry.data?.['tool'] === 'page.slow'));
   await mcp.close();
   await bridge.stop();
 }

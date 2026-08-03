@@ -17,8 +17,8 @@
  *
  * Three ADR-009 properties are enforced here and nowhere weaker:
  *
- *   - consent and approvals render in extension chrome (a popup window on the
- *     extension origin, or a browser notification), never in page DOM;
+ *   - consent and approvals render in an extension-origin popup window,
+ *     never in page DOM or an OS notification that may be silently hidden;
  *   - what a page learns about the agent is a generic label plus a per-origin
  *     alias — real names, pubkeys and cert contents stay in extension chrome;
  *   - the page's session survives navigation and worker eviction without any
@@ -306,15 +306,15 @@ function post(port: chrome.runtime.Port, message: WorkerToContent): void {
 //
 // The question and the answer never touch page DOM. A pending question is a
 // payload the consent window fetches by id and answers over its own port; a
-// per-call approval goes to a browser notification first and falls back to
-// the same window when notifications are unavailable or unclickable.
+// Every per-call approval uses the same extension-origin window. OS
+// notifications are not a decision surface: platforms may suppress them
+// after Chrome reports successful creation, leaving the tool call unanswered.
 
 interface PendingUi {
   id: string;
   payload: ConsentPayload;
   deferred: Deferred<unknown>;
   windowId?: number;
-  notificationId?: string;
 }
 
 const pendingUi = new Map<string, PendingUi>();
@@ -326,15 +326,6 @@ function settleUi(id: string, value: unknown): void {
   pending.deferred.resolve(value);
   if (pending.windowId !== undefined) {
     observe(chrome.windows.remove(pending.windowId), 'failed to close consent window', { data: { pendingId: id } });
-  }
-  if (pending.notificationId !== undefined) {
-    chrome.notifications?.clear(pending.notificationId, () => {
-      if (chrome.runtime.lastError) {
-        log.debug('failed to clear approval notification', {
-          data: { pendingId: id, message: chrome.runtime.lastError.message },
-        });
-      }
-    });
   }
 }
 
@@ -390,8 +381,7 @@ function askPair(agent: { name: string; runtime: string; location?: string }): P
   return pending.deferred.promise.then((value) => value === true);
 }
 
-/** A per-call approval. Notification with buttons when possible; the consent
- *  window otherwise. Never the page. */
+/** A per-call approval in extension chrome. Never the page or OS chrome. */
 function askApproval(
   origin: string,
   who: { name: string },
@@ -409,86 +399,10 @@ function askApproval(
     deferred: new Deferred<unknown>(),
   };
   pendingUi.set(pending.id, pending);
-
-  if (chrome.notifications?.create) {
-    const notificationId = `agentport_${pending.id}`;
-    pending.notificationId = notificationId;
-    let detail = prompt.summary;
-    if (prompt.call) {
-      let args = '';
-      try {
-        args = JSON.stringify(prompt.call.arguments);
-      } catch {
-        // Arguments are display-only here; omitting an unserializable preview
-        // is safe because the approval summary and tool name remain visible.
-        args = '';
-      }
-      detail = `${prompt.summary}\n${prompt.call.name}${args && args !== '{}' ? ` ${args.slice(0, 300)}` : ''}`;
-    }
-    chrome.notifications.create(
-      notificationId,
-      {
-        type: 'basic',
-        iconUrl: 'icon128.png',
-        title: `${origin} — ${who.name}`,
-        message: detail,
-        buttons: [{ title: 'Approve' }, { title: 'Decline' }],
-        requireInteraction: true,
-        priority: 2,
-      },
-      () => {
-        if (chrome.runtime.lastError) {
-          log.warn('approval notification failed; opening consent window', {
-            data: { message: chrome.runtime.lastError.message, pendingId: pending.id },
-          });
-          pending.notificationId = undefined;
-          observe(openUiWindow(pending), 'approval consent fallback failed', { data: { pendingId: pending.id } });
-        }
-      },
-    );
-  } else {
-    observe(openUiWindow(pending), 'approval consent window flow failed', { data: { pendingId: pending.id } });
-  }
+  observe(openUiWindow(pending), 'approval consent window flow failed', { data: { pendingId: pending.id } });
 
   return pending.deferred.promise.then((value) => value === true);
 }
-
-chrome.notifications?.onButtonClicked.addListener((notificationId, buttonIndex) => {
-  for (const pending of pendingUi.values()) {
-    if (pending.notificationId !== notificationId) continue;
-    settleUi(pending.id, buttonIndex === 0);
-    return;
-  }
-});
-
-// Clicking the notification body opens the full card — some platforms hide
-// notification buttons, and the window shows the arguments the one-liner cut.
-chrome.notifications?.onClicked.addListener((notificationId) => {
-  for (const pending of pendingUi.values()) {
-    if (pending.notificationId !== notificationId) continue;
-    pending.notificationId = undefined;
-    chrome.notifications?.clear(notificationId, () => {
-      if (chrome.runtime.lastError) {
-        log.debug('failed to clear clicked approval notification', {
-          data: { notificationId, message: chrome.runtime.lastError.message },
-        });
-      }
-    });
-    observe(openUiWindow(pending), 'clicked approval window flow failed', { data: { pendingId: pending.id } });
-    return;
-  }
-});
-
-chrome.notifications?.onClosed.addListener((notificationId, byUser) => {
-  for (const pending of pendingUi.values()) {
-    if (pending.notificationId !== notificationId) continue;
-    // Dismissed by the user = declined. Closed by the system (not byUser) is
-    // not an answer; keep waiting — the window fallback is one click away on
-    // the next notification, and the daemon's own timeout still bounds this.
-    if (byUser) settleUi(pending.id, false);
-    return;
-  }
-});
 
 function handleConsent(port: chrome.runtime.Port): void {
   const reply = (message: WorkerToConsent) => {
@@ -606,8 +520,8 @@ async function openSession(
     tools,
     alwaysAsk: request.alwaysAsk,
     ttlMs: request.ttlMs,
-    // Approvals go to extension chrome, so a navigating page no longer costs
-    // an automatic denial — the notification outlives the document.
+    // Approvals go to extension chrome. The decision window is independent of
+    // page DOM and closing it without answering fails shut.
     decide: (prompt) => askApproval(origin, who, prompt),
   });
 

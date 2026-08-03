@@ -24,11 +24,13 @@ console.log('extension boundary check passed');
 const rootPackage = JSON.parse(await readFile(join(here, '../../package.json'), 'utf8')) as { version: string };
 const inpage = await readFile(join(here, 'dist/inpage.js'), 'utf8');
 const content = await readFile(join(here, 'dist/content.js'), 'utf8');
+const serviceWorker = await readFile(join(here, 'dist/sw.js'), 'utf8');
 const overlay = await readFile(join(here, 'dist/overlay.js'), 'utf8');
 const overlayHtml = await readFile(join(here, 'dist/overlay.html'), 'utf8');
 const staticManifest = JSON.parse(await readFile(join(here, 'static/manifest.json'), 'utf8')) as {
   version: string;
   _build_note?: string;
+  permissions?: string[];
 };
 const distManifestText = await readFile(join(here, 'dist/manifest.json'), 'utf8');
 const distManifest = JSON.parse(distManifestText) as { version: string; _build_note?: string };
@@ -46,5 +48,8 @@ assert.doesNotMatch(content, /createChatStore|ui-chat/, 'content script bundles 
 assert.match(overlay, /createChatStore/, 'extension iframe does not bundle the shared chat store');
 assert.match(overlay, /ui-chat/, 'extension iframe does not bundle the shared Chat components');
 assert.match(overlayHtml, /overlay\.js/, 'extension iframe page does not load its renderer');
+assert.ok(!staticManifest.permissions?.includes('notifications'), 'approval flow must not depend on OS notifications');
+assert.doesNotMatch(serviceWorker, /chrome\.notifications/, 'service worker still contains the unreliable notification approval path');
+assert.match(serviceWorker, /chrome\.windows\.create/, 'service worker does not open the extension-owned approval window');
 
 console.log(`extension build stamp check passed (${rootPackage.version})`);
