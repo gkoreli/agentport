@@ -41,7 +41,7 @@ const tools: SiteTool[] = [
   },
 ];
 
-const relay = new Relay({ port: 0, log: (m) => console.log(`[relay] ${m}`) });
+const relay = new Relay({ port: 0 });
 await relay.listening();
 const relayUrl = `ws://127.0.0.1:${relay.port}`;
 
@@ -67,9 +67,7 @@ const daemon = new AgentDaemon({
         .filter(Boolean),
       cwd: process.env.AGENTPORT_AGENT_CWD ?? process.cwd(),
       bridge,
-      log: (m) => console.log(`[acp] ${m}`),
     }),
-  log: (m) => console.log(`[agent] ${m}`),
   onPairingCode: (code) => pairingCode.resolve(code),
 });
 

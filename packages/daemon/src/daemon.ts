@@ -6,6 +6,7 @@ import {
   SEALED_TYPES,
   answerProofBinding,
   authChallengeMessage,
+  createLogger,
   decodeFrame,
   deriveSealChannel,
   encodeFrame,
@@ -20,6 +21,7 @@ import {
   signEpk,
   resumeProofBinding,
   timingSafeEqualStr,
+  toErr,
   toHex,
   verifyEpk,
   type AgentCert,
@@ -27,6 +29,8 @@ import {
   type Frame,
   type HistoryEntry,
   type KeyPair,
+  type Logger,
+  type LogSink,
   type SessionFrame,
   type SealChannel,
   type SurfaceDescriptor,
@@ -102,7 +106,7 @@ export interface DaemonOptions {
    * reasoning: the requesting page must not be the one saying yes.
    */
   onLocalApproval?: (summary: string, call?: { name: string; arguments: Record<string, unknown> }) => Promise<boolean>;
-  log?: (message: string) => void;
+  sink?: LogSink;
 }
 
 type DaemonEvents = {
@@ -118,7 +122,7 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
   #sessions = new Map<string, SessionState>();
   /** Sealing keypairs minted at connect-offer time, keyed by the client epk. */
   #offerSeals = new Map<string, KeyPair>();
-  #log: (message: string) => void;
+  #log: Logger;
   #readyDeferred = new Deferred<{ bound: boolean }>();
   #stopped = false;
   #retryMs = 1000;
@@ -127,7 +131,7 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
   constructor(options: DaemonOptions) {
     super();
     this.#options = options;
-    this.#log = options.log ?? (() => {});
+    this.#log = createLogger('daemon', { sink: options.sink });
   }
 
   get identity(): AgentIdentity {
@@ -158,10 +162,16 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
       try {
         frame = decodeFrame(data.toString());
       } catch (err) {
-        this.#log(`dropped undecodable frame: ${err instanceof Error ? err.message : String(err)}`);
+        this.#log.warn('dropped undecodable frame', { err, data: { relayUrl: this.#options.relayUrl } });
         return;
       }
-      void this.#onFrame(frame);
+      void this.#onFrame(frame).catch((err: unknown) => {
+        this.#log.error('failed to handle relay frame', {
+          err,
+          ...('s' in frame ? { sessionId: frame.s } : {}),
+          data: { frameType: frame.t, relayUrl: this.#options.relayUrl },
+        });
+      });
     });
 
     // Half-open sockets (NAT timeouts, silent relay death) look connected
@@ -176,12 +186,14 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
       const cutoff = Date.now() - DETACH_GRACE_MS;
       for (const session of [...this.#sessions.values()]) {
         if (session.detachedAt !== undefined && session.detachedAt < cutoff) {
-          void this.#closeSession(session, 'client_never_returned', false);
+          void this.#closeSession(session, 'client_never_returned', false).catch((err: unknown) => {
+            this.#log.error('failed to expire detached session', { sessionId: session.id, err });
+          });
         }
       }
       if (socket.readyState !== WebSocket.OPEN) return;
       if (!alive) {
-        this.#log('heartbeat lost — terminating socket to force a redial');
+        this.#log.warn('heartbeat lost; terminating socket to force a redial');
         socket.terminate();
         return;
       }
@@ -202,10 +214,13 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
       if (this.#stopped) return;
       const delay = this.#retryMs;
       this.#retryMs = Math.min(this.#retryMs * 2, 30_000);
-      this.#log(`relay connection lost — redialing in ${Math.round(delay / 1000)}s`);
+      this.#log.warn('relay connection lost; scheduling redial', {
+        data: { delayMs: delay, relayUrl: this.#options.relayUrl },
+      });
       setTimeout(() => this.#dial(), delay);
     });
     socket.on('error', (err) => {
+      this.#log.error('relay websocket failed', { err, data: { relayUrl: this.#options.relayUrl } });
       // Before the first ready this is fatal to the caller; afterwards the
       // close handler owns recovery.
       this.#readyDeferred.reject(err);
@@ -250,7 +265,7 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
 
   async #onFrame(frame: Frame, openedFromSeal = false): Promise<void> {
     if (SEALED_TYPES.has(frame.t) && !openedFromSeal) {
-      this.#log(`dropped plaintext session content (${frame.t})`);
+      this.#log.warn('dropped plaintext session content', { sessionId: 's' in frame ? frame.s : undefined, data: { type: frame.t } });
       return;
     }
     switch (frame.t) {
@@ -302,7 +317,15 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
         const mine = generateSealKeyPair();
         this.#offerSeals.set(frame.epk, mine);
         verify = fingerprintWords(frame.epk, mine.publicKey);
-        const accepted = (await this.#options.onConnectOffer?.({ ...frame, verify })) ?? false;
+        let accepted = false;
+        try {
+          accepted = (await this.#options.onConnectOffer?.({ ...frame, verify })) ?? false;
+        } catch (err) {
+          this.#log.error('connect consent handler failed; declining request', {
+            err,
+            data: { code: frame.code, surface: frame.surface.name },
+          });
+        }
         if (!accepted) this.#offerSeals.delete(frame.epk);
         this.#send(
           accepted
@@ -325,7 +348,10 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
         const session = this.#sessions.get(frame.s);
         if (session && session.detachedAt === undefined) {
           session.detachedAt = Date.now();
-          this.#log(`session ${frame.s} detached; holding ${DETACH_GRACE_MS / 60000}min for a resume`);
+          this.#log.info('session detached; holding it for resume', {
+            sessionId: frame.s,
+            data: { graceMs: DETACH_GRACE_MS },
+          });
         }
         return;
       }
@@ -336,20 +362,23 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
       case 'enc': {
         const session = this.#sessions.get(frame.s);
         if (!session?.sealChannel) {
-          this.#log(`sealed frame for ${frame.s} but no channel — dropping`);
+          this.#log.warn('dropping sealed frame because the session has no channel', { sessionId: frame.s });
           return;
         }
         let inner: SessionFrame;
         try {
           inner = openSealed(session.sealChannel.receive, frame);
         } catch (err) {
-          this.#log(`failed to open sealed frame on ${frame.s}: ${err instanceof Error ? err.message : String(err)}`);
+          this.#log.warn('failed to open sealed frame', { sessionId: frame.s, err });
           return;
         }
         // The relay can no longer see inner types, so the origination check
         // the relay used to make lives here now.
         if (!CLIENT_SEALABLE.has(inner.t)) {
-          this.#log(`client sealed a frame it may not originate (${inner.t}) — dropping`);
+          this.#log.warn('client sealed a frame it may not originate; dropping it', {
+            sessionId: frame.s,
+            data: { frameType: inner.t },
+          });
           return;
         }
         return this.#onFrame(inner, true);
@@ -369,7 +398,7 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
         // the user sees in their agent, on their disk. Ours is only a
         // fallback for runtimes that persist nothing.
         const replayed = await session.runtime.replayHistory?.().catch((err: unknown) => {
-          this.#log(`history replay failed: ${err instanceof Error ? err.message : String(err)}`);
+          this.#log.warn('history replay failed; using observed transcript', { sessionId: frame.s, err });
           return null;
         });
         this.#sendSession(session, { t: 'history', s: frame.s, entries: replayed ?? session.transcript });
@@ -402,7 +431,7 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
       }
 
       case 'error':
-        this.#log(`relay error ${frame.code}: ${frame.message}`);
+        this.#log.error('relay rejected a frame', { data: { code: frame.code, message: frame.message } });
         return;
 
       default:
@@ -485,7 +514,7 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
         }),
       ),
     });
-    this.#log(`session ${frame.s} resumed (${missed} frame(s) missed while detached)`);
+    this.#log.info('session resumed', { sessionId: frame.s, data: { missedFrames: missed } });
   }
 
   async #onSessionOpen(frame: Extract<Frame, { t: 'session.open' }>): Promise<void> {
@@ -571,7 +600,26 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     };
     this.#sessions.set(frame.s, session);
 
-    await runtime.openSession?.({ surface: session.surface, grant: session.grant, tools: session.tools });
+    try {
+      await runtime.openSession?.({ surface: session.surface, grant: session.grant, tools: session.tools });
+    } catch (err) {
+      this.#sessions.delete(frame.s);
+      try {
+        await runtime.closeSession?.();
+      } catch (closeErr) {
+        this.#log.error('runtime cleanup failed after session-open failure', {
+          sessionId: frame.s,
+          err: closeErr,
+        });
+      }
+      this.#log.error('runtime failed to open session', {
+        sessionId: frame.s,
+        err,
+        data: { surface: frame.surface.name, origin: frame.surface.origin },
+      });
+      this.#send({ t: 'session.denied', s: frame.s, reason: 'runtime_failed' });
+      return;
+    }
 
     this.#send({
       t: 'session.opened',
@@ -582,7 +630,10 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
       ...myEpk,
     });
     this.emit('session', frame.s);
-    this.#log(`session ${frame.s} opened by ${frame.surface.name} (${frame.surface.origin}) with ${session.tools.length} tool(s)`);
+    this.#log.info('session opened', {
+      sessionId: frame.s,
+      data: { surface: frame.surface.name, origin: frame.surface.origin, toolCount: session.tools.length },
+    });
   }
 
   async #onPrompt(frame: Extract<Frame, { t: 'prompt' }>): Promise<void> {
@@ -621,7 +672,7 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
           record('tool', name);
           return result;
         } catch (err) {
-          record('tool', `${name} — ${err instanceof Error ? err.message : String(err)}`);
+          record('tool', `${name} — ${toErr(err).message}`);
           throw err;
         }
       },
@@ -641,12 +692,13 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
         stopReason: controller.signal.aborted ? 'cancelled' : 'end_turn',
       });
     } catch (err) {
+      this.#log.error('runtime prompt failed', { sessionId: session.id, err, data: { promptId: frame.id } });
       this.#sendSession(session, {
         t: 'done',
         s: session.id,
         promptId: frame.id,
         stopReason: 'error',
-        error: err instanceof Error ? err.message : String(err),
+        error: toErr(err).message,
       });
     } finally {
       session.prompts.delete(frame.id);
@@ -699,9 +751,14 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     for (const controller of session.prompts.values()) controller.abort();
     for (const pending of session.toolCalls.values()) pending.reject(new Error('session closed'));
     for (const pending of session.approvals.values()) pending.resolve(false);
-    await session.runtime.closeSession?.();
-    this.#sessions.delete(session.id);
-    if (notify) this.#send({ t: 'session.close', s: session.id, reason });
-    this.#log(`session ${session.id} closed (${reason})`);
+    try {
+      await session.runtime.closeSession?.();
+    } catch (err) {
+      this.#log.error('runtime failed to close session', { sessionId: session.id, err, data: { reason } });
+    } finally {
+      this.#sessions.delete(session.id);
+      if (notify) this.#send({ t: 'session.close', s: session.id, reason });
+      this.#log.info('session closed', { sessionId: session.id, data: { reason } });
+    }
   }
 }

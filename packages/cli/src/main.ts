@@ -15,6 +15,9 @@
 import { hostname } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
+import { createLogger } from '@agentport/protocol';
+
+const log = createLogger('cli');
 
 const DEPLOYED_RELAY = 'wss://agentport.gogakoreli.workers.dev/relay';
 
@@ -60,13 +63,16 @@ StandardError=journal
 WantedBy=multi-user.target
 `;
   if (process.platform !== 'linux') {
-    console.error('service install is Linux/systemd only; run `npx agentport` directly instead');
+    log.error('service install is only supported on Linux/systemd');
     process.exit(1);
   }
   try {
     writeFileSync('/etc/systemd/system/agentport.service', unit);
-  } catch {
-    console.error('could not write /etc/systemd/system/agentport.service — run with sudo');
+  } catch (err) {
+    log.error('could not install systemd service; run with sudo', {
+      err,
+      data: { path: '/etc/systemd/system/agentport.service' },
+    });
     process.exit(1);
   }
   for (const args of [['daemon-reload'], ['enable', '--now', 'agentport']]) {

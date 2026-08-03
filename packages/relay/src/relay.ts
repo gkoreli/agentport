@@ -1,11 +1,18 @@
 import { WebSocketServer, type WebSocket } from 'ws';
-import { encodeFrame, randomId, type Frame } from '@agentport/protocol';
+import {
+  createLogger,
+  encodeFrame,
+  randomId,
+  type Frame,
+  type Logger,
+  type LogSink,
+} from '@agentport/protocol';
 import { RelayCore, type Peer } from './core.js';
 
 export interface RelayOptions {
   port?: number;
   host?: string;
-  log?: (message: string) => void;
+  sink?: LogSink;
 }
 
 /**
@@ -18,14 +25,15 @@ export class Relay {
 
   #wss: WebSocketServer;
   #peers = new Map<WebSocket, Peer>();
+  #log: Logger;
 
   constructor(options: RelayOptions = {}) {
-    this.core = new RelayCore({
-      log: options.log ?? (() => {}),
-    });
+    this.#log = createLogger('relay.socket', { sink: options.sink });
+    this.core = new RelayCore({ sink: options.sink });
 
     this.#wss = new WebSocketServer({ port: options.port ?? 8787, host: options.host ?? '127.0.0.1' });
     this.#wss.on('connection', (socket) => this.#onConnection(socket));
+    this.#wss.on('error', (err) => this.#log.error('websocket server failed', { err }));
   }
 
   get port(): number {
@@ -51,7 +59,12 @@ export class Relay {
   #onConnection(socket: WebSocket): void {
     const peer: Peer = {
       send: (frame: Frame) => {
-        if (socket.readyState === socket.OPEN) socket.send(encodeFrame(frame));
+        if (socket.readyState !== socket.OPEN) return;
+        try {
+          socket.send(encodeFrame(frame));
+        } catch (err) {
+          this.#log.error('websocket send failed', { err, data: { frameType: frame.t } });
+        }
       },
       close: () => socket.close(),
     };
@@ -64,7 +77,10 @@ export class Relay {
       this.core.close(peer);
     };
     socket.on('close', done);
-    socket.on('error', done);
+    socket.on('error', (err) => {
+      this.#log.error('websocket peer failed', { err });
+      done();
+    });
   }
 }
 

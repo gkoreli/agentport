@@ -1,4 +1,4 @@
-import { encodeFrame, type Frame } from '@agentport/protocol';
+import { createLogger, encodeFrame, type Frame } from '@agentport/protocol';
 import { RelayCore, type Peer } from '@agentport/relay/core';
 
 /**
@@ -18,9 +18,10 @@ import { RelayCore, type Peer } from '@agentport/relay/core';
 export class RelayDurableObject implements DurableObject {
   #core: RelayCore;
   #peers = new Map<WebSocket, Peer>();
+  #log = createLogger('relay.worker');
 
   constructor(_state: DurableObjectState) {
-    this.#core = new RelayCore({ log: (message) => console.log(`[relay] ${message}`) });
+    this.#core = new RelayCore();
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -38,8 +39,9 @@ export class RelayDurableObject implements DurableObject {
       send: (frame: Frame) => {
         try {
           server.send(encodeFrame(frame));
-        } catch {
+        } catch (err) {
           // socket already gone; close() will clean up
+          this.#log.debug('could not send to a closed websocket', { err, data: { frameType: frame.t } });
         }
       },
       close: () => server.close(1000, 'closed by relay'),

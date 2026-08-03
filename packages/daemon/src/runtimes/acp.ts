@@ -12,7 +12,7 @@ import {
   type McpServer,
   type SessionNotification,
 } from '@agentclientprotocol/sdk';
-import type { HistoryEntry } from '@agentport/protocol';
+import { createLogger, type HistoryEntry, type Logger, type LogSink } from '@agentport/protocol';
 import type { AgentRuntime, TurnContext } from '../runtime.js';
 import { McpBridge, mcpToolName } from '../mcp-bridge.js';
 
@@ -42,7 +42,7 @@ export interface AcpRuntimeOptions {
   cwd?: string;
   env?: Record<string, string>;
   bridge: McpBridge;
-  log?: (message: string) => void;
+  sink?: LogSink;
 }
 
 /**
@@ -67,7 +67,7 @@ export class AcpRuntime implements AgentRuntime {
   #bridgeSessionId: string | undefined;
   /** Set for the duration of a turn so MCP callbacks can reach the surface. */
   #turn: TurnContext | undefined;
-  #log: (message: string) => void;
+  #log: Logger;
   /** Whether the agent keeps its own session store we can replay from. */
   #supportsLoad = false;
   /** Tool calls the agent has announced, so updates can be labelled. */
@@ -80,7 +80,7 @@ export class AcpRuntime implements AgentRuntime {
   constructor(options: AcpRuntimeOptions) {
     this.#options = options;
     this.name = `acp:${options.command}`;
-    this.#log = options.log ?? (() => {});
+    this.#log = createLogger('daemon.runtime.acp', { sink: options.sink });
   }
 
   async openSession(context: {
@@ -94,7 +94,10 @@ export class AcpRuntime implements AgentRuntime {
       cwd: this.#options.cwd ?? process.cwd(),
     });
     this.#child = child;
-    child.stderr.on('data', (chunk: Buffer) => this.#log(`agent stderr: ${chunk.toString().trimEnd()}`));
+    child.stderr.on('data', (chunk: Buffer) => {
+      this.#log.warn('agent wrote to stderr', { data: { output: chunk.toString().trimEnd() } });
+    });
+    child.once('error', (err) => this.#log.error('agent process failed', { err, data: { command: this.#options.command } }));
 
     const stream = ndJsonStream(
       Writable.toWeb(child.stdin) as WritableStream<Uint8Array>,
@@ -149,14 +152,12 @@ export class AcpRuntime implements AgentRuntime {
           mcpServers: this.#mcpServers,
         });
         this.#sessionId = previous;
-        this.#log(
-          `acp session ${previous} resumed for ${context.surface.name}; lent ${context.tools.length} tool(s)`,
-        );
+        this.#log.info('ACP session resumed', {
+          data: { acpSessionId: previous, surface: context.surface.name, toolCount: context.tools.length },
+        });
         return;
       } catch (err) {
-        this.#log(
-          `loadSession(${previous}) failed, starting fresh: ${err instanceof Error ? err.message : String(err)}`,
-        );
+        this.#log.warn('ACP session load failed; starting fresh', { err, data: { acpSessionId: previous } });
         sessionRegistry.delete(key);
       }
     }
@@ -167,9 +168,9 @@ export class AcpRuntime implements AgentRuntime {
     });
     this.#sessionId = session.sessionId;
     sessionRegistry.set(key, session.sessionId);
-    this.#log(
-      `acp session ${session.sessionId} ready; lent ${context.tools.length} tool(s) from ${context.surface.name}`,
-    );
+    this.#log.info('ACP session ready', {
+      data: { acpSessionId: session.sessionId, surface: context.surface.name, toolCount: context.tools.length },
+    });
   }
 
   async prompt(text: string, ctx: TurnContext): Promise<void> {
@@ -178,7 +179,11 @@ export class AcpRuntime implements AgentRuntime {
     if (!connection || !sessionId) throw new Error('ACP session was never opened');
 
     this.#turn = ctx;
-    const onAbort = () => void connection.cancel({ sessionId });
+    const onAbort = () => {
+      void (async () => connection.cancel({ sessionId }))().catch((err: unknown) => {
+        this.#log.error('ACP cancellation failed', { err, data: { acpSessionId: sessionId } });
+      });
+    };
     ctx.signal.addEventListener('abort', onAbort);
 
     // Tell the agent where it is. It has no other way to know.
@@ -222,7 +227,10 @@ export class AcpRuntime implements AgentRuntime {
       });
       return collected;
     } catch (err) {
-      this.#log(`loadSession failed, falling back to observed history: ${err instanceof Error ? err.message : String(err)}`);
+      this.#log.warn('ACP history load failed; using observed history', {
+        err,
+        data: { acpSessionId: sessionId },
+      });
       return null;
     } finally {
       this.#replay = undefined;
@@ -318,7 +326,7 @@ export class AcpRuntime implements AgentRuntime {
 }
 
 /** Claude Code over ACP, via the official Claude Agent SDK adapter. */
-export function claudeCodeRuntime(bridge: McpBridge, log?: (message: string) => void): AcpRuntime {
+export function claudeCodeRuntime(bridge: McpBridge, sink?: LogSink): AcpRuntime {
   return new AcpRuntime({
     command: process.execPath,
     args: [
@@ -328,6 +336,6 @@ export function claudeCodeRuntime(bridge: McpBridge, log?: (message: string) => 
     ],
     cwd: process.env.AGENTPORT_AGENT_CWD ?? process.cwd(),
     bridge,
-    log,
+    sink,
   });
 }

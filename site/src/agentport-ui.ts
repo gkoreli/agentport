@@ -28,8 +28,11 @@ import { component, computed, html, onCleanup, signal, when } from '@nisli/core'
 import AgentPortConnect from './connect.js';
 import { aguiStream, type AguiAdapter, type AguiEvent } from '@agentport/agui';
 import type { AgentSession, SessionEvents, SiteTool } from '@agentport/client';
-import type { HistoryEntry } from '@agentport/protocol';
+import { toErr, type HistoryEntry } from '@agentport/protocol';
 import { Chat, createChatStore, type ChatController } from '../../src/nisli-ui/ui/chat/index.js';
+import { siteLogger } from './observe.js';
+
+const log = siteLogger.child('panel');
 
 export type { SiteTool };
 
@@ -293,8 +296,8 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
     } catch (err) {
       resumedSession?.close('resume_failed');
       if (attempt !== attachmentEpoch) return;
-      console.error('[agentport] resume failed', err);
-      notice.value = `could not reconnect: ${(err as Error).message}`;
+      log.error('resume failed', { err, data: { surface: config.name } });
+      notice.value = `could not reconnect: ${toErr(err).message}`;
     }
   };
   void restore();
@@ -324,7 +327,7 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
         // it in a hidden element, which is how a thrown TypeError looked
         // exactly like the button doing nothing.
         if (/cancelled/i.test(err.message)) return;
-        console.error('[agentport] connect failed', err);
+        log.error('connect failed', { err, data: { surface: config.name } });
         notice.value = `connect failed: ${err.message}`;
       });
   };
@@ -341,7 +344,9 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
     chat.addUserMessage(prompt);
     busy.value = true;
     // The AG-UI adapter owns run lifecycle events, including failures.
-    adapter.run(prompt).catch((err: Error) => console.error('[agentport] prompt failed', err));
+    adapter.run(prompt).catch((err: Error) => {
+      log.error('prompt failed', { sessionId: session?.id, err, data: { surface: config.name } });
+    });
     return true;
   };
 

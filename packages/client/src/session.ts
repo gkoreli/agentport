@@ -1,10 +1,13 @@
 import {
   Deferred,
   Emitter,
+  createLogger,
+  toErr,
   type ApprovalRequest,
   type CapabilityGrant,
   type Frame,
   type HistoryEntry,
+  type Logger,
   type SessionFrame,
   type SurfaceDescriptor,
   type ToolDefinition,
@@ -64,6 +67,7 @@ export class AgentSession extends Emitter<SessionEvents> {
   #tools: Map<string, SiteTool>;
   #alwaysAsk: Set<string>;
   #decide: ApprovalDecider;
+  #log: Logger;
   #send: (frame: SessionFrame) => void;
   #transcripts = new Map<string, { text: string; deferred: Deferred<string> }>();
   #historyWaiters: Deferred<HistoryEntry[]>[] = [];
@@ -76,6 +80,7 @@ export class AgentSession extends Emitter<SessionEvents> {
     info: SessionInfo;
     tools: SiteTool[];
     decide: ApprovalDecider;
+    logger?: Logger;
     send: (frame: SessionFrame) => void;
   }) {
     super();
@@ -86,6 +91,7 @@ export class AgentSession extends Emitter<SessionEvents> {
     this.#tools = new Map(init.tools.map((tool) => [tool.name, tool]));
     this.#alwaysAsk = new Set(init.grant.alwaysAsk);
     this.#decide = init.decide;
+    this.#log = init.logger ?? createLogger('client.session');
     this.#send = init.send;
   }
 
@@ -187,7 +193,19 @@ export class AgentSession extends Emitter<SessionEvents> {
         summary: `Run ${frame.name}`,
         call: { name: frame.name, arguments: frame.arguments },
       };
-      const granted = await this.#decide(prompt);
+      let granted = false;
+      try {
+        granted = await this.#decide(prompt);
+      } catch (err) {
+        this.#log.error('tool approval handler failed; declining call', {
+          sessionId: this.id,
+          err,
+          data: { tool: frame.name },
+        });
+        this.#send({ t: 'tool.result', s: this.id, id: frame.id, ok: false, error: 'approval failed' });
+        this.emit('tool', { name: frame.name, arguments: frame.arguments, ok: false, error: 'approval failed' });
+        return;
+      }
       this.emit('approval', { ...prompt, granted });
       if (!granted) {
         this.#send({ t: 'tool.result', s: this.id, id: frame.id, ok: false, error: 'declined by user' });
@@ -201,7 +219,12 @@ export class AgentSession extends Emitter<SessionEvents> {
       this.#send({ t: 'tool.result', s: this.id, id: frame.id, ok: true, result });
       this.emit('tool', { name: frame.name, arguments: frame.arguments, ok: true, result });
     } catch (err) {
-      const error = err instanceof Error ? err.message : String(err);
+      const error = toErr(err).message;
+      this.#log.error('site tool handler failed', {
+        sessionId: this.id,
+        err,
+        data: { tool: frame.name },
+      });
       this.#send({ t: 'tool.result', s: this.id, id: frame.id, ok: false, error });
       this.emit('tool', { name: frame.name, arguments: frame.arguments, ok: false, error });
     }
@@ -209,7 +232,16 @@ export class AgentSession extends Emitter<SessionEvents> {
 
   async #onApproval(frame: ApprovalRequest): Promise<void> {
     const prompt: ApprovalPrompt = { summary: frame.summary, call: frame.call };
-    const granted = await this.#decide(prompt);
+    let granted = false;
+    try {
+      granted = await this.#decide(prompt);
+    } catch (err) {
+      this.#log.error('approval handler failed; declining request', {
+        sessionId: this.id,
+        err,
+        data: { approvalId: frame.id },
+      });
+    }
     this.emit('approval', { ...prompt, granted });
     this.#send({ t: 'approval.response', s: this.id, id: frame.id, granted });
   }

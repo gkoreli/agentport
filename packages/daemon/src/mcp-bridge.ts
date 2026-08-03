@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { randomBytes } from 'node:crypto';
-import type { ToolDefinition } from '@agentport/protocol';
+import { createLogger, toErr, type Logger, type LogSink, type ToolDefinition } from '@agentport/protocol';
 
 /**
  * Serves a session's *site* tools to the agent runtime as an MCP server.
@@ -24,6 +24,10 @@ export function mcpToolName(name: string): string {
 
 export type ToolInvoker = (name: string, args: Record<string, unknown>) => Promise<unknown>;
 
+export interface McpBridgeOptions {
+  sink?: LogSink;
+}
+
 interface Registration {
   token: string;
   tools: ToolDefinition[];
@@ -43,10 +47,21 @@ export class McpBridge {
   #server: Server | undefined;
   #port = 0;
   #sessions = new Map<string, Registration>();
+  #log: Logger;
+
+  constructor(options: McpBridgeOptions = {}) {
+    this.#log = createLogger('daemon.mcp', { sink: options.sink });
+  }
 
   async start(): Promise<void> {
     if (this.#server) return;
-    const server = createServer((req, res) => void this.#handle(req, res));
+    const server = createServer((req, res) => {
+      void this.#handle(req, res).catch((err: unknown) => {
+        this.#log.error('MCP request handler failed', { err, data: { method: req.method, url: req.url } });
+        if (!res.headersSent) res.writeHead(500);
+        if (!res.writableEnded) res.end('internal error');
+      });
+    });
     this.#server = server;
     await new Promise<void>((resolve, reject) => {
       server.once('error', reject);
@@ -93,7 +108,8 @@ export class McpBridge {
     let message: JsonRpcRequest;
     try {
       message = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-    } catch {
+    } catch (err) {
+      this.#log.warn('rejected malformed MCP JSON', { err, sessionId });
       return void res.writeHead(400).end('bad json');
     }
 
@@ -143,8 +159,13 @@ export class McpBridge {
         } catch (err) {
           // Reported as a tool error, not a protocol error, so the model can
           // see the refusal and react to it.
+          this.#log.warn('site tool call failed through MCP', {
+            sessionId,
+            err,
+            data: { tool: original },
+          });
           return reply({
-            content: [{ type: 'text', text: err instanceof Error ? err.message : String(err) }],
+            content: [{ type: 'text', text: toErr(err).message }],
             isError: true,
           });
         }

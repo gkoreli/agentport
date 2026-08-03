@@ -15,10 +15,22 @@ import { loadIdentity, saveIdentity } from './identity.js';
 import { RUNTIMES, registerRuntime } from './runtime.js';
 import { McpBridge } from './mcp-bridge.js';
 import { AcpRuntime } from './runtimes/acp.js';
+import { createLogger } from '@agentport/protocol';
+
+const log = createLogger('daemon.connect-cli');
+
+process.on('uncaughtException', (err) => {
+  log.error('uncaught exception; terminating connect command', { err });
+  process.exit(1);
+});
+process.on('unhandledRejection', (err) => {
+  log.error('unhandled rejection; terminating connect command', { err });
+  process.exit(1);
+});
 
 const code = (process.argv[2] ?? '').trim().toUpperCase();
 if (!/^[A-Z2-9]{4}-[A-Z2-9]{4}$/.test(code)) {
-  console.error('usage: agentport connect <CODE>   (e.g. agentport connect UBFS-MV6M)');
+  log.error('invalid connect code; usage: agentport connect <CODE>', { data: { example: 'UBFS-MV6M' } });
   process.exit(1);
 }
 
@@ -41,16 +53,13 @@ for (const name of ['claude-code', 'acp']) {
           .filter(Boolean),
         cwd: process.env.AGENTPORT_AGENT_CWD ?? process.cwd(),
         bridge,
-        // Never silence the agent. If Claude fails to start, its stderr is
-        // the only thing that will tell you why.
-        log: (m) => console.error(dim(`  [agent] ${m}`)),
       }),
   );
 }
 
 const createRuntime = RUNTIMES[runtimeName];
 if (!createRuntime) {
-  console.error(`unknown runtime "${runtimeName}"; known: ${Object.keys(RUNTIMES).join(', ')}`);
+  log.error('unknown runtime', { data: { runtimeName, known: Object.keys(RUNTIMES) } });
   process.exit(1);
 }
 
@@ -85,7 +94,6 @@ const daemon = new AgentDaemon({
   relayUrl,
   identity,
   createRuntime,
-  log: (m) => console.error(dim(`  [agentport] ${m}`)),
 
   onConnectOffer: async ({ surface, grant, verify }) => {
     offerReceived = true;
@@ -148,6 +156,12 @@ setTimeout(() => {
 
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   process.on(signal, () => {
-    void daemon.stop().then(() => process.exit(0));
+    void daemon.stop().then(
+      () => process.exit(0),
+      (err: unknown) => {
+        log.error('graceful daemon shutdown failed', { err, data: { signal } });
+        process.exit(1);
+      },
+    );
   });
 }

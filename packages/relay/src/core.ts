@@ -1,11 +1,13 @@
 import {
   PROTOCOL_VERSION,
   authChallengeMessage,
+  createLogger,
   decodeFrame,
   isSessionFrame,
   mayOriginate,
   pairingCode,
   randomBytes,
+  toErr,
   toHex,
   verify,
   verifyCert,
@@ -15,6 +17,8 @@ import {
   type CapabilityGrant,
   type Frame,
   type Hex,
+  type Logger,
+  type LogSink,
   type Role,
   type SurfaceDescriptor,
 } from '@agentport/protocol';
@@ -85,7 +89,7 @@ interface PendingConnect {
 }
 
 export interface RelayCoreOptions {
-  log?: (message: string) => void;
+  sink?: LogSink;
   now?: () => number;
 }
 
@@ -105,11 +109,11 @@ export class RelayCore {
   #connects = new Map<string, PendingConnect>();
   /** Clients whose resume is in flight to a daemon, keyed by session id. */
   #pendingResumes = new Map<string, { conn: Conn; at: number }>();
-  #log: (message: string) => void;
+  #log: Logger;
   #now: () => number;
 
   constructor(options: RelayCoreOptions = {}) {
-    this.#log = options.log ?? (() => {});
+    this.#log = createLogger('relay.core', { sink: options.sink });
     this.#now = options.now ?? (() => Date.now());
   }
 
@@ -134,13 +138,18 @@ export class RelayCore {
     let frame: Frame;
     try {
       frame = decodeFrame(data);
-    } catch {
+    } catch (err) {
+      this.#log.warn('rejected undecodable frame', { err });
       return this.#fail(conn, 'bad_frame', 'could not parse frame');
     }
     try {
       this.#onFrame(conn, frame);
     } catch (err) {
-      this.#fail(conn, 'internal', err instanceof Error ? err.message : String(err));
+      this.#log.error('frame handler failed', {
+        err,
+        data: { frameType: frame.t, role: conn.role, peer: conn.pubkey?.slice(0, 8) },
+      });
+      this.#fail(conn, 'internal', toErr(err).message);
     }
   }
 
@@ -179,7 +188,7 @@ export class RelayCore {
     if (conn.role === 'agent' && conn.pubkey && this.#agents.get(conn.pubkey) === conn) {
       this.#agents.delete(conn.pubkey);
       if (conn.cert) this.#broadcastPresence(conn.cert.user, conn.pubkey, false);
-      this.#log(`agent offline ${conn.pubkey.slice(0, 8)}`);
+      this.#log.info('agent offline', { data: { agent: conn.pubkey.slice(0, 8) } });
     }
   }
 
@@ -257,7 +266,7 @@ export class RelayCore {
 
       conn.peer.send({ t: 'ready', role: 'agent', pubkey: frame.pubkey, bound: conn.bound });
       if (cert) this.#broadcastPresence(cert.user, frame.pubkey, true);
-      this.#log(`agent online ${frame.pubkey.slice(0, 8)} bound=${conn.bound}`);
+      this.#log.info('agent online', { data: { agent: frame.pubkey.slice(0, 8), bound: conn.bound } });
       return;
     }
 
@@ -310,7 +319,9 @@ export class RelayCore {
 
     pending.conn.peer.send({ t: 'pair.bound', cert });
     conn.peer.send({ t: 'pair.bound', cert });
-    this.#log(`paired ${cert.agent.slice(0, 8)} -> user ${cert.user.slice(0, 8)}`);
+    this.#log.info('agent paired', {
+      data: { agent: cert.agent.slice(0, 8), user: cert.user.slice(0, 8) },
+    });
   }
 
   #sweepPending(): void {
@@ -405,7 +416,10 @@ export class RelayCore {
       epk: connect.epk,
       epkSig: connect.epkSig,
     });
-    this.#log(`connect ${code} accepted by ${conn.pubkey!.slice(0, 8)} as session ${id}`);
+    this.#log.info('connect request accepted', {
+      sessionId: id,
+      data: { code, agent: conn.pubkey!.slice(0, 8) },
+    });
   }
 
   #onConnectReject(conn: Conn, code: string, reason: string): void {
@@ -550,8 +564,13 @@ export class RelayCore {
     // Stamp the authenticated client key so the agent never has to trust a
     // self-reported identity.
     agentConn.peer.send({ ...frame, client: conn.pubkey! });
-    this.#log(
-      `session ${frame.s} ${conn.pubkey!.slice(0, 8)} -> ${frame.agent.slice(0, 8)} (${frame.surface.name})`,
-    );
+    this.#log.info('session routed', {
+      sessionId: frame.s,
+      data: {
+        client: conn.pubkey!.slice(0, 8),
+        agent: frame.agent.slice(0, 8),
+        surface: frame.surface.name,
+      },
+    });
   }
 }

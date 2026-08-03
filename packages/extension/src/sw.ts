@@ -28,7 +28,7 @@
  */
 
 import { AgentWallet, ResumeError, type AgentSession, type SiteTool } from '@agentport/client';
-import { Deferred, type AgentSummary, type ToolDefinition } from '@agentport/protocol';
+import { createLogger, Deferred, toErr, type AgentSummary, type LogContext, type ToolDefinition } from '@agentport/protocol';
 import {
   LIMITS,
   mintId,
@@ -58,6 +58,23 @@ import { loadCerts, saveCert,
   userSecretKey,
 } from './storage.js';
 
+const log = createLogger('extension.sw');
+
+self.addEventListener('error', (event: ErrorEvent) => {
+  log.error('uncaught service-worker error', {
+    err: event.error ?? event.message,
+    data: { filename: event.filename, line: event.lineno, column: event.colno },
+  });
+});
+self.addEventListener('unhandledrejection', (event: PromiseRejectionEvent) => {
+  log.error('unhandled service-worker rejection', { err: event.reason });
+});
+
+function observe(promise: PromiseLike<unknown> | undefined, message: string, context?: LogContext): void {
+  if (!promise) return;
+  void promise.then(undefined, (err: unknown) => log.error(message, { ...context, err }));
+}
+
 // --- relay connection ------------------------------------------------------
 
 let walletPromise: Promise<AgentWallet> | undefined;
@@ -69,11 +86,7 @@ async function getWallet(): Promise<AgentWallet> {
   walletPromise = (async () => {
     const secret = await userSecretKey();
     if (!secret) throw new Error('no identity yet — open the AgentPort popup and create one');
-    const wallet = new AgentWallet({
-      relayUrl: await relayUrl(),
-      userSecretKey: secret,
-      log: (message) => console.debug('[agentport]', message),
-    });
+    const wallet = new AgentWallet({ relayUrl: await relayUrl(), userSecretKey: secret });
     // A dropped socket is not a goodbye for the sessions it carried: the relay
     // holds them for a grace period. Redial with backoff and re-attach them.
     wallet.on('closed', () => {
@@ -95,7 +108,7 @@ function scheduleRedial(): void {
   redialMs = Math.min(redialMs * 2, 30_000);
   redialTimer = setTimeout(() => {
     redialTimer = undefined;
-    void reconnect();
+    observe(reconnect(), 'relay reconnect failed');
   }, delay);
 }
 
@@ -105,7 +118,8 @@ async function reconnect(): Promise<void> {
   let wallet: AgentWallet;
   try {
     wallet = await getWallet();
-  } catch {
+  } catch (err) {
+    log.warn('relay redial failed; retrying with backoff', { err, data: { delayMs: redialMs } });
     scheduleRedial();
     return;
   }
@@ -117,6 +131,11 @@ async function reconnect(): Promise<void> {
     } catch (err) {
       const reason = err instanceof ResumeError ? err.reason : '';
       if (reason === 'not_resumable' || reason === 'grant_expired') dropSession(entry, `resume_failed:${reason}`);
+      log.warn('session resume after redial failed', {
+        sessionId: entry.session.id,
+        err,
+        data: { reason: reason || 'transient' },
+      });
       // Transient failures keep the entry; the next redial or the page's own
       // resume retries with the same token.
     }
@@ -155,17 +174,17 @@ async function resumeEntry(wallet: AgentWallet, entry: SessionEntry): Promise<vo
  *  touch storage while any session exists, and let an alarm re-wake the worker
  *  so a killed socket gets redialed even after an eviction. */
 function keepAlive(): void {
-  void chrome.storage.local.get('agentport.keepalive');
+  observe(chrome.storage.local.get('agentport.keepalive'), 'service-worker keepalive storage touch failed');
 }
 setInterval(() => {
   if (sessions.size > 0) keepAlive();
 }, 20_000);
 
-chrome.alarms?.create('agentport.keepalive', { periodInMinutes: 1 });
+observe(chrome.alarms?.create('agentport.keepalive', { periodInMinutes: 1 }), 'failed to create keepalive alarm');
 chrome.alarms?.onAlarm.addListener((alarm) => {
   if (alarm.name !== 'agentport.keepalive') return;
   keepAlive();
-  if (sessions.size > 0 && !walletPromise) void reconnect();
+  if (sessions.size > 0 && !walletPromise) observe(reconnect(), 'alarm-triggered relay reconnect failed');
 });
 
 // --- session registry ------------------------------------------------------
@@ -265,7 +284,12 @@ function dropSession(entry: SessionEntry, reason: string): void {
   for (const deferred of entry.pending.values()) deferred.resolve({ ok: false, error: `session closed: ${reason}` });
   entry.pending.clear();
   entry.session.close(reason);
-  if (entry.from === 'page') void clearResume(entry.origin, entry.name, entry.session.id);
+  if (entry.from === 'page') {
+    observe(clearResume(entry.origin, entry.name, entry.session.id), 'failed to clear session resume record', {
+      sessionId: entry.session.id,
+      data: { origin: entry.origin, surface: entry.name },
+    });
+  }
 }
 
 function post(port: chrome.runtime.Port, message: WorkerToContent): void {
@@ -298,8 +322,18 @@ function settleUi(id: string, value: unknown): void {
   if (!pending) return;
   pendingUi.delete(id);
   pending.deferred.resolve(value);
-  if (pending.windowId !== undefined) void chrome.windows.remove(pending.windowId).catch(() => undefined);
-  if (pending.notificationId !== undefined) void chrome.notifications?.clear(pending.notificationId);
+  if (pending.windowId !== undefined) {
+    observe(chrome.windows.remove(pending.windowId), 'failed to close consent window', { data: { pendingId: id } });
+  }
+  if (pending.notificationId !== undefined) {
+    chrome.notifications?.clear(pending.notificationId, () => {
+      if (chrome.runtime.lastError) {
+        log.debug('failed to clear approval notification', {
+          data: { pendingId: id, message: chrome.runtime.lastError.message },
+        });
+      }
+    });
+  }
 }
 
 async function openUiWindow(pending: PendingUi): Promise<void> {
@@ -312,7 +346,11 @@ async function openUiWindow(pending: PendingUi): Promise<void> {
       focused: true,
     });
     pending.windowId = win.id;
-  } catch {
+  } catch (err) {
+    log.error('could not open consent window; denying request', {
+      err,
+      data: { pendingId: pending.id, kind: pending.payload.kind },
+    });
     // No window means no consent surface, and a missing answer is a denial.
     settleUi(pending.id, pending.payload.kind === 'connect' ? null : false);
   }
@@ -335,7 +373,7 @@ function askConnect(origin: string, agents: AgentRow[], request: PageConnectRequ
     deferred: new Deferred<unknown>(),
   };
   pendingUi.set(pending.id, pending);
-  void openUiWindow(pending);
+  observe(openUiWindow(pending), 'connect consent window flow failed', { data: { pendingId: pending.id } });
   return pending.deferred.promise.then((value) => (typeof value === 'string' ? value : null));
 }
 
@@ -368,6 +406,8 @@ function askApproval(
       try {
         args = JSON.stringify(prompt.call.arguments);
       } catch {
+        // Arguments are display-only here; omitting an unserializable preview
+        // is safe because the approval summary and tool name remain visible.
         args = '';
       }
       detail = `${prompt.summary}\n${prompt.call.name}${args && args !== '{}' ? ` ${args.slice(0, 300)}` : ''}`;
@@ -385,13 +425,16 @@ function askApproval(
       },
       () => {
         if (chrome.runtime.lastError) {
+          log.warn('approval notification failed; opening consent window', {
+            data: { message: chrome.runtime.lastError.message, pendingId: pending.id },
+          });
           pending.notificationId = undefined;
-          void openUiWindow(pending);
+          observe(openUiWindow(pending), 'approval consent fallback failed', { data: { pendingId: pending.id } });
         }
       },
     );
   } else {
-    void openUiWindow(pending);
+    observe(openUiWindow(pending), 'approval consent window flow failed', { data: { pendingId: pending.id } });
   }
 
   return pending.deferred.promise.then((value) => value === true);
@@ -411,8 +454,14 @@ chrome.notifications?.onClicked.addListener((notificationId) => {
   for (const pending of pendingUi.values()) {
     if (pending.notificationId !== notificationId) continue;
     pending.notificationId = undefined;
-    void chrome.notifications?.clear(notificationId);
-    void openUiWindow(pending);
+    chrome.notifications?.clear(notificationId, () => {
+      if (chrome.runtime.lastError) {
+        log.debug('failed to clear clicked approval notification', {
+          data: { notificationId, message: chrome.runtime.lastError.message },
+        });
+      }
+    });
+    observe(openUiWindow(pending), 'clicked approval window flow failed', { data: { pendingId: pending.id } });
     return;
   }
 });
@@ -490,7 +539,12 @@ function wireSession(entry: SessionEntry): void {
     if (current && current.session !== session) return;
     sessions.delete(ref);
     clearTimeout(current?.orphanTimer);
-    if (current?.from === 'page') void clearResume(current.origin, current.name, session.id);
+    if (current?.from === 'page') {
+      observe(clearResume(current.origin, current.name, session.id), 'failed to clear closed-session resume record', {
+        sessionId: session.id,
+        data: { origin: current.origin, surface: current.name },
+      });
+    }
     const target = current?.port ?? null;
     if (target) {
       refsOf(target).delete(ref);
@@ -561,14 +615,18 @@ async function openSession(
   // worker can re-attach through the relay without any new consent.
   const agentKey = wallet.agentKeyFor(session.id);
   if (from === 'page' && entry.token && agentKey) {
-    void saveResume({
-      id: session.id,
-      agent: agentKey,
-      token: entry.token,
-      origin,
-      name: request.name,
-      expiresAt: session.grant.expiresAt,
-    });
+    observe(
+      saveResume({
+        id: session.id,
+        agent: agentKey,
+        token: entry.token,
+        origin,
+        name: request.name,
+        expiresAt: session.grant.expiresAt,
+      }),
+      'failed to persist session resume record',
+      { sessionId: session.id, data: { origin, surface: request.name } },
+    );
   }
 
   return { ref, info: await infoFor(entry), grant: grantFor(entry) };
@@ -589,7 +647,10 @@ async function resumeFromStore(
   const record = await loadResume(origin, request.name);
   if (!record) return undefined;
   if (record.expiresAt <= Date.now()) {
-    void clearResume(origin, request.name, record.id);
+    observe(clearResume(origin, request.name, record.id), 'failed to clear expired resume record', {
+      sessionId: record.id,
+      data: { origin, surface: request.name },
+    });
     return undefined;
   }
   // A live entry bound to another tab already owns this session; the relay
@@ -637,8 +698,16 @@ async function resumeFromStore(
     const reason = err instanceof ResumeError ? err.reason : '';
     if (reason === 'not_resumable' || reason === 'grant_expired') {
       // Proven dead. Anything else is transient — keep the token for retry.
-      void clearResume(origin, request.name, record.id);
+      observe(clearResume(origin, request.name, record.id), 'failed to clear dead resume record', {
+        sessionId: record.id,
+        data: { origin, surface: request.name },
+      });
     }
+    log.warn('stored session resume failed', {
+      sessionId: record.id,
+      err,
+      data: { origin, surface: request.name, reason: reason || 'transient' },
+    });
     return undefined;
   }
 }
@@ -675,7 +744,13 @@ class Rejected extends Error {
 function handleContent(port: chrome.runtime.Port): void {
   port.onMessage.addListener((raw: unknown) => {
     if (!isRecord(raw)) return;
-    void onContentMessage(port, raw as ContentToWorker);
+    const message = raw as ContentToWorker;
+    void onContentMessage(port, message).catch((err: unknown) => {
+      log.error('content message handler failed', { err, data: { messageType: message.t } });
+      if ('rid' in message) {
+        post(port, { t: 'err', rid: message.rid, reason: 'error', message: toErr(err).message });
+      }
+    });
   });
   port.onDisconnect.addListener(() => {
     for (const ref of [...refsOf(port)]) {
@@ -721,8 +796,10 @@ async function onContentMessage(port: chrome.runtime.Port, message: ContentToWor
       }
       entry.session.history().then(
         (entries) => post(port, { t: 'ok', rid: message.rid, value: entries }),
-        (err: unknown) =>
-          post(port, { t: 'err', rid: message.rid, reason: 'error', message: err instanceof Error ? err.message : String(err) }),
+        (err: unknown) => {
+          log.error('session history request failed', { sessionId: entry.session.id, err });
+          post(port, { t: 'err', rid: message.rid, reason: 'error', message: toErr(err).message });
+        },
       );
       return;
     }
@@ -741,7 +818,11 @@ async function onContentMessage(port: chrome.runtime.Port, message: ContentToWor
         post(port, { t: 'ok', rid: message.rid, value });
       } catch (err) {
         const reason = err instanceof Rejected ? err.reason : 'denied';
-        post(port, { t: 'err', rid: message.rid, reason, message: err instanceof Error ? err.message : String(err) });
+        log.error('session connect request failed', {
+          err,
+          data: { origin: port.sender?.origin, surface: request.name, reason },
+        });
+        post(port, { t: 'err', rid: message.rid, reason, message: toErr(err).message });
       }
       return;
     }
@@ -757,8 +838,10 @@ async function onContentMessage(port: chrome.runtime.Port, message: ContentToWor
         .prompt(message.text, message.context)
         .then(
           (text) => post(port, { t: 'ok', rid: message.rid, value: text }),
-          (err: unknown) =>
-            post(port, { t: 'err', rid: message.rid, reason: 'error', message: err instanceof Error ? err.message : String(err) }),
+          (err: unknown) => {
+            log.error('session prompt failed', { sessionId: entry.session.id, err });
+            post(port, { t: 'err', rid: message.rid, reason: 'error', message: toErr(err).message });
+          },
         );
       return;
     }
@@ -792,9 +875,19 @@ function handlePopup(port: chrome.runtime.Port): void {
   port.onMessage.addListener((raw: unknown) => {
     if (!isRecord(raw) || typeof raw['rid'] !== 'string') return;
     const rid = raw['rid'];
+    const reply = (message: unknown) => {
+      try {
+        port.postMessage(message);
+      } catch {
+        // The popup was closed; there is no remaining user-visible surface to update.
+      }
+    };
     void onPopupMessage(raw as unknown as PopupToWorker)
-      .then((value) => port.postMessage({ t: 'ok', rid, value }))
-      .catch((err: unknown) => port.postMessage({ t: 'err', rid, message: err instanceof Error ? err.message : String(err) }));
+      .then((value) => reply({ t: 'ok', rid, value }))
+      .catch((err: unknown) => {
+        log.error('popup request failed', { err, data: { messageType: raw['t'] } });
+        reply({ t: 'err', rid, message: toErr(err).message });
+      });
   });
 }
 

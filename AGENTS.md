@@ -182,6 +182,22 @@ The agent panel's transcript is the protocol-neutral Nisli chat set in
   errors, no vacuous tests (a test whose assertions cannot fail proves
   nothing), no security by assertion — invariants get checks in e2e.
 
+## Errors and logging
+
+- Every catch block either rethrows or logs through the shared logger with a
+  component and relevant context. A bare `catch {}` requires a comment proving
+  that silence is safe.
+- Errors that cross an async boundary (event handlers, fire-and-forget
+  promises, socket callbacks) MUST be caught and logged. A floating promise
+  rejection is a bug.
+- User-visible failures are logged AND surfaced in the UI. Log-only is not
+  surfacing.
+- New subsystems accept a `Logger` (or use `createLogger`), never a bare string
+  callback.
+- Raise verbosity with `AGENTPORT_LOG=debug` in Node or
+  `localStorage['agentport.log'] = 'debug'` in a browser. Inspect the current
+  page's ring buffer with `window.__agentport?.logs()`.
+
 ## Conventions
 
 - ESM everywhere, `.js` extensions in relative imports (TS `Bundler`

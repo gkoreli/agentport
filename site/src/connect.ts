@@ -23,9 +23,12 @@ import { ResumeError,
   type AgentProvider,
   type AgentSession,
 } from '@agentport/client';
-import { generateKeyPair } from '@agentport/protocol';
+import { generateKeyPair, toErr } from '@agentport/protocol';
 import { openConnectModal } from './modal.js';
 import { createWebMcpHarvester } from './webmcp.js';
+import { siteLogger } from './observe.js';
+
+const log = siteLogger.child('connect');
 
 function relayUrl(): string {
   const configured = document.currentScript?.getAttribute('data-relay');
@@ -72,7 +75,7 @@ function rememberSession(record: ResumeRecord): void {
   try {
     sessionStorage.setItem(resumeKeyFor(record.surface), JSON.stringify(record));
   } catch (err) {
-    console.warn('[agentport] could not persist session for resume', err);
+    log.warn('could not persist session for resume', { err, data: { surface: record.surface } });
   }
 }
 
@@ -92,6 +95,7 @@ function rememberedSession(surface: string): ResumeRecord | null {
     if (record.relay !== RELAY || record.surface !== surface) return null;
     return record;
   } catch {
+    // Missing, blocked, or malformed storage means there is safely no resumable session.
     return null;
   }
 }
@@ -140,12 +144,19 @@ const provider: AgentProvider & {
       // permanently lost session.
       const reason = err instanceof ResumeError ? err.reason : '';
       if (reason === 'not_resumable' || reason === 'grant_expired') {
-        console.info(`[agentport] previous session is gone (${reason}), starting fresh`);
+        log.info('previous session is gone; starting fresh', {
+          sessionId: record.id,
+          data: { reason, surface: request.name },
+        });
         forgetSession(request.name);
         return null;
       }
-      console.error('[agentport] resume failed (record kept for retry)', err);
-      throw err instanceof Error ? err : new Error(String(err));
+      log.error('resume failed; record kept for retry', {
+        sessionId: record.id,
+        err,
+        data: { surface: request.name },
+      });
+      throw err instanceof Error ? err : new Error(toErr(err).message);
     }
   },
 
@@ -162,23 +173,23 @@ const provider: AgentProvider & {
     try {
       await wallet.connect();
     } catch (err) {
-      console.error('[agentport] relay unreachable', err);
-      modal.status(`could not reach the relay: ${(err as Error).message ?? err}`, true);
+      log.error('relay unreachable', { err, data: { relayUrl: RELAY, surface: request.name } });
+      modal.status(`could not reach the relay: ${toErr(err).message}`, true);
       throw err;
     }
 
-    const { code, accepted } = await wallet.beginConnect({
-      surface: { name: request.name, route: request.route, context: request.context },
-      tools,
-      alwaysAsk: request.alwaysAsk,
-      ttlMs: request.ttlMs,
-      // The owner already gated every `requiresApproval` tool before the call
-      // reached us — re-asking here would be asking the requester.
-      decide: () => true,
-    });
-
-    modal.setCode(code);
     try {
+      const { code, accepted } = await wallet.beginConnect({
+        surface: { name: request.name, route: request.route, context: request.context },
+        tools,
+        alwaysAsk: request.alwaysAsk,
+        ttlMs: request.ttlMs,
+        // The owner already gated every `requiresApproval` tool before the call
+        // reached us — re-asking here would be asking the requester.
+        decide: () => true,
+      });
+
+      modal.setCode(code);
       const session = await Promise.race([accepted, modal.cancelled]);
       const token = wallet.resumeTokenFor(session.id);
       const agentKey = wallet.agentKeyFor(session.id);
@@ -196,8 +207,11 @@ const provider: AgentProvider & {
       setTimeout(() => modal.close(), 400);
       return session;
     } catch (err) {
-      if (!/cancelled/i.test((err as Error).message)) console.error('[agentport] connect failed', err);
-      modal.status((err as Error).message, true);
+      const failure = toErr(err);
+      if (!/cancelled/i.test(failure.message)) {
+        log.error('connect failed', { err, data: { surface: request.name, relayUrl: RELAY } });
+      }
+      modal.status(failure.message, true);
       setTimeout(() => modal.close(), 2200);
       wallet.close();
       throw err;

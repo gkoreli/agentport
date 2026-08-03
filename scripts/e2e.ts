@@ -117,7 +117,7 @@ function inkwellTools(): SiteTool[] {
 
 // --- boot -------------------------------------------------------------------
 
-const relay = new Relay({ port: 0, log: () => {} });
+const relay = new Relay({ port: 0, sink: () => {} });
 await relay.listening();
 const relayUrl = `ws://127.0.0.1:${relay.port}`;
 console.log(`relay on ${relayUrl}\n`);
@@ -460,7 +460,7 @@ console.log('\n10. the relay is blind (ADR-003)');
     identity: { ...sealKeys, name: 'Sealed Agent', runtime: 'demo-writer' },
     createRuntime: () => new DemoWriterRuntime(),
     onPairingCode: (code) => sealPairing.resolve(code),
-    log: (message) => sealLogs.push(message),
+    sink: (entry) => sealLogs.push(`${entry.message}${entry.err ? ` ${entry.err.message}` : ''}`),
   });
   await sealDaemon.start();
 
@@ -539,7 +539,7 @@ console.log('\n10. the relay is blind (ADR-003)');
 console.log('\n11. relay restarts are survived');
 {
   const { Relay: FreshRelay } = await import('../packages/relay/src/relay.js');
-  const bounce = new FreshRelay({ port: 0, log: () => {} });
+  const bounce = new FreshRelay({ port: 0, sink: () => {} });
   await bounce.listening();
   const bounceUrl = `ws://127.0.0.1:${bounce.port}`;
   const port = bounce.port;
@@ -557,7 +557,7 @@ console.log('\n11. relay restarts are survived');
 
   // The "deploy": the relay process dies and a new one takes the same port.
   await bounce.close();
-  const revived = new FreshRelay({ port, log: () => {} });
+  const revived = new FreshRelay({ port, sink: () => {} });
   await revived.listening();
 
   const back = await Promise.race([
@@ -578,7 +578,7 @@ console.log('\n11. relay restarts are survived');
 console.log('\n12. sessions outlive the relay itself');
 {
   const { Relay: FreshRelay } = await import('../packages/relay/src/relay.js');
-  const r1 = new FreshRelay({ port: 0, log: () => {} });
+  const r1 = new FreshRelay({ port: 0, sink: () => {} });
   await r1.listening();
   const relayPort = r1.port;
   const url = `ws://127.0.0.1:${relayPort}`;
@@ -612,7 +612,7 @@ console.log('\n12. sessions outlive the relay itself');
   const daemonBack = new Deferred<boolean>();
   survivorDaemon.on('ready', () => daemonBack.resolve(true));
   await r1.close();
-  const r2 = new FreshRelay({ port: relayPort, log: () => {} });
+  const r2 = new FreshRelay({ port: relayPort, sink: () => {} });
   await r2.listening();
   await daemonBack.promise;
 

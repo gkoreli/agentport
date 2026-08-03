@@ -5,6 +5,7 @@ import {
   SEALED_TYPES,
   answerProofBinding,
   authChallengeMessage,
+  createLogger,
   decodeFrame,
   deriveSealChannel,
   encodeFrame,
@@ -26,6 +27,8 @@ import {
   type CapabilityGrant,
   type Frame,
   type Hex,
+  type Logger,
+  type LogSink,
   type SessionFrame,
   type SealChannel,
   type SurfaceDescriptor,
@@ -56,7 +59,7 @@ export interface WalletOptions {
   /** The user's root key. In production this is a passkey-backed or NIP-46 key. */
   userSecretKey: Hex;
   socketFactory?: SocketFactory;
-  log?: (message: string) => void;
+  sink?: LogSink;
 }
 
 export interface SessionRequest {
@@ -100,13 +103,13 @@ export class AgentWallet extends Emitter<WalletEvents> {
   /** The agent behind each session — resume routes by it (stateless relay). */
   #agentKeys = new Map<string, Hex>();
   #ready = new Deferred<void>();
-  #log: (message: string) => void;
+  #log: Logger;
 
   constructor(options: WalletOptions) {
     super();
     this.#options = options;
     this.publicKey = publicKeyOf(options.userSecretKey);
-    this.#log = options.log ?? (() => {});
+    this.#log = createLogger('client.wallet', { sink: options.sink });
   }
 
   async connect(): Promise<void> {
@@ -124,17 +127,25 @@ export class AgentWallet extends Emitter<WalletEvents> {
       } catch (err) {
         // Never silent: an undecodable frame means the peer and we disagree
         // about the protocol, which is exactly when you need to be told.
-        this.#log(`dropped undecodable frame: ${err instanceof Error ? err.message : String(err)}`);
+        this.#log.warn('dropped undecodable frame', { err, data: { relayUrl: this.#options.relayUrl } });
         return;
       }
-      void this.#onFrame(frame);
+      void this.#onFrame(frame).catch((err: unknown) => {
+        this.#log.error('failed to handle relay frame', {
+          err,
+          ...(isSessionFrame(frame) ? { sessionId: frame.s } : {}),
+          data: { frameType: frame.t, relayUrl: this.#options.relayUrl },
+        });
+      });
     });
     socket.addEventListener('close', () => this.emit('closed', undefined));
     // A WebSocket 'error' event carries no message; rejecting with the raw
     // Event is how "[object Event]" ends up in user-facing status lines.
-    socket.addEventListener('error', () =>
-      this.#ready.reject(new Error(`could not reach the relay at ${this.#options.relayUrl}`)),
-    );
+    socket.addEventListener('error', () => {
+      const err = new Error(`could not reach the relay at ${this.#options.relayUrl}`);
+      this.#log.error('relay socket error', { err, data: { relayUrl: this.#options.relayUrl } });
+      this.#ready.reject(err);
+    });
 
     return this.#ready.promise;
   }
@@ -456,6 +467,7 @@ export class AgentWallet extends Emitter<WalletEvents> {
       info: { agentName: opened.agentName, runtime: opened.runtime, verify: this.#verifyWords.get(id) },
       tools: request.tools,
       decide: request.decide ?? (() => false),
+      logger: this.#log.child('session'),
       send: (frame: SessionFrame) => this.#sendSession(frame),
     });
     session.on('closed', () => {
@@ -465,7 +477,7 @@ export class AgentWallet extends Emitter<WalletEvents> {
       this.#agentKeys.delete(id);
     });
     this.#sessions.set(id, session);
-    this.#log(`session ${id} open with ${opened.agentName}`);
+    this.#log.info('session opened', { sessionId: id, data: { agentName: opened.agentName } });
     return session;
   }
 
@@ -488,7 +500,7 @@ export class AgentWallet extends Emitter<WalletEvents> {
 
   async #onFrame(frame: Frame, openedFromSeal = false): Promise<void> {
     if (SEALED_TYPES.has(frame.t) && !openedFromSeal) {
-      this.#log(`dropped plaintext session content (${frame.t})`);
+      this.#log.warn('dropped plaintext session content', { sessionId: 's' in frame ? frame.s : undefined, data: { type: frame.t } });
       return;
     }
     if (frame.t === 'challenge') {
@@ -511,20 +523,23 @@ export class AgentWallet extends Emitter<WalletEvents> {
     if (frame.t === 'enc') {
       const channel = this.#sealChannels.get(frame.s);
       if (!channel) {
-        this.#log(`sealed frame for ${frame.s} but no channel — dropping`);
+        this.#log.warn('dropping sealed frame because the session has no channel', { sessionId: frame.s });
         return;
       }
       let inner: SessionFrame;
       try {
         inner = openSealed(channel.receive, frame);
       } catch (err) {
-        this.#log(`failed to open sealed frame on ${frame.s}: ${err instanceof Error ? err.message : String(err)}`);
+        this.#log.warn('failed to open sealed frame', { sessionId: frame.s, err });
         return;
       }
       // The relay cannot check inner types anymore; the origination rule it
       // used to enforce is applied here instead.
       if (!AGENT_SEALABLE.has(inner.t)) {
-        this.#log(`agent sealed a frame it may not originate (${inner.t}) — dropping`);
+        this.#log.warn('agent sealed a frame it may not originate; dropping it', {
+          sessionId: frame.s,
+          data: { frameType: inner.t },
+        });
         return;
       }
       await this.#onFrame(inner, true);
@@ -542,7 +557,9 @@ export class AgentWallet extends Emitter<WalletEvents> {
     }
 
     if (this.#resolve(frame)) return;
-    if (frame.t === 'error') this.#log(`relay error ${frame.code}: ${frame.message}`);
+    if (frame.t === 'error') {
+      this.#log.error('relay rejected a frame', { data: { code: frame.code, message: frame.message } });
+    }
   }
 
   /** Single-shot request/response correlation by frame type. */

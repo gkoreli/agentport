@@ -6,11 +6,21 @@ import { loadIdentity, saveIdentity } from './identity.js';
 import { RUNTIMES, registerRuntime } from './runtime.js';
 import { McpBridge } from './mcp-bridge.js';
 import { AcpRuntime } from './runtimes/acp.js';
+import { createLogger } from '@agentport/protocol';
+
+const log = createLogger('daemon.cli');
+
+process.on('uncaughtException', (err) => {
+  log.error('uncaught exception; terminating daemon', { err });
+  process.exit(1);
+});
+process.on('unhandledRejection', (err) => {
+  log.error('unhandled rejection; terminating daemon', { err });
+  process.exit(1);
+});
 
 // One bridge per daemon; each session gets its own token-scoped endpoint on it.
 const bridge = new McpBridge();
-
-const acpLog = (m: string) => console.log(`[acp] ${m}`);
 
 registerRuntime(
   'claude-code',
@@ -20,7 +30,6 @@ registerRuntime(
       args: (process.env.AGENTPORT_ACP_ARGS ?? '-y @agentclientprotocol/claude-agent-acp').split(' '),
       cwd: process.env.AGENTPORT_AGENT_CWD ?? process.cwd(),
       bridge,
-      log: acpLog,
     }),
 );
 
@@ -33,7 +42,6 @@ registerRuntime(
       args: (process.env.AGENTPORT_ACP_ARGS ?? '-y @agentclientprotocol/claude-agent-acp').split(' ').filter(Boolean),
       cwd: process.env.AGENTPORT_AGENT_CWD ?? process.cwd(),
       bridge,
-      log: acpLog,
     }),
 );
 
@@ -44,7 +52,7 @@ const runtimeName = process.env.AGENTPORT_RUNTIME ?? 'demo-writer';
 
 const createRuntime = RUNTIMES[runtimeName];
 if (!createRuntime) {
-  console.error(`unknown runtime "${runtimeName}"; known: ${Object.keys(RUNTIMES).join(', ')}`);
+  log.error('unknown runtime', { data: { runtimeName, known: Object.keys(RUNTIMES) } });
   process.exit(1);
 }
 
@@ -75,7 +83,6 @@ const daemon = new AgentDaemon({
   relayUrl,
   identity,
   createRuntime,
-  log: (m) => console.log(`[agent] ${m}`),
   onPairingCode: (code) => {
     console.log('');
     console.log('  Your agent is ready to pair:');
@@ -112,13 +119,15 @@ const daemon = new AgentDaemon({
 
   onBound: (cert) => {
     saveIdentity(identityPath, { ...identity, cert });
-    console.log(`[agent] paired with user ${cert.user.slice(0, 16)}… — this agent is now selectable in the picker`);
+    log.info('agent paired and selectable in the picker', { data: { user: cert.user.slice(0, 16) } });
   },
 });
 
 const { bound } = await daemon.start();
-console.log(`[agent] ${identity.name} (${identity.publicKey.slice(0, 16)}…) connected to ${relayUrl}`);
-if (bound) console.log('[agent] already paired — waiting for sessions');
+log.info('agent connected to relay', {
+  data: { name: identity.name, agent: identity.publicKey.slice(0, 16), relayUrl },
+});
+if (bound) log.info('agent already paired; waiting for sessions');
 
 console.log('');
 console.log('  Paste a connect code from any site using the AgentPort widget:');
@@ -132,6 +141,12 @@ rl.on('line', (line) => {
 
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   process.on(signal, () => {
-    void daemon.stop().then(() => process.exit(0));
+    void daemon.stop().then(
+      () => process.exit(0),
+      (err: unknown) => {
+        log.error('graceful daemon shutdown failed', { err, data: { signal } });
+        process.exit(1);
+      },
+    );
   });
 }

@@ -81,7 +81,6 @@ const createRuntime = (): AgentRuntime => {
       .filter(Boolean),
     cwd: process.env.AGENTPORT_AGENT_CWD ?? process.cwd(),
     bridge,
-    log: (m) => console.log(`      [agent] ${m}`),
   });
 };
 
@@ -89,7 +88,6 @@ const daemon = new AgentDaemon({
   relayUrl,
   identity: { ...keys, name: 'Integration Agent', runtime: runtimeName, location: 'test' },
   createRuntime,
-  log: (m) => console.log(`      [daemon] ${m}`),
   onConnectOffer: async () => true,
   onLocalApproval: async (summary) => {
     approvals.push(summary);
