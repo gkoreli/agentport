@@ -358,3 +358,52 @@ are all partially claimed).
 **Consequences.** No standards-body dependency on our own layer (we still
 *consume* WebMCP, ADR-006). `navigator.agent` remains the API name regardless
 of brand.
+
+---
+
+## ADR-016: Decentralize by subtraction — stateless plural relays, then direct paths, then Nostr rendezvous — accepted (direction)
+
+**Context.** ADR-012 made Cloudflare the reference host; sealing (ADR-003) made
+it blind. But the relay still *remembers* things — sessions, resume tokens,
+certs — and an earlier plan to persist session records into DO storage would
+have deepened that coupling. The owner's correction: state belongs at the
+edges; every byte the relay holds is dependence on whoever hosts it.
+
+**Decision.** Decentralization proceeds by removing relay responsibilities,
+in three rungs:
+
+**A. Stateless, plural relays** (next implementation work):
+- Session authority moves to the daemon. It already holds grant, seal key,
+  client identity and (via ACP loadSession) the conversation. The daemon mints
+  and verifies resume authority; `session.resume` becomes a forwarded request
+  the AGENT answers, not a relay-table lookup. A relay restart loses nothing:
+  both ends redial (daemon already does) and re-establish from edge state.
+- Certs verified at connection time, stored nowhere relay-side. The daemon
+  presents its cert on identify (already does); the relay verifies the
+  signature and keeps it in connection memory only. Offline-agent directory
+  comes from the wallet's own cert store (the extension already has one).
+- Invariant 5 ("only reach agents you own") moves to the daemon: it compares
+  the relay-stamped client key against its own cert.user. Enforced at the
+  edge, where the trust actually lives.
+- Connect codes become WalletConnect-style URIs carrying their rendezvous:
+  `CODE@wss://relay.host`. Any relay works per-session; the daemon may sit on
+  several relays at once. The relay ends as ~200 lines of verify-stamp-forward
+  + rate limiting, zero storage, zero migrations. Cloudflare demotes to "one
+  default host of a commodity component".
+
+**B. Direct data path (WebRTC).** Relay demotes to signaling; session traffic
+flows browser<->daemon over DTLS DataChannels. Sealed-relay remains the
+mandatory fallback (ADR-011 already sketches this).
+
+**C. Nostr rendezvous.** Precedent: Nostr Wallet Connect runs exactly this
+shape for Bitcoin wallets — pairing + encrypted messaging over the public
+Nostr relay network, pubkey addressing, no proprietary servers. AgentCert maps
+onto a user-signed Nostr event; discovery/signaling ride relays nobody owns;
+our ws relay becomes one transport adapter among several. This is also where
+the project's original Buzz/Nostr instinct lands.
+
+**Consequences.** DO-storage session persistence is DROPPED (only the existing
+cert persistence remains until rung A removes the need). Relay-side session
+state becomes an implementation detail of one transport, never the product's
+memory. The "relay can be run by anyone" claim becomes literal: stateless
+forwarders are fungible.
