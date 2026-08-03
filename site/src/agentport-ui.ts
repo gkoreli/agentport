@@ -7,11 +7,12 @@
  * *site* writes, and nothing more.
  *
  * The transcript is `createTranscript()` + `AcpChat` from the copied
- * `src/nisli-ui` ACP set. AgentPort's wire frames are not ACP frames — the
- * relay speaks its own protocol — so `wire()` is the adapter: each session
- * event becomes the `session/update` shape the reducer folds. When the daemon
- * grows a structured tool/diff channel, this adapter is the only thing that
- * changes.
+ * `src/nisli-ui` ACP set. The session is consumed through @agentport/agui
+ * (ADR-017): the panel subscribes to the same AG-UI event stream a
+ * third-party renderer would, and `wire()` folds those events into the
+ * `session/update` shapes the reducer understands. The demo is thereby the
+ * adapter's first real consumer — if the mapping breaks, our own panel
+ * breaks first.
  *
  * Styling: the copied components carry Tailwind classes the site does not
  * build (no Tailwind pipeline here, by choice). Presentation comes from the
@@ -23,7 +24,8 @@
 
 import { component, computed, html, signal, when } from '@nisli/core';
 import AgentPortConnect from './connect.js';
-import type { AgentSession, SiteTool } from '@agentport/client';
+import { onAguiEvent, type AguiEvent } from '@agentport/agui';
+import type { AgentSession, SessionEvents, SiteTool } from '@agentport/client';
 import type { HistoryEntry } from '@agentport/protocol';
 import { AcpChat } from '../../src/nisli-ui/ui/acp/acp-chat.js';
 import { createTranscript } from '../../src/nisli-ui/lib/acp-session.js';
@@ -87,61 +89,79 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
   // none of it either.
 
   /**
-   * The adapter: AgentPort session events → ACP `session/update` shapes.
-   * Tool events arrive only on completion here, so each becomes one terminal
-   * `tool_call`; approvals are decided in the wallet, so the panel records the
-   * outcome rather than rendering a consent card of its own.
+   * The panel consumes the session through @agentport/agui (ADR-017) — the
+   * same event stream any third-party AG-UI renderer would get, so the demo
+   * itself proves the adapter. AG-UI events → ACP `session/update` shapes for
+   * the transcript reducer. Tool rows are terminal here, so TOOL_CALL_END's
+   * rawEvent (the completed call, results included) is the one that renders;
+   * approvals were decided in the wallet, so the panel records outcomes and
+   * never draws a consent control of its own.
    */
-  const wire = (next: AgentSession) => {
-    next.on('delta', (event) => {
-      currentPromptId = event.promptId;
-      transcript.apply({ sessionUpdate: 'agent_message_chunk', content: text(event.text) });
+  const wire = (next: AgentSession) =>
+    onAguiEvent(next, (event: AguiEvent) => {
+      switch (event.type) {
+        case 'TEXT_MESSAGE_START':
+          currentPromptId = event.messageId;
+          return;
+        case 'TEXT_MESSAGE_CONTENT':
+          transcript.apply({ sessionUpdate: 'agent_message_chunk', content: text(event.delta) });
+          return;
+        case 'REASONING_START':
+          currentPromptId = event.messageId.replace(/:reasoning$/, '');
+          return;
+        case 'REASONING_MESSAGE_CONTENT':
+          transcript.apply({ sessionUpdate: 'agent_thought_chunk', content: text(event.delta) });
+          return;
+        case 'TOOL_CALL_END': {
+          const call = event.rawEvent as SessionEvents['tool'];
+          const detail = call.ok
+            ? call.result !== undefined
+              ? JSON.stringify(call.result, null, 2)
+              : undefined
+            : (call.error ?? 'failed');
+          transcript.apply({
+            sessionUpdate: 'tool_call',
+            toolCallId: `t${toolSeq++}`,
+            title: call.name,
+            kind: kindOf(call.name),
+            status: call.ok ? 'completed' : 'failed',
+            rawInput: call.arguments,
+            content: detail === undefined ? undefined : [{ type: 'content', content: text(detail) }],
+          });
+          return;
+        }
+        case 'RUN_FINISHED':
+        case 'RUN_ERROR':
+          currentPromptId = null;
+          transcript.endTurn();
+          busy.value = false;
+          if (event.type === 'RUN_ERROR') notice.value = event.message;
+          return;
+        case 'CUSTOM':
+          if (event.name === 'agentport.approval') {
+            const approval = event.value;
+            transcript.apply({
+              sessionUpdate: 'tool_call',
+              toolCallId: `a${toolSeq++}`,
+              title: approval.summary,
+              kind: 'other',
+              status: approval.granted ? 'completed' : 'cancelled',
+              rawInput: approval.call?.arguments,
+            });
+          } else if (event.name === 'agentport.closed') {
+            notice.value = `session closed (${event.value.reason})`;
+            status.value = 'disconnected';
+            online.value = false;
+            live.value = false;
+            busy.value = false;
+            session = null;
+            currentPromptId = null;
+          }
+          return;
+        default:
+          return;
+      }
     });
-    next.on('thought', (event) => {
-      currentPromptId = event.promptId;
-      transcript.apply({ sessionUpdate: 'agent_thought_chunk', content: text(event.text) });
-    });
-    next.on('tool', (event) => {
-      const detail = event.ok
-        ? event.result !== undefined
-          ? JSON.stringify(event.result, null, 2)
-          : undefined
-        : (event.error ?? 'failed');
-      transcript.apply({
-        sessionUpdate: 'tool_call',
-        toolCallId: `t${toolSeq++}`,
-        title: event.name,
-        kind: kindOf(event.name),
-        status: event.ok ? 'completed' : 'failed',
-        rawInput: event.arguments,
-        content: detail === undefined ? undefined : [{ type: 'content', content: text(detail) }],
-      });
-    });
-    next.on('approval', (event) =>
-      transcript.apply({
-        sessionUpdate: 'tool_call',
-        toolCallId: `a${toolSeq++}`,
-        title: event.summary,
-        kind: 'other',
-        status: event.granted ? 'completed' : 'cancelled',
-        rawInput: event.call?.arguments,
-      }),
-    );
-    next.on('done', () => {
-      currentPromptId = null;
-      transcript.endTurn();
-      busy.value = false;
-    });
-    next.on('closed', (event) => {
-      notice.value = `session closed (${event.reason})`;
-      status.value = 'disconnected';
-      online.value = false;
-      live.value = false;
-      busy.value = false;
-      session = null;
-      currentPromptId = null;
-    });
-  };
 
   const attach = (next: AgentSession) => {
     session = next;
@@ -239,12 +259,9 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
     transcript.apply({ sessionUpdate: 'user_message_chunk', content: text(prompt) });
     transcript.endTurn();
     busy.value = true;
-    session.prompt(prompt).catch((err: Error) => {
-      console.error('[agentport] prompt failed', err);
-      transcript.endTurn();
-      busy.value = false;
-      notice.value = err.message;
-    });
+    // Failures surface through the AG-UI stream as RUN_ERROR (which settles
+    // busy and the turn); the console line is for developers.
+    session.prompt(prompt).catch((err: Error) => console.error('[agentport] prompt failed', err));
     return true;
   };
 
