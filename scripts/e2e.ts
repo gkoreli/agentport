@@ -837,6 +837,95 @@ console.log('\n12. sessions outlive the relay itself');
   await r2.close();
 }
 
+// --- 12b. a live attachment survives its own socket dying ---------------------
+// The refresh path proves a session survives a RELOAD. This proves it survives
+// a network blip with no reload at all: a sleeping laptop, a wifi change, a
+// relay bounce. The page keeps the handle it already had — a "transparent"
+// reconnect that returned a different object would be transparent to nobody.
+console.log('\n12b. a dropped socket reconnects itself');
+{
+  const { Relay: FreshRelay } = await import('../packages/relay/src/relay.js');
+  const blip = new FreshRelay({ port: 0, sink: () => {} });
+  await blip.listening();
+  const blipUrl = `ws://127.0.0.1:${blip.port}`;
+
+  const agentKeys = generateKeyPair();
+  const blipPairing = new Deferred<string>();
+  const blipDaemon = new AgentDaemon({
+    relayUrl: blipUrl,
+    identity: { ...agentKeys, name: 'Blip Agent', runtime: 'demo-writer' },
+    createRuntime: () => new DemoWriterRuntime(),
+    onPairingCode: (code) => blipPairing.resolve(code),
+  });
+  await blipDaemon.start();
+
+  // Hand the wallet sockets we can kill from the outside, the way a network
+  // does — not through any API the wallet could treat as intentional.
+  const liveSockets: NodeWebSocket[] = [];
+  const blipUser = new AgentWallet({
+    relayUrl: blipUrl,
+    userSecretKey: generateKeyPair().secretKey,
+    socketFactory: (url) => {
+      const socket = new NodeWebSocket(url);
+      liveSockets.push(socket);
+      return socket as never;
+    },
+  });
+  await blipUser.connect();
+  const blipOffer = await blipUser.claimPairing(await blipPairing.promise);
+  await blipUser.approvePairing(blipOffer);
+
+  const session = await blipUser.openSession({
+    agent: agentKeys.publicKey,
+    surface: { name: 'Blippy Site' },
+    tools: inkwellTools(),
+    decide: () => true,
+  });
+  await session.prompt('Remember the word cinnabar.');
+  const firstVerify = session.info.verify;
+
+  const reattached = new Deferred<{ verify?: string }>();
+  session.on('reattached', (event) => reattached.resolve(event));
+  const reconnected = new Deferred<{ sessions: number; missed: number }>();
+  blipUser.on('reconnected', (event) => reconnected.resolve(event));
+
+  // The blip: kill the socket underneath the wallet. No close(), no
+  // disconnect() — the wallet is not told, it has to notice.
+  liveSockets[liveSockets.length - 1]!.terminate();
+
+  const restored = await Promise.race([
+    reconnected.promise,
+    new Promise<null>((resolve) => setTimeout(() => resolve(null), 15_000)),
+  ]);
+  check('the wallet redialed and restored the session by itself', restored?.sessions === 1, restored);
+  await reattached.promise;
+
+  check('the page still holds the same session object', blipUser.resumeTokenFor(session.id) !== undefined);
+  check('the session is not closed', session.closed === false);
+  // Fresh ephemeral keys per attachment (ADR-003), so the fingerprint words
+  // MUST change — identical words after a rekey would mean we reused a key.
+  check('the reattachment rekeyed', session.info.verify !== firstVerify, {
+    before: firstVerify,
+    after: session.info.verify,
+  });
+  check('and it is still sealed', /^(?:\w+-){5}\w+$/.test(session.info.verify ?? ''), session.info.verify);
+
+  // The real test: the SAME handle still drives the agent.
+  const afterBlip = await session.prompt('Append one more line.');
+  check('the same handle still prompts the agent', afterBlip.includes('Done.'), afterBlip.slice(0, 80));
+  const blipMemory = await session.history();
+  check(
+    'the conversation from before the blip is intact',
+    blipMemory.some((entry) => entry.text.includes('cinnabar')),
+    blipMemory.length,
+  );
+
+  session.close();
+  blipUser.close();
+  await blipDaemon.stop();
+  await blip.close();
+}
+
 console.log('\n13. delegated sessions');
 {
   const delegatedOrigin = 'https://delegated.test';

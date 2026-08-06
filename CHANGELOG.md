@@ -10,6 +10,49 @@ they moved.
 
 ## Unreleased
 
+### An attachment survives its own socket dying
+
+"Bring your own agent and carry it everywhere" was true until the network
+hiccuped. The wallet's socket close handler emitted `closed` and stopped —
+so a sleeping laptop, a wifi change, or a relay bounce ended the attachment,
+and the only recovery was for the user to reload the page and hope the site
+had kept a resume record. The session outlived a *reload* and died to a
+*blip*, which is backwards: the reload is the case where the page is gone.
+
+The wallet now redials and puts every live session back on the new socket.
+
+- **The page keeps the handle it already had.** A resume that returned a new
+  object would be transparent to nobody — every listener the page registered
+  would be on the dead one. `AgentSession` is rekeyed in place instead.
+- **It is the refresh path, run without a refresh.** No new frames: the relay
+  already holds a dropped client's session for its orphan grace, and the
+  daemon already owns resume authority (ADR-016). The machinery was all there;
+  nothing was calling it.
+- **Fresh keys, and the words change.** Resume mints a new ephemeral keypair
+  per ADR-003, so the fingerprint words change too. The panel now shows them as
+  persistent state rather than a transient notice — a silent rekey would
+  quietly invalidate the one MITM check a user can actually perform.
+- **A prompt in flight when the socket died is rejected, not left hanging.**
+  Its answer streamed into a channel nobody was holding, and the relay counts
+  those frames rather than buffering them (ADR-005). The truthful record is one
+  `history()` call away, from the agent's own store.
+- **Bounded and honest.** Exponential backoff to a 15s cap, 12 attempts, then
+  every session is dropped with a stable reason and `closed` is emitted. The
+  cap sits well under the orphan grace on purpose: a reconnect that arrives
+  after the daemon released the session would silently become a *new*
+  attachment under a grant the user never approved.
+- `disconnect()` stays a shutdown. It models a tab going away, where the next
+  page load resumes; redialling there would race the reload for the same
+  session and lose.
+
+Evidence: `npm run e2e` section 12b terminates the client's socket from
+outside — no `close()`, no `disconnect()`, nothing the wallet could read as
+intent — then proves the wallet redialed by itself, the same handle still
+prompts the agent, the conversation from before the blip is intact, and the
+attachment rekeyed. `npm run ui:smoke` kills the socket under the real panel
+and proves it redials, says so, and shows fingerprint words for the new keys
+(four checks that fail with reconnect disabled).
+
 ### The agent's plan is a thing you can watch
 
 ACP agents already report a structured plan — `session/update` with

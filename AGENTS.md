@@ -290,8 +290,9 @@ has fixtures.
 
 Working: pairing, cert issuance and verification, directory + presence,
 capability grants with TTL, prompt streaming, plan reporting, tool-call
-round-trip, approval round-trip, cancellation, session teardown, and the full
-demo UI. 79 e2e checks and 459 wire-validation cases pass.
+round-trip, approval round-trip, cancellation, reconnect with in-place session
+resume, session teardown, and the full demo UI. 86 e2e checks and 459
+wire-validation cases pass.
 
 Not built yet, in rough priority order:
 
@@ -316,7 +317,12 @@ Not built yet, in rough priority order:
    gone from source — only stale `dist/` remains — because ADR-016 made the
    relay stateless. Ownership lives at the edges now, so revocation is a daemon
    + CLI + wallet job, not a relay one.)
-6. **Reconnect + session resume.** Sockets are assumed stable; they aren't.
+6. ~~Reconnect + session resume.~~ **Done.** An unexpected socket close
+   redials with bounded backoff and re-resumes every live session in place, so
+   the page keeps the handle (and the listeners) it already had. Fresh keys per
+   ADR-003 mean the fingerprint words change, which the panel shows as
+   persistent state. e2e section 12b kills the socket from outside and proves
+   the same handle still drives the agent.
 
 ## Transport, and why not Tailscale
 

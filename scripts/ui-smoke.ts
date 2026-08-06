@@ -62,6 +62,8 @@ console.log('\n3. clicking Connect actually connects');
 // A fake relay that answers the handshake. This is the test that was missing:
 // the panel rendered fine while its click handler threw a TypeError into a
 // hidden log, so every static assertion passed and the button did nothing.
+const RESUME_TOKEN = 'a1b2c3d4'.repeat(4);
+
 class FakeRelay {
   static dialled: string[] = [];
   static frames: string[] = [];
@@ -69,7 +71,10 @@ class FakeRelay {
   readyState = 1;
   #listeners: Record<string, (event?: unknown) => void> = {};
   #client = '';
-  #agent = generateKeyPair();
+  // One agent identity across reconnects: the wallet pinned this key at open
+  // time and verifies every later proof against it.
+  static agent = generateKeyPair();
+  #agent = FakeRelay.agent;
   constructor(url: string) {
     FakeRelay.dialled.push(url);
     FakeRelay.latest = this;
@@ -77,6 +82,15 @@ class FakeRelay {
   }
   addEventListener(type: string, fn: (event?: unknown) => void) {
     this.#listeners[type] = fn;
+  }
+  // Static: a reconnect dials a NEW socket, and the relay it reaches is the
+  // same relay, which still knows the session it is routing.
+  static surface: unknown;
+  static grant: unknown;
+  /** Sever the socket the way a network does — no API the wallet could read
+   *  as an intentional teardown. */
+  kill() {
+    this.#listeners.close?.();
   }
   #reply(frame: unknown) {
     // canonicalJson, not JSON.stringify: the wallet's strict decoder rejects
@@ -111,11 +125,16 @@ class FakeRelay {
       this.#channel = deriveSealChannel(mine.secretKey, String(frame.epk), 'sess_test', 'agent');
       const surface = frame.surface as Parameters<typeof answerProofBinding>[3];
       const grant = frame.grant as Parameters<typeof answerProofBinding>[4];
+      FakeRelay.surface = surface;
+      FakeRelay.grant = grant;
       this.#reply({
         t: 'session.opened',
         s: 'sess_test',
         agentName: 'Test Agent',
         runtime: 'demo',
+        // The real relay stamps resume authority here; without it the wallet
+        // correctly refuses to resume anything, so the fake must too.
+        resume: RESUME_TOKEN,
         epk: mine.publicKey,
         epkSig: signEpk(
           this.#agent.secretKey,
@@ -124,12 +143,44 @@ class FakeRelay {
           answerProofBinding('connect', this.#client, String(frame.epk), surface, grant, {
             agentName: 'Test Agent',
             runtime: 'demo',
+            // Resume authority is bound into the proof (ADR-003), so stamping
+            // a token means signing over it too.
+            resume: RESUME_TOKEN,
           }),
         ),
         agent: this.#agent.publicKey,
       });
     }
+    if (frame.t === 'session.resume') {
+      // The daemon answers a resume with FRESH keys (ADR-003): the reattached
+      // session must be sealed under a new channel, not the dead one.
+      const mine = generateSealKeyPair();
+      this.#channel = deriveSealChannel(mine.secretKey, String(frame.epk), 'sess_test', 'agent');
+      const surface = FakeRelay.surface as Parameters<typeof answerProofBinding>[3];
+      const grant = FakeRelay.grant as Parameters<typeof answerProofBinding>[4];
+      this.#reply({
+        t: 'session.resumed',
+        s: 'sess_test',
+        agentName: 'Test Agent',
+        runtime: 'demo',
+        surface,
+        grant,
+        missed: 0,
+        epk: mine.publicKey,
+        epkSig: signEpk(
+          this.#agent.secretKey,
+          'sess_test',
+          mine.publicKey,
+          answerProofBinding('resume', this.#client, String(frame.epk), surface, grant, {
+            agentName: 'Test Agent',
+            runtime: 'demo',
+            missed: 0,
+          }),
+        ),
+      });
+    }
   }
+
   close() {}
 
   #channel: ReturnType<typeof deriveSealChannel> | undefined;
@@ -244,6 +295,30 @@ flush();
 check('a second snapshot replaces rather than appends', planSteps().length === 2, planSteps().length);
 check('the finished step advanced to done', planSteps()[0]?.getAttribute('data-status') === 'done');
 check('the next step became active', planSteps()[1]?.getAttribute('data-status') === 'active');
+
+console.log('\n5c. a reconnect is visible, not silent');
+// The panel must not sit disabled waiting for a `done` that died with the old
+// socket, and the new fingerprint words must be shown: a silent rekey would
+// quietly invalidate the only check a careful user can perform.
+const verifyBefore = /verify\s*([a-z]+(?:-[a-z]+){5})/.exec(rendered())?.[1];
+const socketsBefore = FakeRelay.dialled.length;
+// The blip: the socket dies underneath the panel. Nothing is told; the wallet
+// has to notice, redial, and resume — the whole point of the feature.
+FakeRelay.latest!.kill();
+await new Promise((resolve) => setTimeout(resolve, 1200));
+flush();
+check('the panel redialed the relay by itself', FakeRelay.dialled.length > socketsBefore, FakeRelay.dialled.length);
+check('the panel says it reconnected', /reconnected/.test(rendered()), rendered().slice(-200));
+const verifyAfter = /verify\s*([a-z]+(?:-[a-z]+){5})/.exec(rendered())?.[1];
+check('it shows fingerprint words for the NEW keys', Boolean(verifyAfter) && verifyAfter !== verifyBefore, {
+  before: verifyBefore,
+  after: verifyAfter,
+});
+check(
+  'the composer is usable again',
+  clickMount.querySelector('[data-slot="chat"]')?.getAttribute('data-state') !== 'busy',
+  clickMount.querySelector('[data-slot="chat"]')?.getAttribute('data-state'),
+);
 
 console.log('\n6. protocol-neutral chat');
 const { createChatStore } = await import('../src/nisli-ui/lib/chat.js');

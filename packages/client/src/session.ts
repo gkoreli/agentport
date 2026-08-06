@@ -69,6 +69,9 @@ export type SessionEvents = {
   thought: { promptId: string; text: string };
   /** The agent's current plan for a prompt. Each event replaces the last. */
   plan: { promptId: string; steps: PlanStep[] };
+  /** The socket dropped and this attachment was re-established, with fresh
+   *  sealing keys — so the fingerprint words change too. */
+  reattached: { verify?: string };
   done: { promptId: string; stopReason: string; error?: string };
   tool: { name: string; arguments: Record<string, unknown>; ok: boolean; result?: unknown; error?: string };
   approval: ApprovalPrompt & { granted: boolean };
@@ -115,7 +118,12 @@ export class AgentSession extends Emitter<SessionEvents> implements AgentSession
   readonly id: string;
   readonly surface: SurfaceDescriptor;
   readonly grant: CapabilityGrant;
-  readonly info: SessionInfo;
+
+  /** The page holds this handle across a reconnect, so what it reports must
+   *  follow the live attachment rather than the one that died. */
+  get info(): SessionInfo {
+    return this.#info;
+  }
 
   #tools: Map<string, SiteTool>;
   #alwaysAsk: Set<string>;
@@ -125,6 +133,9 @@ export class AgentSession extends Emitter<SessionEvents> implements AgentSession
   #transcripts = new Map<string, { text: string; deferred: Deferred<string> }>();
   #historyWaiters: Deferred<HistoryEntry[]>[] = [];
   #closed = false;
+  // Non-readonly so a reconnect can rekey the attachment in place; `info` is
+  // the object the page already holds a reference to.
+  #info: SessionInfo;
 
   constructor(init: {
     id: string;
@@ -140,7 +151,7 @@ export class AgentSession extends Emitter<SessionEvents> implements AgentSession
     this.id = init.id;
     this.surface = init.surface;
     this.grant = init.grant;
-    this.info = init.info;
+    this.#info = init.info;
     this.#tools = new Map(init.tools.map((tool) => [tool.name, tool]));
     this.#alwaysAsk = new Set(init.grant.alwaysAsk);
     this.#decide = init.decide;
@@ -226,6 +237,45 @@ export class AgentSession extends Emitter<SessionEvents> implements AgentSession
     const wireReason = clip(reason, MAX_REASON_CHARS);
     this.#send({ t: 'session.close', s: this.id, reason: wireReason });
     this.#finish(wireReason);
+  }
+
+  /**
+   * @internal — the wallet re-established this attachment after the socket
+   * dropped, on a fresh sealed channel.
+   *
+   * The session object survives on purpose: the page holds this handle and its
+   * listeners, and a transparent reconnect that handed back a *different*
+   * object would be transparent to nobody. What cannot survive is a prompt
+   * that was in flight when the socket died — its answer was streamed into a
+   * channel nobody was holding, and the relay counts those frames rather than
+   * buffering them (ADR-005). So they are rejected here with a stable reason
+   * instead of hanging forever, and the truthful record of what the agent
+   * actually did is one `history()` call away, from the agent's own store.
+   */
+  reattached(info: SessionInfo): void {
+    this.#info = info;
+    for (const turn of this.#transcripts.values()) {
+      turn.deferred.reject(new Error('session reconnected: this prompt lost its answer; ask for history'));
+    }
+    this.#transcripts.clear();
+    for (const waiter of this.#historyWaiters) {
+      waiter.reject(new Error('session reconnected: history request lost its answer'));
+    }
+    this.#historyWaiters = [];
+    this.emit('reattached', { verify: info.verify });
+  }
+
+  /**
+   * @internal — the attachment is gone and cannot be restored (the relay never
+   * came back, or the resume was refused).
+   *
+   * Distinct from close(): there is no socket to tell anyone on, so this only
+   * settles what the page is waiting for. Sending a session.close here would
+   * be a frame into a void.
+   */
+  dropped(reason: string): void {
+    if (this.#closed) return;
+    this.#finish(reason);
   }
 
   /** @internal — called by the wallet for frames addressed to this session. */

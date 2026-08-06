@@ -130,6 +130,9 @@ await session.handle({
 });
 await assert.rejects(errorRun, /fake failure/);
 
+// A reconnect is a visible event, not a silent rekey: the words change.
+session.reattached({ agentName: 'Fake agent', runtime: 'fake', verify: 'ember-slate-quill-tide-fern-owl' });
+
 session.close('check_complete');
 await collecting;
 unsubscribe();
@@ -161,6 +164,7 @@ assert.deepEqual(
     'RUN_FINISHED',
     'RUN_STARTED',
     'RUN_ERROR',
+    'CUSTOM:agentport.reattached',
     'CUSTOM:agentport.closed',
   ],
 );
@@ -231,5 +235,12 @@ assert.deepEqual(plans[1]?.content, {
     { text: 'Save it', status: 'active' },
   ],
 });
+
+const reattach = streamEvents.find(
+  (event): event is Extract<AguiEvent, { type: 'CUSTOM'; name: 'agentport.reattached' }> =>
+    event.type === 'CUSTOM' && event.name === 'agentport.reattached',
+);
+assert.equal(reattach?.value.verify, 'ember-slate-quill-tide-fern-owl');
+assert.equal(session.info.verify, 'ember-slate-quill-tide-fern-owl');
 
 console.log(`@agentport/agui check passed (${streamEvents.length} streamed events, all valid against @ag-ui/core)`);

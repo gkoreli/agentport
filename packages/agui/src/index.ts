@@ -71,6 +71,17 @@ export type AgentPortClosedEvent = BaseEvent & {
   value: SessionEvents['closed'];
 };
 
+/**
+ * The socket dropped and the attachment was re-established underneath the
+ * session. A renderer should say so: the sealing keys are new, so the
+ * fingerprint words a careful user compared are new too.
+ */
+export type AgentPortReattachedEvent = BaseEvent & {
+  type: EventType.CUSTOM;
+  name: 'agentport.reattached';
+  value: SessionEvents['reattached'];
+};
+
 /** The subset of the AG-UI event union this adapter can produce. */
 export type AguiEvent =
   | RunStartedEvent
@@ -90,6 +101,7 @@ export type AguiEvent =
   | ReasoningEndEvent
   | ActivitySnapshotEvent
   | AgentPortApprovalEvent
+  | AgentPortReattachedEvent
   | AgentPortClosedEvent;
 
 export interface AguiAdapter {
@@ -154,6 +166,9 @@ class Translator {
       session.on('tool', (event: SessionEvents['tool']) => this.#onTool(event)),
       session.on('approval', (event: SessionEvents['approval']) =>
         this.#emit({ type: EventType.CUSTOM, name: 'agentport.approval', value: event }),
+      ),
+      session.on('reattached', (event: SessionEvents['reattached']) =>
+        this.#emit({ type: EventType.CUSTOM, name: 'agentport.reattached', value: event }),
       ),
       session.on('closed', (event: SessionEvents['closed']) => this.#onClosed(event)),
     ];

@@ -68,7 +68,30 @@ export interface WalletOptions {
    * waits (drop-in connect approval) are deliberately not covered.
    */
   handshakeTimeoutMs?: number;
+  /**
+   * Redial the relay when the socket drops unexpectedly, and re-establish
+   * every live session on the new one. Default true: a browser tab loses its
+   * socket for reasons that have nothing to do with the user's intent — a
+   * sleep, a wifi change, a relay restart — and the attachment is supposed to
+   * be the durable thing. Pass false when the caller owns reconnection
+   * (the extension's service worker does).
+   */
+  reconnect?: boolean;
 }
+
+/**
+ * Reconnect timing. These bound this client's *behavior*, not what the wire
+ * will accept, which is why they live here and not in the protocol's
+ * limits.ts: no peer validates them.
+ *
+ * The backoff is capped well under the relay's orphan grace, because a
+ * reconnect that arrives after the daemon has released the session cannot
+ * resume it — it would silently become a *new* attachment with a fresh grant
+ * the user never approved. Giving up loudly is the honest end state.
+ */
+const RECONNECT_BASE_DELAY_MS = 500;
+const RECONNECT_MAX_DELAY_MS = 15_000;
+const RECONNECT_MAX_ATTEMPTS = 12;
 
 const DEFAULT_HANDSHAKE_TIMEOUT_MS = 20_000;
 
@@ -91,6 +114,10 @@ export interface PairOffer {
 
 type WalletEvents = {
   presence: { agent: Hex; online: boolean };
+  /** The socket dropped; a redial is scheduled. `attempt` starts at 1. */
+  reconnecting: { attempt: number; delayMs: number };
+  /** The socket is back and live sessions were re-established on it. */
+  reconnected: { sessions: number; missed: number };
   closed: undefined;
 };
 
@@ -143,6 +170,13 @@ export class AgentWallet extends Emitter<WalletEvents> {
   #agentKeys = new Map<string, Hex>();
   #ready = new Deferred<void>();
   #log: Logger;
+  /** Set by close()/disconnect(): an intentional teardown never redials. */
+  #shutdown = false;
+  #reconnectAttempt = 0;
+  #reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Tools and approval decider per session, so a reconnect can rebuild the
+   *  attachment without asking the page to hand them over again. */
+  #sessionRequests = new Map<string, { tools: SiteTool[]; decide?: ApprovalDecider }>();
 
   constructor(options: WalletOptions) {
     super();
@@ -152,6 +186,12 @@ export class AgentWallet extends Emitter<WalletEvents> {
   }
 
   async connect(): Promise<void> {
+    this.#shutdown = false;
+    this.#dial();
+    return this.#ready.promise;
+  }
+
+  #dial(): void {
     const factory = this.#options.socketFactory ?? defaultSocketFactory;
     const socket = factory(this.#options.relayUrl);
     this.#socket = socket;
@@ -183,22 +223,115 @@ export class AgentWallet extends Emitter<WalletEvents> {
         });
       });
     });
-    socket.addEventListener('close', () => this.emit('closed', undefined));
+    socket.addEventListener('close', () => {
+      // Only THIS socket's death counts: a late close from a socket we already
+      // replaced must not schedule a second redial chain.
+      if (this.#socket !== socket) return;
+      if (this.#shutdown || this.#options.reconnect === false) {
+        this.emit('closed', undefined);
+        return;
+      }
+      this.#scheduleReconnect();
+    });
     // A WebSocket 'error' event carries no message; rejecting with the raw
     // Event is how "[object Event]" ends up in user-facing status lines.
     socket.addEventListener('error', () => {
       const err = new Error(`could not reach the relay at ${this.#options.relayUrl}`);
       this.#log.error('relay socket error', { err, data: { relayUrl: this.#options.relayUrl } });
-      this.#ready.reject(err);
+      // Only fail the initial connect(): once a caller is past the handshake
+      // the retry loop owns failures, and rejecting a settled deferred is a
+      // no-op that would otherwise hide the reconnect from the log.
+      if (this.#reconnectAttempt === 0) this.#ready.reject(err);
     });
-
-    return this.#ready.promise;
   }
 
   /** Graceful shutdown: ends every session, then disconnects. */
   close(): void {
+    this.#shutdown = true;
+    clearTimeout(this.#reconnectTimer);
     for (const session of this.#sessions.values()) session.close('wallet_closed');
     this.#socket?.close();
+  }
+
+  /**
+   * Redial after an unexpected close and put every live session back on the
+   * new socket.
+   *
+   * This is the page-refresh path run without a page refresh. The relay holds
+   * a dropped client's session for its orphan grace and the daemon owns the
+   * resume authority (ADR-016), so the same token that survives a reload also
+   * survives a sleeping laptop — the only thing missing was anyone trying.
+   */
+  #scheduleReconnect(): void {
+    if (this.#shutdown) return;
+    if (this.#sessions.size === 0 && this.#reconnectAttempt === 0) {
+      // Nothing to preserve and nothing in flight: report the close honestly
+      // rather than holding a socket open for a wallet nobody is using.
+      this.emit('closed', undefined);
+      return;
+    }
+    if (this.#reconnectAttempt >= RECONNECT_MAX_ATTEMPTS) {
+      this.#log.error('giving up on the relay; sessions are gone', {
+        data: { attempts: this.#reconnectAttempt, relayUrl: this.#options.relayUrl },
+      });
+      for (const session of this.#sessions.values()) session.dropped('relay_unreachable');
+      this.emit('closed', undefined);
+      return;
+    }
+    const attempt = ++this.#reconnectAttempt;
+    // Exponential with a cap. No jitter: this client dials one relay it is
+    // already attached to, so there is no thundering herd to spread out, and a
+    // deterministic delay is one less thing a flaky-reconnect bug can hide in.
+    const delayMs = Math.min(RECONNECT_BASE_DELAY_MS * 2 ** (attempt - 1), RECONNECT_MAX_DELAY_MS);
+    this.#log.warn('relay socket dropped; redialling', {
+      data: { attempt, delayMs, sessions: this.#sessions.size },
+    });
+    this.emit('reconnecting', { attempt, delayMs });
+    clearTimeout(this.#reconnectTimer);
+    this.#reconnectTimer = setTimeout(() => {
+      this.#ready = new Deferred<void>();
+      // A rejected handshake must not become an unhandled rejection: the retry
+      // loop is what reacts to it, through the socket's own close event.
+      this.#ready.promise.catch(() => {});
+      this.#dial();
+      void this.#ready.promise.then(
+        () => this.#restoreSessions(),
+        () => {},
+      );
+    }, delayMs);
+  }
+
+  /** Re-resume every live session on the fresh socket, in place. */
+  async #restoreSessions(): Promise<void> {
+    const live = [...this.#sessions.entries()];
+    let restored = 0;
+    let missedTotal = 0;
+    for (const [id, session] of live) {
+      const token = this.#resumeTokens.get(id);
+      const agent = this.#agentKeys.get(id);
+      const request = this.#sessionRequests.get(id);
+      if (!token || !agent || !request) {
+        // A session with no resume authority cannot come back; saying so is
+        // better than leaving a handle that silently swallows prompts.
+        session.dropped('not_resumable');
+        continue;
+      }
+      try {
+        const { missed } = await this.#attemptResume({ id, agent, token, ...request }, session);
+        restored++;
+        missedTotal += missed;
+      } catch (err) {
+        this.#log.warn('could not restore a session after reconnect', {
+          sessionId: id,
+          err,
+          data: { relayUrl: this.#options.relayUrl },
+        });
+        session.dropped('resume_failed');
+      }
+    }
+    this.#reconnectAttempt = 0;
+    this.#log.info('relay reconnected', { data: { restored, missed: missedTotal } });
+    this.emit('reconnected', { sessions: restored, missed: missedTotal });
   }
 
   /**
@@ -207,6 +340,11 @@ export class AgentWallet extends Emitter<WalletEvents> {
    * period so the reloaded page can resume it.
    */
   disconnect(): void {
+    // Deliberately a shutdown: this models a tab going away, where the NEXT
+    // page load resumes. Redialling here would race the reload for the same
+    // session and lose (the relay refuses a second live attachment).
+    this.#shutdown = true;
+    clearTimeout(this.#reconnectTimer);
     this.#socket?.close();
   }
 
@@ -337,13 +475,21 @@ export class AgentWallet extends Emitter<WalletEvents> {
     throw last as Error;
   }
 
-  async #attemptResume(request: {
-    id: string;
-    agent: Hex;
-    token: string;
-    tools: SiteTool[];
-    decide?: ApprovalDecider;
-  }): Promise<{ session: AgentSession; missed: number }> {
+  /**
+   * @param existing when a reconnect is restoring an attachment the page still
+   * holds. The handle is rekeyed in place rather than replaced, because the
+   * page's listeners are on the object it already has.
+   */
+  async #attemptResume(
+    request: {
+      id: string;
+      agent: Hex;
+      token: string;
+      tools: SiteTool[];
+      decide?: ApprovalDecider;
+    },
+    existing?: AgentSession,
+  ): Promise<{ session: AgentSession; missed: number }> {
     const sealPair = generateSealKeyPair();
     const resumedReply = this.#request('session.resumed', 'session.denied');
     const ms = this.#options.handshakeTimeoutMs ?? DEFAULT_HANDSHAKE_TIMEOUT_MS;
@@ -384,6 +530,14 @@ export class AgentWallet extends Emitter<WalletEvents> {
         }),
       );
       this.#agentKeys.set(request.id, request.agent);
+      if (existing) {
+        existing.reattached({
+          agentName: resumed.agentName,
+          runtime: resumed.runtime,
+          verify: this.#verifyWords.get(request.id),
+        });
+        return { session: existing, missed: resumed.missed };
+      }
       const session = this.#makeSession(
         resumed.s,
         resumed.surface,
@@ -509,8 +663,10 @@ export class AgentWallet extends Emitter<WalletEvents> {
       logger: this.#log.child('session'),
       send: (frame: SessionFrame) => this.#sendSession(frame),
     });
+    this.#sessionRequests.set(id, { tools: request.tools, decide: request.decide });
     session.on('closed', () => {
       this.#sessions.delete(id);
+      this.#sessionRequests.delete(id);
       this.#sealChannels.delete(id);
       this.#verifyWords.delete(id);
       this.#agentKeys.delete(id);

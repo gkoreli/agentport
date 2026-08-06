@@ -84,6 +84,11 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
   // the transcript: a plan is what the agent intends *now*, and replaying every
   // revision would read as repetition rather than as the conversation.
   const plan = signal<PlanStep[]>([]);
+  // Fingerprint words for the CURRENT attachment. Kept as state rather than a
+  // transient message: they change on every reconnect, and the run error that
+  // a dropped turn produces would otherwise overwrite the only notice showing
+  // them — losing the one check a careful user can actually perform.
+  const verify = signal('');
 
   let session: AgentSessionHandle | null = null;
   let adapter: AguiAdapter | null = null;
@@ -193,6 +198,21 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
                 : displayJson(approval.call.arguments),
             });
             chat.apply({ type: 'tool.end', id, status: approval.granted ? 'complete' : 'cancelled' });
+          } else if (event.name === 'agentport.reattached') {
+            // Say it out loud. The connection dropped and came back on FRESH
+            // sealing keys, so anyone who compared fingerprint words has new
+            // ones to compare — a silent rekey would quietly invalidate the
+            // only check the user can actually perform.
+            verify.value = event.value.verify ?? '';
+            notice.value = 'reconnected · new sealing keys';
+            status.value = session ? `${session.info.agentName} · ${session.info.runtime}` : status.value;
+            online.value = true;
+            // An in-flight turn lost its answer when the socket died; the
+            // composer must not stay disabled waiting for a `done` that can
+            // never arrive.
+            busy.value = false;
+            currentRunId = null;
+            chat.apply({ type: 'run.end' });
           } else if (event.name === 'agentport.closed') {
             for (const approval of pendingApprovals.value) approval.resolve(false);
             pendingApprovals.value = [];
@@ -205,6 +225,7 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
             adapter = null;
             currentRunId = null;
             plan.value = [];
+            verify.value = '';
             chat.reset();
           }
           return;
@@ -272,6 +293,7 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
     eventIterator = adapter.events[Symbol.asyncIterator]();
     live.value = true;
     online.value = true;
+    verify.value = next.info.verify ?? '';
     status.value = `${next.info.agentName} · ${next.info.runtime}`;
     notice.value = `connected · ${next.grant.tools.length} tools lent · expires ${new Date(
       next.grant.expiresAt,
@@ -421,6 +443,12 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
       <span>Agent <span class="ap-version" title="AgentPort build">v${VERSION}</span></span
       ><span class="ap-status" class:online=${online}>${status}</span>
     </div>
+    ${when(
+      computed(() => verify.value !== ''),
+      () => html`<div class="ap-verify" title="Compare these words with your agent's consent screen">
+        verify <code>${verify}</code>
+      </div>`,
+    )}
 
     ${when(
       computed(() => !live.value),
