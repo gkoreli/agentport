@@ -53,7 +53,12 @@ and ACP are components we use, not competitors and not layers to negotiate
 with. AG-UI in particular normalizes the agent-to-client edge for a builder who
 controls their own agent — the assumption this project removes.
 
-## 0.0.11
+## 0.0.12
+
+Deployed. `npm run deploy` bumps the patch itself, so this work — written up
+below under the 0.0.11 bump that preceded it — shipped as 0.0.12. The number in
+a panel header names the deployed artifact, so that is the number this entry
+carries.
 
 ### One strict schema layer for the whole wire (ADR-019 Gate B §1)
 
@@ -147,6 +152,7 @@ field-level changes.
 
 Reconstructed from the release history; see `git log` for detail.
 
+- **0.0.11** — never deployed; superseded by the 0.0.12 release bump above.
 - **0.0.10** — browser approvals made deterministic; ACP state bound to
   explicit attachments; `@gkoreli/agentport` CLI to 0.1.5; shared chat overlay
   to 0.0.9.
