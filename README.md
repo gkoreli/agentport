@@ -30,6 +30,10 @@ applications.**
 
 ## How it fits with what already exists
 
+None of the following is a competitor. Each solves a real problem next to this
+one, and where one is good we use it rather than restate it —
+[`docs/NORTH-STAR.md`](docs/NORTH-STAR.md) explains why that hierarchy matters.
+
 | layer | what we use | what we add |
 |---|---|---|
 | tool surface | WebMCP (`navigator.modelContext`) | grants scoped to *one session with one agent* |

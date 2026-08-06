@@ -2,6 +2,10 @@
 
 ## What this is
 
+> The north star — what this is for, how the neighbouring protocols relate, and
+> what we will never be — is `docs/NORTH-STAR.md`. Read it before proposing
+> architecture.
+
 `navigator.agent` — the missing primitive that lets a user bring **their own
 running agent** to any website.
 
@@ -60,6 +64,7 @@ packages/client/     wallet, session, navigator.agent provider. Isomorphic.
 site/                the deployed demo: landing + two surfaces + CF Worker/DO.
 examples/inkwell/    the original local-only demo, kept as the minimal example.
 CHANGELOG.md         what changed per version, and why it mattered.
+docs/NORTH-STAR.md   what this is for; read before proposing architecture.
 scripts/e2e.ts       the real test — relay + daemon + wallet over real sockets.
 scripts/acp-smoke.ts real-agent proof; run where the ACP agent is authed.
 scripts/remote-check.ts  pair + prompt against the deployed relay.
