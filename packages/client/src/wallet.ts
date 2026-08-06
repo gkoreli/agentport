@@ -84,6 +84,18 @@ const RECONNECT_BASE_DELAY_MS = 500;
 const RECONNECT_MAX_DELAY_MS = 15_000;
 const RECONNECT_MAX_ATTEMPTS = 12;
 
+/**
+ * Which pending request a refusal answers when no waiter listed it.
+ *
+ * Keyed by the refusal, valued by the success replies whose requests it can be
+ * answering — so a denial always settles something rather than being dropped
+ * on the floor while its caller waits.
+ */
+const DENIAL_ANSWERS: Record<string, readonly string[] | undefined> = {
+  'session.denied': ['session.opened', 'session.resumed'],
+  'connect.denied': ['session.opened'],
+};
+
 const DEFAULT_HANDSHAKE_TIMEOUT_MS = 20_000;
 
 export interface SessionRequest {
@@ -874,20 +886,51 @@ export class AgentWallet extends Emitter<WalletEvents> {
   #resolve(frame: Frame): boolean {
     const list = this.#waiters.get(frame.t);
     const deferred = list?.shift();
-    if (!deferred) {
-      // An error frame with no matching waiter still fails the oldest request.
-      if (frame.t === 'error') {
-        for (const [, queue] of this.#waiters) {
-          const pending = queue.shift();
-          if (pending) {
-            pending.reject(new Error(`${frame.code}: ${frame.message}`));
-            return true;
-          }
+    if (deferred) {
+      deferred.resolve(frame);
+      return true;
+    }
+
+    // An error frame with no matching waiter still fails the oldest request.
+    if (frame.t === 'error') {
+      for (const [, queue] of this.#waiters) {
+        const pending = queue.shift();
+        if (pending) {
+          pending.reject(new Error(`${frame.code}: ${frame.message}`));
+          return true;
         }
       }
       return false;
     }
-    deferred.resolve(frame);
-    return true;
+
+    // A refusal nobody listed still answers the request it refuses.
+    //
+    // This is a backstop, not a second implementation of the waiter list: the
+    // list still routes precisely, which matters when several opens are in
+    // flight, because all this can do is fail the OLDEST request the refusal
+    // could plausibly be answering. It buys liveness, not precision — and it
+    // logs, so a list that needed it says so instead of silently working.
+    //
+    // Every waiter names the reply types it expects, per call — a set no
+    // compiler can check is total, and forgetting the failure type is how a
+    // page ends up waiting forever on a question that was already answered.
+    // So the failure types do not depend on the list: a denial settles the
+    // oldest request it could plausibly be answering, whether or not that
+    // call site remembered to ask for it. The list is now an optimisation
+    // for routing, not the thing standing between a caller and a hang.
+    const refusal = frame.t === 'session.denied' || frame.t === 'connect.denied' ? frame : undefined;
+    if (refusal) {
+      for (const success of DENIAL_ANSWERS[refusal.t] ?? []) {
+        const pending = this.#waiters.get(success)?.shift();
+        if (pending) {
+          this.#log.warn('a refusal was not in its waiter list; failing the request it answers', {
+            data: { refusal: refusal.t, awaiting: success },
+          });
+          pending.reject(new Error(`connection declined: ${refusal.reason}`));
+          return true;
+        }
+      }
+    }
+    return false;
   }
 }

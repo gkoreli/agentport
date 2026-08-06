@@ -10,6 +10,33 @@ they moved.
 
 ## Unreleased
 
+### A refusal settles its request even when no waiter asked for it
+
+The fix above closed one waiter list. This closes the class.
+
+Four bugs found in one day shared a shape: a handler set that a compiler does
+not know is supposed to be total. Three were closed by making the set
+compiler-checked — the wire registries, the extension's `PageOutbound`, the
+session-frame router. The fourth could not be: a waiter list inside a
+promise-based request/response helper is per-call, not per-type, so there is
+nothing for a total record to be total over.
+
+So the list stops being what stands between a caller and a hang. `#resolve`
+already did this for `error` frames — "an error frame with no matching waiter
+still fails the oldest request" — and that idea simply needed to cover the
+frames that actually refuse things. A `session.denied` or `connect.denied`
+that no waiter listed now fails the oldest request it could plausibly be
+answering, and logs that it had to.
+
+It is a backstop, not a second implementation: the explicit list still routes
+precisely, which matters when several opens are in flight, because the
+fallback can only pick the oldest plausible waiter. It buys liveness, not
+precision.
+
+Proved by deleting the `session.denied` entry that the previous change added
+to `beginConnect`: the e2e checks **still pass**, and the log names the
+omission. The bug fixed above could not have hung with this in place.
+
 ### A refused connection no longer looks like a hung one
 
 `beginConnect().accepted` awaited `session.opened` or `connect.denied`. The
