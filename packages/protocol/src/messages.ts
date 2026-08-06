@@ -806,21 +806,45 @@ export function isSessionFrame(frame: Frame): frame is SessionFrame {
  * the relay now rejects them at origination instead of forwarding a frame
  * the far end is guaranteed to drop.
  */
-const CLIENT_ORIGINATED = new Set<string>([
-  'session.open',
-  'session.resume',
-  'session.close',
-  'enc',
-]);
+/**
+ * Lifecycle frames: the ones the relay must read to route, stamp, and enforce
+ * its structural checks. Everything else is content and MUST be sealed.
+ */
+const LIFECYCLE_FRAME_MEMBERS = {
+  'session.open': true,
+  'session.opened': true,
+  'session.resume': true,
+  'session.resumed': true,
+  'session.detach': true,
+  'session.denied': true,
+  'session.close': true,
+  'enc': true,
+} as const satisfies Partial<Record<SessionFrame['t'], true>>;
+
+/** Session frames carrying conversation or tool traffic — never plaintext. */
+type ContentFrameType = Exclude<SessionFrame['t'], keyof typeof LIFECYCLE_FRAME_MEMBERS>;
+
+const CLIENT_ORIGINATED_MEMBERS = {
+  'session.open': true,
+  'session.resume': true,
+  'session.close': true,
+  'enc': true,
+} as const satisfies Partial<Record<SessionFrame['t'], true>>;
 
 /** Frames an agent may put on the socket inside a session. */
-const AGENT_ORIGINATED = new Set<string>([
-  'session.opened',
-  'session.resumed',
-  'session.denied',
-  'session.close',
-  'enc',
-]);
+const AGENT_ORIGINATED_MEMBERS = {
+  'session.opened': true,
+  'session.resumed': true,
+  'session.denied': true,
+  'session.close': true,
+  'enc': true,
+} as const satisfies Partial<Record<SessionFrame['t'], true>>;
+
+// Partial, not total: these sets are deliberately a small subset, and a frame
+// missing from them is DENIED. Omission is fail-closed, so the compiler only
+// needs to catch a name that is not a frame type at all.
+const CLIENT_ORIGINATED = new Set<string>(Object.keys(CLIENT_ORIGINATED_MEMBERS));
+const AGENT_ORIGINATED = new Set<string>(Object.keys(AGENT_ORIGINATED_MEMBERS));
 
 export function mayOriginate(role: Role, type: string): boolean {
   return role === 'client' ? CLIENT_ORIGINATED.has(type) : AGENT_ORIGINATED.has(type);
@@ -832,20 +856,45 @@ export function mayOriginate(role: Role, type: string): boolean {
  * enforced at the endpoints, in openSealed() — the single implementation
  * both the daemon and the wallet use (previously duplicated in each).
  */
-export const CLIENT_SEALABLE = new Set<string>([
-  'prompt',
-  'prompt.cancel',
-  'tool.result',
-  'approval.response',
-  'history.request',
-]);
+const CLIENT_SEALABLE_MEMBERS = {
+  'prompt': true,
+  'prompt.cancel': true,
+  'tool.result': true,
+  'approval.response': true,
+  'history.request': true,
+} as const satisfies Partial<Record<ContentFrameType, true>>;
 
-export const AGENT_SEALABLE = new Set<string>([
-  'delta',
-  'thought',
-  'plan',
-  'done',
-  'tool.call',
-  'approval.request',
-  'history',
-]);
+const AGENT_SEALABLE_MEMBERS = {
+  'delta': true,
+  'thought': true,
+  'plan': true,
+  'done': true,
+  'tool.call': true,
+  'approval.request': true,
+  'history': true,
+} as const satisfies Partial<Record<ContentFrameType, true>>;
+
+/**
+ * Compile-time proof that EVERY content frame is sealable in some direction.
+ *
+ * Unlike the originated sets, omission here is not fail-closed. Both endpoints
+ * decide whether to seal by asking `SEALED_TYPES.has(frame.t)` and fall through
+ * to sending the frame as-is (`daemon.ts`'s `else this.#send(frame)`), so a
+ * content frame present in FRAME_SCHEMAS and the SessionFrame union but missing
+ * from both sets below is sent IN THE CLEAR. The relay's mayOriginate check
+ * then refuses it — but only after decoding it, and the relay is precisely the
+ * party ADR-003 exists to blind. Direct mode (ADR-011) has no such check at
+ * all. So the failure is silent toward the one adversary the sealing layer is
+ * for, and it is one forgotten line away.
+ *
+ * This alias makes that omission a build error instead.
+ */
+type UnsealableContentFrame = Exclude<
+  ContentFrameType,
+  keyof typeof CLIENT_SEALABLE_MEMBERS | keyof typeof AGENT_SEALABLE_MEMBERS
+>;
+type AssertNever<T extends never> = T;
+export type EveryContentFrameIsSealable = AssertNever<UnsealableContentFrame>;
+
+export const CLIENT_SEALABLE = new Set<string>(Object.keys(CLIENT_SEALABLE_MEMBERS));
+export const AGENT_SEALABLE = new Set<string>(Object.keys(AGENT_SEALABLE_MEMBERS));

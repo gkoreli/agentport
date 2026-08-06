@@ -10,6 +10,43 @@ they moved.
 
 ## Unreleased
 
+### A frame that forgets to be sealable no longer compiles
+
+`messages.ts` carried four hand-written `Set<string>` registries with no type
+link to the frame union: `CLIENT_ORIGINATED`, `AGENT_ORIGINATED`,
+`CLIENT_SEALABLE`, `AGENT_SEALABLE`. The sealable pair had the worst failure
+mode in the file, and worse than the `SESSION_FRAME_TYPES` drift that preceded
+it.
+
+Both endpoints decide whether to seal by asking `SEALED_TYPES.has(frame.t)` and
+fall through to sending the frame as-is (`daemon.ts`'s `else this.#send(frame)`).
+So a content frame registered in `FRAME_SCHEMAS` and the `SessionFrame` union
+but forgotten in the sealable sets was not dropped — it was **sent in the
+clear**. The relay's `mayOriginate` check does refuse it, so delivery fails
+visibly; but the relay decodes the frame before refusing it, which means the
+prompt text, tool arguments and results have already reached exactly the party
+ADR-003 exists to blind. The property that breaks is confidentiality toward the
+relay, not delivery, and in direct mode (ADR-011) there is no such check at all.
+That is must-stay-true #1, one forgotten line away, failing in the direction of
+disclosure rather than refusal.
+
+All four are now type-linked, with the distinction that matters:
+
+- **Sealable sets are exhaustive.** Lifecycle frames are named once, content is
+  `Exclude<SessionFrame['t'], lifecycle>`, and an `AssertNever` alias fails the
+  build naming any content frame missing from *both* directions. Verified by
+  deleting `plan` from `AGENT_SEALABLE`: `Type '"plan"' does not satisfy the
+  constraint 'never'`.
+- **Originated sets stay partial.** They are deliberately a small subset and a
+  frame missing from them is denied, so omission is already fail-closed; the
+  compiler only needs to reject a name that is not a frame type at all.
+
+Credit to extension-work, who found this reviewing the `SESSION_FRAME_TYPES`
+fix, and hit the same class at the extension boundary in the same session
+(`PageOutbound` declared nine message types, the validator covered seven, and
+`resume()`/`history()` never settled through the extension at all). A registry
+the compiler cannot check is a registry that will eventually be wrong.
+
 ### An attachment survives its own socket dying
 
 "Bring your own agent and carry it everywhere" was true until the network
