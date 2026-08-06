@@ -1,0 +1,79 @@
+{
+  "type": "challenge",
+  "cases": [
+    {
+      "name": "minimal valid — also maximal: nonce is fixed 32-hex, no optional fields",
+      "expect": "ok",
+      "frame": {
+        "t": "challenge",
+        "nonce": "0123456789abcdef0123456789abcdef"
+      }
+    },
+    {
+      "name": "valid: all-f nonce",
+      "expect": "ok",
+      "frame": {
+        "t": "challenge",
+        "nonce": "ffffffffffffffffffffffffffffffff"
+      }
+    },
+    {
+      "name": "missing nonce",
+      "expect": "missing_key",
+      "frame": {
+        "t": "challenge"
+      }
+    },
+    {
+      "name": "unknown extra key",
+      "expect": "unexpected_key",
+      "frame": {
+        "t": "challenge",
+        "nonce": "0123456789abcdef0123456789abcdef",
+        "extra": 1
+      }
+    },
+    {
+      "name": "nonce is a number",
+      "expect": "wrong_type",
+      "frame": {
+        "t": "challenge",
+        "nonce": 123
+      }
+    },
+    {
+      "name": "nonce uppercase hex",
+      "expect": "bad_format",
+      "frame": {
+        "t": "challenge",
+        "nonce": "0123456789ABCDEF0123456789ABCDEF"
+      }
+    },
+    {
+      "name": "nonce too short (30 chars)",
+      "expect": "bad_format",
+      "frame": {
+        "t": "challenge",
+        "nonce": "0123456789abcdef0123456789abcd"
+      }
+    },
+    {
+      "name": "nonce too long (34 chars)",
+      "expect": "bad_format",
+      "frame": {
+        "t": "challenge",
+        "nonce": "0123456789abcdef0123456789abcdefab"
+      }
+    },
+    {
+      "name": "raw: whitespace is non-canonical",
+      "expect": "non_canonical",
+      "raw": "{\"t\":\"challenge\", \"nonce\":\"0123456789abcdef0123456789abcdef\"}"
+    },
+    {
+      "name": "raw: __proto__ smuggle is just an unknown key",
+      "expect": "unexpected_key",
+      "raw": "{\"__proto__\":{},\"nonce\":\"0123456789abcdef0123456789abcdef\",\"t\":\"challenge\"}"
+    }
+  ]
+}

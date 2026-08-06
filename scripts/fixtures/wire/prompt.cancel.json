@@ -1,0 +1,69 @@
+{
+  "type": "prompt.cancel",
+  "cases": [
+    {
+      "name": "minimal valid",
+      "expect": "ok",
+      "frame": {
+        "t": "prompt.cancel",
+        "s": "s1",
+        "id": "p1"
+      }
+    },
+    {
+      "name": "both ids at 64-char limit",
+      "expect": "ok",
+      "frame": {
+        "t": "prompt.cancel",
+        "s": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.b:c",
+        "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.b:c"
+      }
+    },
+    {
+      "name": "missing id",
+      "expect": "missing_key",
+      "frame": {
+        "t": "prompt.cancel",
+        "s": "s1"
+      }
+    },
+    {
+      "name": "unknown extra key",
+      "expect": "unexpected_key",
+      "frame": {
+        "t": "prompt.cancel",
+        "s": "s1",
+        "id": "p1",
+        "force": true
+      }
+    },
+    {
+      "name": "id is null",
+      "expect": "wrong_type",
+      "frame": {
+        "t": "prompt.cancel",
+        "s": "s1",
+        "id": null
+      }
+    },
+    {
+      "name": "id one char over limit",
+      "expect": "too_long",
+      "frame": {
+        "t": "prompt.cancel",
+        "s": "s1",
+        "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    },
+    {
+      "name": "raw: \\u0041 escape is non-canonical",
+      "expect": "non_canonical",
+      "raw": "{\"t\":\"prompt.cancel\",\"s\":\"\\u0041bc\",\"id\":\"p1\"}"
+    },
+    {
+      "name": "raw: __proto__ smuggle",
+      "expect": "unexpected_key",
+      "raw": "{\"__proto__\":{},\"id\":\"p1\",\"s\":\"s1\",\"t\":\"prompt.cancel\"}"
+    }
+  ]
+}

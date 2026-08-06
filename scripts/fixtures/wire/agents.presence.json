@@ -1,0 +1,83 @@
+{
+  "type": "agents.presence",
+  "cases": [
+    {
+      "name": "minimal valid — also maximal: no optional fields, agent at fixed 64-hex",
+      "expect": "ok",
+      "frame": {
+        "t": "agents.presence",
+        "agent": "0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d",
+        "online": true
+      }
+    },
+    {
+      "name": "valid: offline",
+      "expect": "ok",
+      "frame": {
+        "t": "agents.presence",
+        "agent": "4e5f60714e5f60714e5f60714e5f60714e5f60714e5f60714e5f60714e5f6071",
+        "online": false
+      }
+    },
+    {
+      "name": "missing online",
+      "expect": "missing_key",
+      "frame": {
+        "t": "agents.presence",
+        "agent": "0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d"
+      }
+    },
+    {
+      "name": "unknown extra key",
+      "expect": "unexpected_key",
+      "frame": {
+        "t": "agents.presence",
+        "agent": "0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d",
+        "online": true,
+        "since": 1754400000000
+      }
+    },
+    {
+      "name": "online is a number",
+      "expect": "wrong_type",
+      "frame": {
+        "t": "agents.presence",
+        "agent": "0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d",
+        "online": 1
+      }
+    },
+    {
+      "name": "agent at 66 chars instead of 64",
+      "expect": "bad_format",
+      "frame": {
+        "t": "agents.presence",
+        "agent": "0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3dab",
+        "online": true
+      }
+    },
+    {
+      "name": "agent uppercase hex",
+      "expect": "bad_format",
+      "frame": {
+        "t": "agents.presence",
+        "agent": "0A1B2C3D0A1B2C3D0A1B2C3D0A1B2C3D0A1B2C3D0A1B2C3D0A1B2C3D0A1B2C3D",
+        "online": true
+      }
+    },
+    {
+      "name": "raw: duplicate online key is non-canonical",
+      "expect": "non_canonical",
+      "raw": "{\"t\":\"agents.presence\",\"agent\":\"0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d\",\"online\":true,\"online\":true}"
+    },
+    {
+      "name": "raw: \\u0061 escape in agent hex is non-canonical",
+      "expect": "non_canonical",
+      "raw": "{\"t\":\"agents.presence\",\"agent\":\"\\u0061aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"online\":true}"
+    },
+    {
+      "name": "raw: __proto__ smuggle is just an unknown key",
+      "expect": "unexpected_key",
+      "raw": "{\"__proto__\":{},\"agent\":\"0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d\",\"online\":true,\"t\":\"agents.presence\"}"
+    }
+  ]
+}

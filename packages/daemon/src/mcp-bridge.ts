@@ -115,7 +115,12 @@ export class McpBridge {
     this.#installHandlers(sessionId, registration);
     registration.ready = mcp.connect(transport);
     this.#sessions.set(sessionId, registration);
-    return { url: `http://127.0.0.1:${this.#port}/mcp/${sessionId}`, token };
+    // The wire session id is client-chosen; as a raw path segment, ids like
+    // "." or ".." would vanish under URL normalization and route wrong. Hex
+    // is immune to every path metacharacter, and deterministic — no second
+    // index needed. #handle looks registrations up by the hex form.
+    const path = Buffer.from(sessionId, 'utf8').toString('hex');
+    return { url: `http://127.0.0.1:${this.#port}/mcp/${path}`, token };
   }
 
   async unregister(sessionId: string): Promise<void> {
@@ -127,7 +132,12 @@ export class McpBridge {
   }
 
   async #handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    const sessionId = /^\/mcp\/([^/?]+)/.exec(req.url ?? '')?.[1];
+    // Path segments are the hex form minted in register(); decode back to
+    // the session id the registration map is keyed by.
+    const hexPath = /^\/mcp\/([0-9a-f]+)(?:[/?]|$)/.exec(req.url ?? '')?.[1];
+    const sessionId = hexPath && hexPath.length % 2 === 0
+      ? Buffer.from(hexPath, 'hex').toString('utf8')
+      : undefined;
     const registration = sessionId ? this.#sessions.get(sessionId) : undefined;
     if (!registration) return void res.writeHead(404).end('no such session');
     if (req.headers.authorization !== `Bearer ${registration.token}`) {

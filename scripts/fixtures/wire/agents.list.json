@@ -1,0 +1,50 @@
+{
+  "type": "agents.list",
+  "cases": [
+    {
+      "name": "minimal valid — also maximal: frame carries nothing beyond t",
+      "expect": "ok",
+      "frame": {
+        "t": "agents.list"
+      }
+    },
+    {
+      "name": "unknown extra key",
+      "expect": "unexpected_key",
+      "frame": {
+        "t": "agents.list",
+        "x": 1
+      }
+    },
+    {
+      "name": "raw: empty object — missing t fails dispatch as unknown_type (no other required keys exist for missing_key)",
+      "expect": "unknown_type",
+      "raw": "{}"
+    },
+    {
+      "name": "raw: top-level array",
+      "expect": "wrong_type",
+      "raw": "[\"agents.list\"]"
+    },
+    {
+      "name": "raw: t with trailing space",
+      "expect": "unknown_type",
+      "raw": "{\"t\":\"agents.list \"}"
+    },
+    {
+      "name": "raw: t is a number",
+      "expect": "unknown_type",
+      "raw": "{\"t\":123}"
+    },
+    {
+      "name": "raw: whitespace is non-canonical",
+      "expect": "non_canonical",
+      "raw": "{ \"t\":\"agents.list\"}"
+    },
+    {
+      "name": "raw: __proto__ smuggle is just an unknown key",
+      "expect": "unexpected_key",
+      "raw": "{\"__proto__\":{},\"t\":\"agents.list\"}"
+    }
+  ]
+}

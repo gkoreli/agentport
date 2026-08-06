@@ -1,0 +1,80 @@
+{
+  "type": "delta",
+  "cases": [
+    {
+      "name": "minimal valid (empty text allowed)",
+      "expect": "ok",
+      "frame": {
+        "t": "delta",
+        "s": "s1",
+        "promptId": "p1",
+        "text": ""
+      }
+    },
+    {
+      "name": "promptId at 64-char limit",
+      "expect": "ok",
+      "frame": {
+        "t": "delta",
+        "s": "s1",
+        "promptId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.b:c",
+        "text": "The introduction now leads with the thesis."
+      }
+    },
+    {
+      "name": "missing text",
+      "expect": "missing_key",
+      "frame": {
+        "t": "delta",
+        "s": "s1",
+        "promptId": "p1"
+      }
+    },
+    {
+      "name": "unknown extra key",
+      "expect": "unexpected_key",
+      "frame": {
+        "t": "delta",
+        "s": "s1",
+        "promptId": "p1",
+        "text": "hi",
+        "seq": 1
+      }
+    },
+    {
+      "name": "text is an array",
+      "expect": "wrong_type",
+      "frame": {
+        "t": "delta",
+        "s": "s1",
+        "promptId": "p1",
+        "text": []
+      }
+    },
+    {
+      "name": "promptId one char over limit",
+      "expect": "too_long",
+      "frame": {
+        "t": "delta",
+        "s": "s1",
+        "promptId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "text": "hi"
+      }
+    },
+    {
+      "name": "raw: truncated JSON",
+      "expect": "bad_json",
+      "raw": "{\"t\":\"delta\",\"s\":\"s1\""
+    },
+    {
+      "name": "raw: \\u0041 escape is non-canonical",
+      "expect": "non_canonical",
+      "raw": "{\"t\":\"delta\",\"s\":\"\\u0041bc\",\"promptId\":\"p1\",\"text\":\"\"}"
+    },
+    {
+      "name": "raw: __proto__ smuggle",
+      "expect": "unexpected_key",
+      "raw": "{\"__proto__\":{},\"promptId\":\"p1\",\"s\":\"s1\",\"t\":\"delta\",\"text\":\"\"}"
+    }
+  ]
+}

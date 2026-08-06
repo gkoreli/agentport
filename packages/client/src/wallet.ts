@@ -3,6 +3,8 @@ import {
   Emitter,
   PROTOCOL_VERSION,
   SEALED_TYPES,
+  NonceMismatchError,
+  WireViolation,
   answerProofBinding,
   authChallengeMessage,
   createLogger,
@@ -24,23 +26,21 @@ import {
   verifyEpk,
   type AgentCert,
   type AgentSummary,
-  type CapabilityGrant,
+  CapabilityGrant,
   type Frame,
+  type FrameType,
   type Hex,
   type Logger,
   type LogSink,
   type SessionFrame,
   type SealChannel,
   type SessionDelegation,
-  type SurfaceDescriptor,
+  SurfaceDescriptor,
 } from '@agentport/protocol';
 import { AgentSession, type ApprovalDecider, type SiteTool } from './session.js';
 import { OPEN, defaultSocketFactory, type SocketFactory, type WebSocketLike } from './socket.js';
 
 const DEFAULT_SESSION_TTL_MS = 60 * 60 * 1000;
-
-/** Frames an agent may legitimately put inside a sealed envelope. */
-const AGENT_SEALABLE = new Set<string>(['delta', 'thought', 'done', 'tool.call', 'approval.request', 'history']);
 
 /**
  * A resume refusal with the relay's reason attached, so callers can tell a
@@ -61,7 +61,16 @@ export interface WalletOptions {
   userSecretKey: Hex;
   socketFactory?: SocketFactory;
   sink?: LogSink;
+  /**
+   * How long a machine-speed handshake (open/resume) may wait for its answer.
+   * Strict decode drops a mangled reply instead of throwing, so without this
+   * the open promise would hang forever on a broken or hostile relay. Human
+   * waits (drop-in connect approval) are deliberately not covered.
+   */
+  handshakeTimeoutMs?: number;
 }
+
+const DEFAULT_HANDSHAKE_TIMEOUT_MS = 20_000;
 
 export interface SessionRequest {
   agent: Hex;
@@ -84,6 +93,33 @@ type WalletEvents = {
   presence: { agent: Hex; online: boolean };
   closed: undefined;
 };
+
+/**
+ * The page's tools and surface become protocol fields, so they are validated
+ * HERE, where the site developer can act on the message — not on the far side
+ * of the socket, where the same mistake shows up as a rejected frame and a
+ * timed-out open. Throws a WireViolation naming the exact field.
+ */
+function buildGrant(request: Omit<SessionRequest, 'agent'>): CapabilityGrant {
+  return CapabilityGrant(
+    {
+      tools: request.tools.map(({ handler: _handler, ...definition }) => definition),
+      alwaysAsk: request.alwaysAsk ?? [],
+      expiresAt: Date.now() + (request.ttlMs ?? DEFAULT_SESSION_TTL_MS),
+    },
+    'grant',
+  );
+}
+
+function buildSurface(request: Omit<SessionRequest, 'agent'>): SurfaceDescriptor {
+  return SurfaceDescriptor(
+    {
+      ...request.surface,
+      origin: request.surface.origin ?? globalThis.location?.origin ?? 'app://local',
+    },
+    'surface',
+  );
+}
 
 /**
  * The wallet: holds the user key, knows which agents the user owns, and mints
@@ -129,8 +165,14 @@ export class AgentWallet extends Emitter<WalletEvents> {
         frame = decodeFrame(String(event.data));
       } catch (err) {
         // Never silent: an undecodable frame means the peer and we disagree
-        // about the protocol, which is exactly when you need to be told.
-        this.#log.warn('dropped undecodable frame', { err, data: { relayUrl: this.#options.relayUrl } });
+        // about the protocol, which is exactly when you need to be told. Only
+        // the stable violation code and schema-defined path may be logged —
+        // never bytes off the wire (ADR-019 §1).
+        if (err instanceof WireViolation) {
+          this.#log.warn('dropped invalid frame', { data: { code: err.code, path: err.path } });
+        } else {
+          this.#log.warn('dropped undecodable frame', { err, data: { relayUrl: this.#options.relayUrl } });
+        }
         return;
       }
       void this.#onFrame(frame).catch((err: unknown) => {
@@ -173,7 +215,7 @@ export class AgentWallet extends Emitter<WalletEvents> {
   async listAgents(): Promise<AgentSummary[]> {
     this.#sendRaw({ t: 'agents.list' });
     const frame = await this.#await('agents');
-    return (frame as Extract<Frame, { t: 'agents' }>).agents;
+    return frame.agents;
   }
 
   // --- pairing -------------------------------------------------------------
@@ -181,7 +223,7 @@ export class AgentWallet extends Emitter<WalletEvents> {
   /** Step 1: look up a code the user typed or opened. Nothing is signed yet. */
   async claimPairing(code: string): Promise<PairOffer> {
     this.#sendRaw({ t: 'pair.claim', code });
-    const frame = (await this.#await('pair.offer')) as Extract<Frame, { t: 'pair.offer' }>;
+    const frame = await this.#await('pair.offer');
     return { code: frame.code, agent: frame.agent };
   }
 
@@ -216,15 +258,8 @@ export class AgentWallet extends Emitter<WalletEvents> {
     expiresAt: number;
     accepted: Promise<AgentSession>;
   }> {
-    const surface: SurfaceDescriptor = {
-      ...request.surface,
-      origin: request.surface.origin ?? globalThis.location?.origin ?? 'app://local',
-    };
-    const grant = {
-      tools: request.tools.map(({ handler: _handler, ...definition }) => definition),
-      alwaysAsk: request.alwaysAsk ?? [],
-      expiresAt: Date.now() + (request.ttlMs ?? DEFAULT_SESSION_TTL_MS),
-    };
+    const surface = buildSurface(request);
+    const grant = buildGrant(request);
 
     // The sealing keypair is minted before the code even exists; its proof is
     // scoped 'connect' because no session id exists yet. The daemon shows the
@@ -242,14 +277,14 @@ export class AgentWallet extends Emitter<WalletEvents> {
         openProofBinding('connect', surface, grant),
       ),
     });
-    const pending = (await this.#await('connect.pending')) as Extract<Frame, { t: 'connect.pending' }>;
+    const pending = await this.#await('connect.pending');
 
     const accepted = (async () => {
       const reply = await this.#await('session.opened', 'connect.denied');
       if (reply.t === 'connect.denied') {
-        throw new Error(`connection declined: ${(reply as { reason: string }).reason}`);
+        throw new Error(`connection declined: ${reply.reason}`);
       }
-      const opened = reply as Extract<Frame, { t: 'session.opened' }>;
+      const opened = reply;
       if (opened.resume) this.#resumeTokens.set(opened.s, opened.resume);
       this.#establishSeal(
         opened.s,
@@ -311,6 +346,11 @@ export class AgentWallet extends Emitter<WalletEvents> {
   }): Promise<{ session: AgentSession; missed: number }> {
     const sealPair = generateSealKeyPair();
     const resumedReply = this.#request('session.resumed', 'session.denied');
+    const ms = this.#options.handshakeTimeoutMs ?? DEFAULT_HANDSHAKE_TIMEOUT_MS;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new ResumeError(`session.resume handshake timed out after ${ms}ms`)), ms);
+    });
     try {
       this.#sendRaw({
         t: 'session.resume',
@@ -325,13 +365,13 @@ export class AgentWallet extends Emitter<WalletEvents> {
           resumeProofBinding(request.agent, request.token),
         ),
       });
-      const reply = await resumedReply.promise;
+      const reply = await Promise.race([resumedReply.promise, deadline]);
       if (reply.t === 'session.denied') {
-        throw new ResumeError((reply as { reason: string }).reason);
+        throw new ResumeError(reply.reason);
       }
       // The DAEMON answers a resume (stateless relay), and its answer carries
       // its fresh epk — one round trip, one frame, no separate rekey step.
-      const resumed = reply as Extract<Frame, { t: 'session.resumed' }>;
+      const resumed = reply;
       this.#establishSeal(
         request.id,
         sealPair,
@@ -353,6 +393,7 @@ export class AgentWallet extends Emitter<WalletEvents> {
       );
       return { session, missed: resumed.missed };
     } finally {
+      clearTimeout(timer);
       resumedReply.cancel();
     }
   }
@@ -361,15 +402,8 @@ export class AgentWallet extends Emitter<WalletEvents> {
 
   async openSession(request: SessionRequest): Promise<AgentSession> {
     const id = randomId('sess_');
-    const surface: SurfaceDescriptor = {
-      ...request.surface,
-      origin: request.surface.origin ?? globalThis.location?.origin ?? 'app://local',
-    };
-    const grant = {
-      tools: request.tools.map(({ handler: _handler, ...definition }) => definition),
-      alwaysAsk: request.alwaysAsk ?? [],
-      expiresAt: Date.now() + (request.ttlMs ?? DEFAULT_SESSION_TTL_MS),
-    };
+    const surface = buildSurface(request);
+    const grant = buildGrant(request);
 
     const sealPair = generateSealKeyPair();
     this.#sendRaw({
@@ -387,11 +421,11 @@ export class AgentWallet extends Emitter<WalletEvents> {
         openProofBinding('open', surface, grant, request.agent),
       ),
     });
-    const reply = await this.#await('session.opened', 'session.denied');
+    const reply = await this.#awaitTimed('session.open', 'session.opened', 'session.denied');
     if (reply.t === 'session.denied') {
-      throw new Error(`agent refused the session: ${(reply as { reason: string }).reason}`);
+      throw new Error(`agent refused the session: ${reply.reason}`);
     }
-    const opened = reply as Extract<Frame, { t: 'session.opened' }>;
+    const opened = reply;
     if (opened.resume) this.#resumeTokens.set(id, opened.resume);
     // A paired wallet knows exactly which agent it called, so the epk proof is
     // checked against the cert's key — the relay cannot substitute anything.
@@ -438,17 +472,18 @@ export class AgentWallet extends Emitter<WalletEvents> {
    * key. In the drop-in flow the agent identity arrives relay-stamped, so
    * first contact is TOFU — which is exactly what the fingerprint words on
    * the two consent surfaces exist to close.
+   *
+   * `epk`/`epkSig` are required fields of the reply schemas, so a downgrade
+   * attempt that strips them dies at decodeFrame ('missing_key') before this
+   * runs — refusing plaintext is now a wire-validation property.
    */
   #establishSeal(
     sessionId: string,
     sealPair: { publicKey: Hex; secretKey: Hex },
-    reply: { epk?: Hex; epkSig?: Hex; agent?: Hex },
+    reply: { epk: Hex; epkSig: Hex; agent?: Hex },
     expectedAgent: Hex | undefined,
     answerBinding: unknown,
   ): void {
-    if (!reply.epk || !reply.epkSig) {
-      throw new Error('agent omitted its sealing-key proof — refusing plaintext session');
-    }
     const verifier = expectedAgent ?? reply.agent;
     if (!verifier || !verifyEpk(verifier, sessionId, reply.epk, reply.epkSig, answerBinding)) {
       throw new Error('agent sealing-key proof failed — aborting session');
@@ -532,18 +567,42 @@ export class AgentWallet extends Emitter<WalletEvents> {
       }
       let inner: SessionFrame;
       try {
-        inner = openSealed(channel.receive, frame);
+        // openSealed enforces strict inner validation and the per-direction
+        // sealable set ('agent' here) — the relay cannot, it sees ciphertext.
+        inner = openSealed(channel.receive, frame, 'agent');
       } catch (err) {
-        this.#log.warn('failed to open sealed frame', { sessionId: frame.s, err });
-        return;
-      }
-      // The relay cannot check inner types anymore; the origination rule it
-      // used to enforce is applied here instead.
-      if (!AGENT_SEALABLE.has(inner.t)) {
-        this.#log.warn('agent sealed a frame it may not originate; dropping it', {
+        // Two failure classes (see openSealed). WireViolation: the agent
+        // itself sealed an invalid or forbidden frame, or the channel can
+        // never realign — session-fatal, and the close reason reaches the
+        // page's 'closed' event (surfaced, not just logged). Plain decrypt
+        // error: tampered or replayed input, not peer-authenticated, state
+        // untouched — dropped, the session survives. Logs carry only the
+        // stable code and schema path.
+        if (!(err instanceof WireViolation)) {
+          if (err instanceof NonceMismatchError) {
+            this.#log.warn('dropped out-of-sequence sealed frame', { sessionId: frame.s });
+          } else {
+            this.#log.warn('failed to open sealed frame; dropping it', {
+              sessionId: frame.s,
+              data: { code: 'decrypt_failed' },
+            });
+          }
+          return;
+        }
+        this.#log.error('sealed frame rejected; closing session', {
           sessionId: frame.s,
-          data: { frameType: inner.t },
+          data: { code: err.code, path: err.path },
         });
+        const session = this.#sessions.get(frame.s);
+        if (session) {
+          session.close('seal_violation');
+        } else {
+          // A sealed frame raced the open handshake: no session exists to
+          // close, so the dead channel state is discarded directly.
+          this.#sealChannels.delete(frame.s);
+          this.#verifyWords.delete(frame.s);
+          this.#agentKeys.delete(frame.s);
+        }
         return;
       }
       await this.#onFrame(inner, true);
@@ -573,7 +632,7 @@ export class AgentWallet extends Emitter<WalletEvents> {
    * next frame of the other type — an off-by-one that starved every waiter
    * behind it. Correlation waiters must never outlive their answer.
    */
-  async #await(...types: string[]): Promise<Frame> {
+  async #await<T extends FrameType>(...types: T[]): Promise<Extract<Frame, { t: T }>> {
     const request = this.#request(...types);
     try {
       return await request.promise;
@@ -582,9 +641,29 @@ export class AgentWallet extends Emitter<WalletEvents> {
     }
   }
 
+  /**
+   * #await with a deadline, for round-trips that involve no human: relay and
+   * daemon answer at machine speed or something is wrong. The waiter is
+   * withdrawn on timeout so it cannot swallow a late reply meant for a retry.
+   */
+  async #awaitTimed<T extends FrameType>(label: string, ...types: T[]): Promise<Extract<Frame, { t: T }>> {
+    const request = this.#request(...types);
+    const ms = this.#options.handshakeTimeoutMs ?? DEFAULT_HANDSHAKE_TIMEOUT_MS;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`${label} handshake timed out after ${ms}ms`)), ms);
+    });
+    try {
+      return await Promise.race([request.promise, deadline]);
+    } finally {
+      clearTimeout(timer);
+      request.cancel();
+    }
+  }
+
   /** Like #await, but cancellable: a failed attempt must withdraw its waiter
    * or the leftover deferred swallows the reply meant for the retry. */
-  #request(...types: string[]): { promise: Promise<Frame>; cancel: () => void } {
+  #request<T extends FrameType>(...types: T[]): { promise: Promise<Extract<Frame, { t: T }>>; cancel: () => void } {
     const deferred = new Deferred<Frame>();
     for (const type of types) {
       const list = this.#waiters.get(type) ?? [];
@@ -597,7 +676,10 @@ export class AgentWallet extends Emitter<WalletEvents> {
         if (index >= 0) list.splice(index, 1);
       }
     };
-    return { promise: deferred.promise, cancel };
+    // #resolve only settles a waiter with a decodeFrame-validated frame whose
+    // `t` matched the type it was filed under, so this narrowing holds by
+    // construction — it is what lets replies flow typed to every call site.
+    return { promise: deferred.promise as Promise<Extract<Frame, { t: T }>>, cancel };
   }
 
   #resolve(frame: Frame): boolean {

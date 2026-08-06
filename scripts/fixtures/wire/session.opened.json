@@ -1,0 +1,115 @@
+{
+  "type": "session.opened",
+  "cases": [
+    {
+      "name": "minimal valid opened",
+      "expect": "ok",
+      "frame": {
+        "t": "session.opened",
+        "s": "sess_0123456789abcdef01234567",
+        "agentName": "Agent",
+        "runtime": "claude-code",
+        "epk": "e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4",
+        "epkSig": "f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6"
+      }
+    },
+    {
+      "name": "maximal valid: resume token and agentName at length limits, agent stamped",
+      "expect": "ok",
+      "frame": {
+        "t": "session.opened",
+        "s": "sess_0123456789abcdef01234567",
+        "agentName": "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn",
+        "runtime": "claude-code",
+        "resume": "0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+        "epk": "e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4",
+        "epkSig": "f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6",
+        "agent": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+      }
+    },
+    {
+      "name": "missing required epkSig",
+      "expect": "missing_key",
+      "frame": {
+        "t": "session.opened",
+        "s": "sess_0123456789abcdef01234567",
+        "agentName": "Agent",
+        "runtime": "claude-code",
+        "epk": "e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4"
+      }
+    },
+    {
+      "name": "unknown extra key",
+      "expect": "unexpected_key",
+      "frame": {
+        "t": "session.opened",
+        "s": "sess_0123456789abcdef01234567",
+        "agentName": "Agent",
+        "runtime": "claude-code",
+        "epk": "e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4",
+        "epkSig": "f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6",
+        "model": "sneaky"
+      }
+    },
+    {
+      "name": "agentName is a number",
+      "expect": "wrong_type",
+      "frame": {
+        "t": "session.opened",
+        "s": "sess_0123456789abcdef01234567",
+        "agentName": 42,
+        "runtime": "claude-code",
+        "epk": "e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4",
+        "epkSig": "f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6"
+      }
+    },
+    {
+      "name": "resume token over 128-char limit",
+      "expect": "too_long",
+      "frame": {
+        "t": "session.opened",
+        "s": "sess_0123456789abcdef01234567",
+        "agentName": "Agent",
+        "runtime": "claude-code",
+        "epk": "e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4",
+        "epkSig": "f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6",
+        "resume": "0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f"
+      }
+    },
+    {
+      "name": "resume token uppercase hex",
+      "expect": "bad_format",
+      "frame": {
+        "t": "session.opened",
+        "s": "sess_0123456789abcdef01234567",
+        "agentName": "Agent",
+        "runtime": "claude-code",
+        "epk": "e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4",
+        "epkSig": "f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6",
+        "resume": "ABABABABABABABABABABABABABABABABABABABABABABABAB"
+      }
+    },
+    {
+      "name": "empty agentName under 1-char minimum",
+      "expect": "too_short",
+      "frame": {
+        "t": "session.opened",
+        "s": "sess_0123456789abcdef01234567",
+        "agentName": "",
+        "runtime": "claude-code",
+        "epk": "e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4",
+        "epkSig": "f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6"
+      }
+    },
+    {
+      "name": "raw: \\u0041 escape breaks canonical form",
+      "expect": "non_canonical",
+      "raw": "{\"t\":\"session.opened\",\"s\":\"sess_0123456789abcdef01234567\",\"agentName\":\"\\u0041gent\",\"runtime\":\"claude-code\",\"epk\":\"e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4\",\"epkSig\":\"f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6\"}"
+    },
+    {
+      "name": "raw: __proto__ key smuggle",
+      "expect": "unexpected_key",
+      "raw": "{\"__proto__\":{\"polluted\":true},\"agentName\":\"Agent\",\"epk\":\"e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4\",\"epkSig\":\"f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6\",\"runtime\":\"claude-code\",\"s\":\"sess_0123456789abcdef01234567\",\"t\":\"session.opened\"}"
+    }
+  ]
+}

@@ -1,0 +1,98 @@
+{
+  "type": "error",
+  "cases": [
+    {
+      "name": "minimal valid (empty message allowed)",
+      "expect": "ok",
+      "frame": {
+        "t": "error",
+        "code": "unsupported_version",
+        "message": ""
+      }
+    },
+    {
+      "name": "maximal valid: code and ref at 64, message at 256",
+      "expect": "ok",
+      "frame": {
+        "t": "error",
+        "code": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "message": "mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm",
+        "ref": "rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr"
+      }
+    },
+    {
+      "name": "missing code",
+      "expect": "missing_key",
+      "frame": {
+        "t": "error",
+        "message": "boom"
+      }
+    },
+    {
+      "name": "unknown extra key",
+      "expect": "unexpected_key",
+      "frame": {
+        "t": "error",
+        "code": "bad_request",
+        "message": "",
+        "detail": "x"
+      }
+    },
+    {
+      "name": "message is null",
+      "expect": "wrong_type",
+      "frame": {
+        "t": "error",
+        "code": "bad_request",
+        "message": null
+      }
+    },
+    {
+      "name": "message one past 256-char limit",
+      "expect": "too_long",
+      "frame": {
+        "t": "error",
+        "code": "bad_request",
+        "message": "mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm"
+      }
+    },
+    {
+      "name": "code one past 64-char limit",
+      "expect": "too_long",
+      "frame": {
+        "t": "error",
+        "code": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "message": ""
+      }
+    },
+    {
+      "name": "code with uppercase and dash",
+      "expect": "bad_format",
+      "frame": {
+        "t": "error",
+        "code": "Bad-Code",
+        "message": ""
+      }
+    },
+    {
+      "name": "ref with a space",
+      "expect": "bad_format",
+      "frame": {
+        "t": "error",
+        "code": "bad_request",
+        "message": "",
+        "ref": "has space"
+      }
+    },
+    {
+      "name": "raw: duplicate code key is non-canonical",
+      "expect": "non_canonical",
+      "raw": "{\"t\":\"error\",\"code\":\"bad_request\",\"code\":\"bad_request\",\"message\":\"\"}"
+    },
+    {
+      "name": "raw: __proto__ smuggle is just an unknown key",
+      "expect": "unexpected_key",
+      "raw": "{\"__proto__\":{},\"code\":\"bad_request\",\"message\":\"\",\"t\":\"error\"}"
+    }
+  ]
+}

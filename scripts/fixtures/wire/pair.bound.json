@@ -1,0 +1,107 @@
+{
+  "type": "pair.bound",
+  "cases": [
+    {
+      "name": "minimal valid",
+      "expect": "ok",
+      "frame": {
+        "t": "pair.bound",
+        "cert": {
+          "user": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+          "agent": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+          "name": "Goga's VPS Agent",
+          "runtime": "claude-code",
+          "issuedAt": 1754400000000,
+          "sig": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdeffedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+        }
+      }
+    },
+    {
+      "name": "maximal: cert location present, name at 128-char cap",
+      "expect": "ok",
+      "frame": {
+        "t": "pair.bound",
+        "cert": {
+          "user": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+          "agent": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+          "name": "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN",
+          "runtime": "claude-code",
+          "issuedAt": 1754400000000,
+          "sig": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdeffedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+          "location": "Personal VPS"
+        }
+      }
+    },
+    {
+      "name": "missing cert",
+      "expect": "missing_key",
+      "frame": {
+        "t": "pair.bound"
+      }
+    },
+    {
+      "name": "unknown top-level key",
+      "expect": "unexpected_key",
+      "frame": {
+        "t": "pair.bound",
+        "cert": {
+          "user": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+          "agent": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+          "name": "Goga's VPS Agent",
+          "runtime": "claude-code",
+          "issuedAt": 1754400000000,
+          "sig": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdeffedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+        },
+        "code": "R7KP-92MX"
+      }
+    },
+    {
+      "name": "cert is an array",
+      "expect": "wrong_type",
+      "frame": {
+        "t": "pair.bound",
+        "cert": []
+      }
+    },
+    {
+      "name": "uppercase hex user key",
+      "expect": "bad_format",
+      "frame": {
+        "t": "pair.bound",
+        "cert": {
+          "user": "ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB",
+          "agent": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+          "name": "Goga's VPS Agent",
+          "runtime": "claude-code",
+          "issuedAt": 1754400000000,
+          "sig": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdeffedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+        }
+      }
+    },
+    {
+      "name": "issuedAt past 2100",
+      "expect": "out_of_range",
+      "frame": {
+        "t": "pair.bound",
+        "cert": {
+          "user": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+          "agent": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+          "name": "Goga's VPS Agent",
+          "runtime": "claude-code",
+          "issuedAt": 4102444800001,
+          "sig": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdeffedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+        }
+      }
+    },
+    {
+      "name": "duplicate cert key",
+      "expect": "non_canonical",
+      "raw": "{\"t\":\"pair.bound\",\"cert\":{},\"cert\":{}}"
+    },
+    {
+      "name": "__proto__ smuggle inside cert",
+      "expect": "unexpected_key",
+      "raw": "{\"cert\":{\"__proto__\":{}},\"t\":\"pair.bound\"}"
+    }
+  ]
+}

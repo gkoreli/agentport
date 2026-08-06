@@ -2,4 +2,7 @@ export * from './messages.js';
 export * from './crypto.js';
 export * from './wire.js';
 export * from './seal.js';
+export * from './channel.js';
+export * from './schema.js';
+export * from './limits.js';
 export * from './log.js';

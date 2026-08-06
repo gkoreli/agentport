@@ -37,7 +37,18 @@
 import { sha256 } from '@noble/hashes/sha256';
 import { decrypt, deriveSecureChannel, encrypt, generateEphemeralKeyPair, type CipherState, type SecureChannel } from './channel.js';
 import { canonicalJson, sign, verify, type KeyPair } from './crypto.js';
-import type { CapabilityGrant, Hex, SessionFrame, SurfaceDescriptor } from './messages.js';
+import {
+  AGENT_SEALABLE,
+  CLIENT_SEALABLE,
+  type CapabilityGrant,
+  type Hex,
+  type Role,
+  type SessionFrame,
+  type SurfaceDescriptor,
+} from './messages.js';
+import { MAX_SEALED_PLAINTEXT_BYTES } from './limits.js';
+import { WireViolation } from './schema.js';
+import { decodeFrame, encodeFrame } from './wire.js';
 
 /** One session attachment's ephemeral encryption keypair. Never reuse. */
 export function generateSealKeyPair(): KeyPair {
@@ -129,47 +140,93 @@ export interface SealedFrame {
 }
 
 const encoder = new TextEncoder();
-const decoder = new TextDecoder();
+/**
+ * Fatal on purpose: a lenient decoder replaces malformed UTF-8 with U+FFFD,
+ * which would let two distinct ciphertexts decode to the same frame text and
+ * silently defeat the canonical-form check downstream.
+ */
+// Both options spelled out: the Workers type definitions require ignoreBOM,
+// the DOM ones default it — and this file compiles under both lib sets.
+const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: false });
 
 function associatedData(sessionId: string): Uint8Array {
   return encoder.encode(`agentport-seal-v1:${sessionId}`);
 }
 
+/**
+ * Seals a frame — and refuses to seal one the receiver would reject.
+ *
+ * Everything here happens BEFORE `encrypt()` advances the send counter, so a
+ * local bug (a runtime handing us an oversized string, a tool result with
+ * unbounded nesting, a text split through a surrogate pair) fails loudly at
+ * its source instead of arriving as a protocol violation that tears down the
+ * peer's session.
+ */
 export function seal(state: SealCipherState, frame: SessionFrame): SealedFrame {
-  const sealed = encrypt(state, encoder.encode(JSON.stringify(frame)), associatedData(frame.s));
+  // encodeFrame, not JSON.stringify: the inner frame must be canonical or the
+  // receiver's decodeFrame will reject it after decryption. decodeFrame here
+  // is the same check the receiver will run — if it throws, we built a frame
+  // we had no business sending.
+  const wire = encodeFrame(frame);
+  decodeFrame(wire);
+  const plaintext = encoder.encode(wire);
+  if (plaintext.length > MAX_SEALED_PLAINTEXT_BYTES) throw new WireViolation('oversize', 'enc');
+  const sealed = encrypt(state, plaintext, associatedData(frame.s));
   return { t: 'enc', s: frame.s, n: sealed.nonce, c: sealed.ciphertext };
 }
 
-/** Throws on tampering, replay, reordering, or nonce exhaustion. */
-export function openSealed(state: SealCipherState, sealed: SealedFrame): SessionFrame {
+/**
+ * Throws on tampering, replay, reordering, nonce exhaustion — and, since
+ * ADR-019 §1, on any inner frame that fails strict validation: an oversized
+ * plaintext, a non-canonical or malformed inner JSON, a frame type that is
+ * not sealable at all, or one the sending side (`from`) may not originate.
+ * The relay cannot see inside `enc`, so this is where the per-direction
+ * origination rule lives — one implementation for both the daemon (receiving
+ * from the client) and the wallet (receiving from the agent).
+ *
+ * Callers must treat the two failure classes differently:
+ *  - decrypt failures (tamper, replay, wrong nonce) throw plain Errors and
+ *    advance nothing. They are NOT peer-authenticated — an on-path relay can
+ *    inject garbage — so the caller logs and drops the frame; the channel
+ *    stays usable for the next authentic frame.
+ *  - WireViolation is thrown only AFTER authentication succeeded: the peer
+ *    itself sealed an invalid or forbidden inner frame. That is a protocol
+ *    violation by an authenticated party and is session-fatal — close with a
+ *    stable reason, never silently drop.
+ */
+export function openSealed(state: SealCipherState, sealed: SealedFrame, from: Role): SessionFrame {
   const plaintext = decrypt(
     state,
     { nonce: sealed.n, ciphertext: sealed.c },
     associatedData(sealed.s),
   );
-  const frame = JSON.parse(decoder.decode(plaintext)) as SessionFrame;
-  if (frame.s !== sealed.s) throw new Error('sealed frame session id mismatch');
-  return frame;
+  if (plaintext.length > MAX_SEALED_PLAINTEXT_BYTES) throw new WireViolation('oversize', 'enc');
+  let text: string;
+  try {
+    text = decoder.decode(plaintext);
+  } catch {
+    // The AEAD tag already verified, so these bytes are the peer's own: it
+    // sealed something that is not UTF-8. That is a protocol violation, not
+    // the droppable class — surface it as one rather than letting a raw
+    // TypeError be misread as a decrypt failure.
+    throw new WireViolation('bad_format', 'enc');
+  }
+  const frame = decodeFrame(text);
+  if (!SEALED_TYPES.has(frame.t)) throw new WireViolation('forbidden', 'enc');
+  const allowed = from === 'client' ? CLIENT_SEALABLE : AGENT_SEALABLE;
+  if (!allowed.has(frame.t)) throw new WireViolation('forbidden', 'enc');
+  const inner = frame as SessionFrame;
+  if (inner.s !== sealed.s) throw new WireViolation('mismatch', 'enc.s');
+  return inner;
 }
 
 /**
  * Frame types that carry conversation or tool traffic and must be sealed.
  * Lifecycle frames (open/opened/resume/close/…) stay readable because the
- * relay needs them to route and to enforce its structural checks.
+ * relay needs them to route and to enforce its structural checks. Derived
+ * from the two per-direction sets so the three can never drift.
  */
-export const SEALED_TYPES = new Set<string>([
-  'prompt',
-  'prompt.cancel',
-  'delta',
-  'thought',
-  'done',
-  'tool.call',
-  'tool.result',
-  'approval.request',
-  'approval.response',
-  'history.request',
-  'history',
-]);
+export const SEALED_TYPES = new Set<string>([...CLIENT_SEALABLE, ...AGENT_SEALABLE]);
 
 // ---------------------------------------------------------------------------
 // Fingerprint words — the human MITM check

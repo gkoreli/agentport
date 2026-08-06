@@ -1,8 +1,16 @@
 import {
   Deferred,
   Emitter,
+  MAX_ERROR_CHARS,
+  MAX_JSON_DEPTH,
+  MAX_JSON_LEAF_CHARS,
+  MAX_JSON_NODES,
+  MAX_REASON_CHARS,
+  MAX_TEXT_CHARS,
+  WireViolation,
   createLogger,
   isPromptId,
+  jsonValue,
   randomId,
   toErr,
   type ApprovalRequest,
@@ -16,6 +24,32 @@ import {
 } from '@agentport/protocol';
 
 export type ToolHandler = (args: Record<string, unknown>) => unknown | Promise<unknown>;
+
+/**
+ * Page-supplied values must be clamped BEFORE sealing: the daemon treats a
+ * sealed frame that fails strict validation as session-fatal (ADR-019 §1 —
+ * AEAD counters cannot skip a frame), so an oversized prompt or tool result
+ * that slipped through would kill the whole attachment, not just one call.
+ */
+const wireJson = jsonValue(MAX_JSON_DEPTH, MAX_JSON_NODES, MAX_JSON_LEAF_CHARS);
+
+/**
+ * Validate page-supplied JSON in the exact form it takes on the wire: the
+ * frame is JSON.stringify'd at seal time, so the round-tripped value — not
+ * the live object with its prototypes, Dates, and toJSON hooks — is what the
+ * daemon will validate. Throws WireViolation (bounds) or TypeError (cycles,
+ * BigInt); callers decide whether that rejects the call or degrades it.
+ */
+function toWireJson(value: unknown): unknown {
+  const encoded = JSON.stringify(value);
+  if (encoded === undefined) throw new WireViolation('wrong_type', '');
+  return wireJson(JSON.parse(encoded), '');
+}
+
+/** Clamp a page-supplied operational string to its wire bound, visibly. */
+function clip(value: string, max: number): string {
+  return value.length > max ? `${value.slice(0, max - 1)}…` : value;
+}
 
 /** A site tool: the definition the agent sees plus the code that runs it. */
 export interface SiteTool extends ToolDefinition {
@@ -133,9 +167,29 @@ export class AgentSession extends Emitter<SessionEvents> implements AgentSession
     if (!isPromptId(id)) throw new Error('invalid prompt id');
     if (this.#transcripts.has(id)) throw new Error('prompt id is already active');
     if (this.#closed) return { id, result: Promise.reject(new Error('session is closed')) };
+    // Rejected, never truncated: silently sending a shortened prompt would
+    // have the agent act on words the user did not say.
+    if (text.length === 0) {
+      return { id, result: Promise.reject(new Error('prompt text is empty')) };
+    }
+    if (text.length > MAX_TEXT_CHARS) {
+      return {
+        id,
+        result: Promise.reject(new Error(`prompt text exceeds the protocol limit of ${MAX_TEXT_CHARS} characters`)),
+      };
+    }
+    let wireContext: Record<string, unknown> | undefined;
+    if (context !== undefined) {
+      try {
+        wireContext = toWireJson(context) as Record<string, unknown>;
+      } catch (err) {
+        const code = err instanceof WireViolation ? err.code : 'unserializable';
+        return { id, result: Promise.reject(new Error(`prompt context is not valid wire JSON (${code})`)) };
+      }
+    }
     const deferred = new Deferred<string>();
     this.#transcripts.set(id, { text: '', deferred });
-    this.#send({ t: 'prompt', s: this.id, id, text, ...(context ? { context } : {}) });
+    this.#send({ t: 'prompt', s: this.id, id, text, ...(wireContext ? { context: wireContext } : {}) });
     return { id, result: deferred.promise };
   }
 
@@ -155,13 +209,20 @@ export class AgentSession extends Emitter<SessionEvents> implements AgentSession
   }
 
   cancel(promptId: string): void {
+    // A malformed id could never name an active prompt, but it WOULD fail the
+    // daemon's strict decode inside the sealed channel — which is fatal for
+    // the whole session, not just this cancel. Refuse it here instead.
+    if (!isPromptId(promptId)) throw new Error('invalid prompt id');
     this.#send({ t: 'prompt.cancel', s: this.id, id: promptId });
   }
 
   close(reason = 'user_closed'): void {
     if (this.#closed) return;
-    this.#send({ t: 'session.close', s: this.id, reason });
-    this.#finish(reason);
+    // Clamped, not rejected: a close must always go through, and a reason is
+    // operational metadata a trailing ellipsis cannot falsify.
+    const wireReason = clip(reason, MAX_REASON_CHARS);
+    this.#send({ t: 'session.close', s: this.id, reason: wireReason });
+    this.#finish(wireReason);
   }
 
   /** @internal — called by the wallet for frames addressed to this session. */
@@ -235,12 +296,13 @@ export class AgentSession extends Emitter<SessionEvents> implements AgentSession
       }
     }
 
+    let result: unknown;
     try {
-      const result = await tool.handler(frame.arguments);
-      this.#send({ t: 'tool.result', s: this.id, id: frame.id, ok: true, result });
-      this.emit('tool', { name: frame.name, arguments: frame.arguments, ok: true, result });
+      result = await tool.handler(frame.arguments);
     } catch (err) {
-      const error = toErr(err).message;
+      // The thrown message is page-authored free text; clamp it to the wire
+      // bound so reporting one failure cannot cause a second, fatal one.
+      const error = clip(toErr(err).message, MAX_ERROR_CHARS);
       this.#log.error('site tool handler failed', {
         sessionId: this.id,
         err,
@@ -248,7 +310,37 @@ export class AgentSession extends Emitter<SessionEvents> implements AgentSession
       });
       this.#send({ t: 'tool.result', s: this.id, id: frame.id, ok: false, error });
       this.emit('tool', { name: frame.name, arguments: frame.arguments, ok: false, error });
+      return;
     }
+
+    let wireResult: unknown;
+    try {
+      wireResult = result === undefined ? undefined : toWireJson(result);
+    } catch (err) {
+      // A tool result must never kill the session: the daemon rejects any
+      // sealed frame failing strict validation as session-fatal, so an
+      // out-of-bounds result degrades to a stable error the agent can read.
+      const error =
+        err instanceof WireViolation ? 'tool result exceeds protocol bounds' : 'tool result is not JSON-serializable';
+      this.#log.warn('tool result rejected before sealing', {
+        sessionId: this.id,
+        data: {
+          tool: frame.name,
+          ...(err instanceof WireViolation ? { code: err.code, path: err.path } : { code: 'unserializable' }),
+        },
+      });
+      this.#send({ t: 'tool.result', s: this.id, id: frame.id, ok: false, error });
+      this.emit('tool', { name: frame.name, arguments: frame.arguments, ok: false, error });
+      return;
+    }
+    this.#send({
+      t: 'tool.result',
+      s: this.id,
+      id: frame.id,
+      ok: true,
+      ...(wireResult !== undefined ? { result: wireResult } : {}),
+    });
+    this.emit('tool', { name: frame.name, arguments: frame.arguments, ok: true, result });
   }
 
   async #onApproval(frame: ApprovalRequest): Promise<void> {

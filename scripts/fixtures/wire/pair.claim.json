@@ -1,0 +1,84 @@
+{
+  "type": "pair.claim",
+  "cases": [
+    {
+      "name": "minimal valid",
+      "expect": "ok",
+      "frame": {
+        "t": "pair.claim",
+        "code": "R7KP-92MX"
+      }
+    },
+    {
+      "name": "boundary: code at alphabet edges",
+      "expect": "ok",
+      "frame": {
+        "t": "pair.claim",
+        "code": "AZ29-ZA92"
+      }
+    },
+    {
+      "name": "missing code",
+      "expect": "missing_key",
+      "frame": {
+        "t": "pair.claim"
+      }
+    },
+    {
+      "name": "unknown extra key",
+      "expect": "unexpected_key",
+      "frame": {
+        "t": "pair.claim",
+        "code": "R7KP-92MX",
+        "extra": "x"
+      }
+    },
+    {
+      "name": "code is null",
+      "expect": "wrong_type",
+      "frame": {
+        "t": "pair.claim",
+        "code": null
+      }
+    },
+    {
+      "name": "underscore instead of dash",
+      "expect": "bad_format",
+      "frame": {
+        "t": "pair.claim",
+        "code": "AAAA_2222"
+      }
+    },
+    {
+      "name": "code contains excluded digit 0",
+      "expect": "bad_format",
+      "frame": {
+        "t": "pair.claim",
+        "code": "R7KP-92M0"
+      }
+    },
+    {
+      "name": "code one char over pattern cap",
+      "expect": "too_long",
+      "frame": {
+        "t": "pair.claim",
+        "code": "R7KP-92MXX"
+      }
+    },
+    {
+      "name": "\\u-escaped letter in code",
+      "expect": "non_canonical",
+      "raw": "{\"t\":\"pair.claim\",\"code\":\"\\u00527KP-92MX\"}"
+    },
+    {
+      "name": "__proto__ key smuggle",
+      "expect": "unexpected_key",
+      "raw": "{\"__proto__\":{},\"t\":\"pair.claim\"}"
+    },
+    {
+      "name": "unterminated JSON",
+      "expect": "bad_json",
+      "raw": "{\"t\":\"pair.claim\",\"code\":\"R7KP-92MX\""
+    }
+  ]
+}

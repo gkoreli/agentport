@@ -1,0 +1,69 @@
+{
+  "type": "session.denied",
+  "cases": [
+    {
+      "name": "minimal valid denied",
+      "expect": "ok",
+      "frame": {
+        "t": "session.denied",
+        "s": "sess_0123456789abcdef01234567",
+        "reason": "user declined"
+      }
+    },
+    {
+      "name": "maximal valid: reason at 256-char limit",
+      "expect": "ok",
+      "frame": {
+        "t": "session.denied",
+        "s": "sess_0123456789abcdef01234567",
+        "reason": "rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr"
+      }
+    },
+    {
+      "name": "missing required reason",
+      "expect": "missing_key",
+      "frame": {
+        "t": "session.denied",
+        "s": "sess_0123456789abcdef01234567"
+      }
+    },
+    {
+      "name": "unknown extra key",
+      "expect": "unexpected_key",
+      "frame": {
+        "t": "session.denied",
+        "s": "sess_0123456789abcdef01234567",
+        "reason": "user declined",
+        "code": "denied"
+      }
+    },
+    {
+      "name": "reason is a number",
+      "expect": "wrong_type",
+      "frame": {
+        "t": "session.denied",
+        "s": "sess_0123456789abcdef01234567",
+        "reason": 42
+      }
+    },
+    {
+      "name": "reason one char over 256 limit",
+      "expect": "too_long",
+      "frame": {
+        "t": "session.denied",
+        "s": "sess_0123456789abcdef01234567",
+        "reason": "rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr"
+      }
+    },
+    {
+      "name": "raw: escaped solidus breaks canonical form",
+      "expect": "non_canonical",
+      "raw": "{\"t\":\"session.denied\",\"s\":\"sess_0123456789abcdef01234567\",\"reason\":\"a\\/b\"}"
+    },
+    {
+      "name": "raw: __proto__ key smuggle",
+      "expect": "unexpected_key",
+      "raw": "{\"__proto__\":{\"polluted\":true},\"reason\":\"user declined\",\"s\":\"sess_0123456789abcdef01234567\",\"t\":\"session.denied\"}"
+    }
+  ]
+}

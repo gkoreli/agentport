@@ -16,6 +16,7 @@
     "daemon": "tsx packages/daemon/src/cli.ts",
     "demo": "tsx examples/inkwell/src/serve.ts",
     "e2e": "tsx scripts/e2e.ts",
+    "wire:check": "tsx scripts/wire-check.ts",
     "build:extension": "tsx packages/extension/build.ts",
     "check:extension": "npm run check -w @agentport/extension",
     "clean": "rm -rf packages/*/dist examples/*/dist",

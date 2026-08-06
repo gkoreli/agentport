@@ -1,0 +1,87 @@
+{
+  "type": "connect.reject",
+  "cases": [
+    {
+      "name": "minimal valid",
+      "expect": "ok",
+      "frame": {
+        "t": "connect.reject",
+        "code": "R7KP-92MX",
+        "reason": "user declined"
+      }
+    },
+    {
+      "name": "boundary: reason at 256-char cap",
+      "expect": "ok",
+      "frame": {
+        "t": "connect.reject",
+        "code": "R7KP-92MX",
+        "reason": "rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr"
+      }
+    },
+    {
+      "name": "boundary: empty reason",
+      "expect": "ok",
+      "frame": {
+        "t": "connect.reject",
+        "code": "R7KP-92MX",
+        "reason": ""
+      }
+    },
+    {
+      "name": "missing reason",
+      "expect": "missing_key",
+      "frame": {
+        "t": "connect.reject",
+        "code": "R7KP-92MX"
+      }
+    },
+    {
+      "name": "unknown extra key",
+      "expect": "unexpected_key",
+      "frame": {
+        "t": "connect.reject",
+        "code": "R7KP-92MX",
+        "reason": "",
+        "retry": false
+      }
+    },
+    {
+      "name": "reason is a number",
+      "expect": "wrong_type",
+      "frame": {
+        "t": "connect.reject",
+        "code": "R7KP-92MX",
+        "reason": 42
+      }
+    },
+    {
+      "name": "reason one char over cap",
+      "expect": "too_long",
+      "frame": {
+        "t": "connect.reject",
+        "code": "R7KP-92MX",
+        "reason": "rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr"
+      }
+    },
+    {
+      "name": "lowercase code",
+      "expect": "bad_format",
+      "frame": {
+        "t": "connect.reject",
+        "code": "r7kp-92mx",
+        "reason": ""
+      }
+    },
+    {
+      "name": "duplicate reason key",
+      "expect": "non_canonical",
+      "raw": "{\"t\":\"connect.reject\",\"code\":\"R7KP-92MX\",\"reason\":\"a\",\"reason\":\"b\"}"
+    },
+    {
+      "name": "__proto__ key smuggle",
+      "expect": "unexpected_key",
+      "raw": "{\"__proto__\":{},\"t\":\"connect.reject\"}"
+    }
+  ]
+}

@@ -684,6 +684,19 @@ function onWidgetEvent(event: string, payload: unknown): void {
   }
 }
 
+/**
+ * Close reasons are stable protocol codes, so most render as-is. The one that
+ * needs words is `seal_violation` (ADR-019): a sealed frame failed strict
+ * validation, and because the AEAD counters advance in lockstep the session
+ * cannot skip a frame and survive — the wallet tore it down. Re-attaching is
+ * safe and mints fresh keys; the user should know that, not guess it.
+ */
+function detachNotice(reason: string): string {
+  return reason === 'seal_violation'
+    ? 'Detached: encrypted traffic in this session failed verification, so it was shut down for safety. Attach again to start a fresh session.'
+    : `Detached: ${reason}`;
+}
+
 function onWidgetClosed(reason: string): void {
   widgetRef = undefined;
   widgetPromptId = undefined;
@@ -692,7 +705,7 @@ function onWidgetClosed(reason: string): void {
   widgetReasoningMessages.clear();
   const ui = overlayInstance;
   ui?.reset();
-  ui?.notice(`Detached: ${reason}`);
+  ui?.notice(detachNotice(reason));
 }
 
 // --- boot ------------------------------------------------------------------

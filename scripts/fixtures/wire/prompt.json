@@ -1,0 +1,141 @@
+{
+  "type": "prompt",
+  "cases": [
+    {
+      "name": "minimal valid",
+      "expect": "ok",
+      "frame": {
+        "t": "prompt",
+        "s": "s1",
+        "id": "p1",
+        "text": "Hello"
+      }
+    },
+    {
+      "name": "maximal valid: context present, id at 64-char limit",
+      "expect": "ok",
+      "frame": {
+        "t": "prompt",
+        "s": "s1",
+        "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.b:c",
+        "text": "Summarize the selected paragraph",
+        "context": {
+          "selection": "para-2",
+          "documentTitle": "Draft",
+          "words": 120
+        }
+      }
+    },
+    {
+      "name": "missing text",
+      "expect": "missing_key",
+      "frame": {
+        "t": "prompt",
+        "s": "s1",
+        "id": "p1"
+      }
+    },
+    {
+      "name": "unknown extra key",
+      "expect": "unexpected_key",
+      "frame": {
+        "t": "prompt",
+        "s": "s1",
+        "id": "p1",
+        "text": "hi",
+        "model": "x"
+      }
+    },
+    {
+      "name": "text is a number",
+      "expect": "wrong_type",
+      "frame": {
+        "t": "prompt",
+        "s": "s1",
+        "id": "p1",
+        "text": 5
+      }
+    },
+    {
+      "name": "empty text",
+      "expect": "too_short",
+      "frame": {
+        "t": "prompt",
+        "s": "s1",
+        "id": "p1",
+        "text": ""
+      }
+    },
+    {
+      "name": "id one char over limit",
+      "expect": "too_long",
+      "frame": {
+        "t": "prompt",
+        "s": "s1",
+        "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "text": "hi"
+      }
+    },
+    {
+      "name": "context nesting-depth bomb (20 levels)",
+      "expect": "too_deep",
+      "frame": {
+        "t": "prompt",
+        "s": "s1",
+        "id": "p1",
+        "text": "hi",
+        "context": {
+          "d": {
+            "d": {
+              "d": {
+                "d": {
+                  "d": {
+                    "d": {
+                      "d": {
+                        "d": {
+                          "d": {
+                            "d": {
+                              "d": {
+                                "d": {
+                                  "d": {
+                                    "d": {
+                                      "d": {
+                                        "d": {
+                                          "d": {
+                                            "d": {
+                                              "d": {
+                                                "leaf": true
+                                              }
+                                            }
+                                          }
+                                        }
+                                      }
+                                    }
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "raw: whitespace is non-canonical",
+      "expect": "non_canonical",
+      "raw": "{\"t\":\"prompt\", \"s\":\"s1\",\"id\":\"p1\",\"text\":\"hi\"}"
+    },
+    {
+      "name": "raw: __proto__ smuggle",
+      "expect": "unexpected_key",
+      "raw": "{\"__proto__\":{},\"id\":\"p1\",\"s\":\"s1\",\"t\":\"prompt\",\"text\":\"hi\"}"
+    }
+  ]
+}

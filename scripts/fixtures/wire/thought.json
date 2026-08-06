@@ -1,0 +1,85 @@
+{
+  "type": "thought",
+  "cases": [
+    {
+      "name": "minimal valid (empty text allowed)",
+      "expect": "ok",
+      "frame": {
+        "t": "thought",
+        "s": "s1",
+        "promptId": "p1",
+        "text": ""
+      }
+    },
+    {
+      "name": "s at 64-char limit",
+      "expect": "ok",
+      "frame": {
+        "t": "thought",
+        "s": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.b:c",
+        "promptId": "p1",
+        "text": "Scanning the document for the requested section"
+      }
+    },
+    {
+      "name": "missing promptId",
+      "expect": "missing_key",
+      "frame": {
+        "t": "thought",
+        "s": "s1",
+        "text": "hi"
+      }
+    },
+    {
+      "name": "unknown extra key",
+      "expect": "unexpected_key",
+      "frame": {
+        "t": "thought",
+        "s": "s1",
+        "promptId": "p1",
+        "text": "hi",
+        "kind": "plan"
+      }
+    },
+    {
+      "name": "promptId is a number",
+      "expect": "wrong_type",
+      "frame": {
+        "t": "thought",
+        "s": "s1",
+        "promptId": 3,
+        "text": "hi"
+      }
+    },
+    {
+      "name": "s one char over limit",
+      "expect": "too_long",
+      "frame": {
+        "t": "thought",
+        "s": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "promptId": "p1",
+        "text": "hi"
+      }
+    },
+    {
+      "name": "s with forbidden character",
+      "expect": "bad_format",
+      "frame": {
+        "t": "thought",
+        "s": "s 1",
+        "promptId": "p1",
+        "text": "hi"
+      }
+    },
+    {
+      "name": "raw: whitespace is non-canonical",
+      "expect": "non_canonical",
+      "raw": "{\"t\":\"thought\", \"s\":\"s1\",\"promptId\":\"p1\",\"text\":\"hi\"}"
+    },
+    {
+      "name": "raw: __proto__ smuggle",
+      "expect": "unexpected_key",
+      "raw": "{\"__proto__\":{},\"promptId\":\"p1\",\"s\":\"s1\",\"t\":\"thought\",\"text\":\"hi\"}"
+    }
+  ]
+}

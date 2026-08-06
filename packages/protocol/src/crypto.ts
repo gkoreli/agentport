@@ -25,7 +25,11 @@ export function toHex(bytes: Uint8Array): Hex {
 
 export function fromHex(hex: Hex): Uint8Array {
   if (hex.length % 2 !== 0) throw new Error('odd-length hex string');
-  if (!/^[0-9a-f]*$/i.test(hex)) throw new Error('invalid hex string');
+  // Lowercase only: toHex never emits uppercase, and every hex comparison and
+  // Map key in the system is case-sensitive — accepting mixed case here would
+  // let two spellings of one key pass crypto while failing equality (ADR-019 §1
+  // "reject duplicate or ambiguous representations").
+  if (!/^[0-9a-f]*$/.test(hex)) throw new Error('invalid hex string');
   const out = new Uint8Array(hex.length / 2);
   for (let i = 0; i < out.length; i++) {
     const byte = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);

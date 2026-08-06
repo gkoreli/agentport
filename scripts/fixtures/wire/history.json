@@ -1,0 +1,176 @@
+{
+  "type": "history",
+  "cases": [
+    {
+      "name": "minimal valid (empty transcript)",
+      "expect": "ok",
+      "frame": {
+        "t": "history",
+        "s": "s1",
+        "entries": []
+      }
+    },
+    {
+      "name": "maximal valid: all roles, s at 64-char limit",
+      "expect": "ok",
+      "frame": {
+        "t": "history",
+        "s": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.b:c",
+        "entries": [
+          {
+            "role": "user",
+            "text": "Fix the intro",
+            "at": 1717200000000
+          },
+          {
+            "role": "thought",
+            "text": "Reading the document",
+            "at": 1717200000001
+          },
+          {
+            "role": "tool",
+            "text": "inkwell.document.read",
+            "at": 1717200000002
+          },
+          {
+            "role": "approval",
+            "text": "approved inkwell.document.replaceSelection",
+            "at": 1717200000003
+          },
+          {
+            "role": "agent",
+            "text": "Done. Two edits applied.",
+            "at": 1717200000004
+          }
+        ]
+      }
+    },
+    {
+      "name": "missing entries",
+      "expect": "missing_key",
+      "frame": {
+        "t": "history",
+        "s": "s1"
+      }
+    },
+    {
+      "name": "entry missing at",
+      "expect": "missing_key",
+      "frame": {
+        "t": "history",
+        "s": "s1",
+        "entries": [
+          {
+            "role": "user",
+            "text": "hi"
+          }
+        ]
+      }
+    },
+    {
+      "name": "unknown extra key",
+      "expect": "unexpected_key",
+      "frame": {
+        "t": "history",
+        "s": "s1",
+        "entries": [],
+        "extra": 1
+      }
+    },
+    {
+      "name": "entry with unknown key",
+      "expect": "unexpected_key",
+      "frame": {
+        "t": "history",
+        "s": "s1",
+        "entries": [
+          {
+            "role": "user",
+            "text": "hi",
+            "at": 1717200000000,
+            "id": "x"
+          }
+        ]
+      }
+    },
+    {
+      "name": "entries is an object",
+      "expect": "wrong_type",
+      "frame": {
+        "t": "history",
+        "s": "s1",
+        "entries": {}
+      }
+    },
+    {
+      "name": "entry role outside enum",
+      "expect": "bad_format",
+      "frame": {
+        "t": "history",
+        "s": "s1",
+        "entries": [
+          {
+            "role": "system",
+            "text": "hi",
+            "at": 1717200000000
+          }
+        ]
+      }
+    },
+    {
+      "name": "entry timestamp negative",
+      "expect": "out_of_range",
+      "frame": {
+        "t": "history",
+        "s": "s1",
+        "entries": [
+          {
+            "role": "user",
+            "text": "hi",
+            "at": -1
+          }
+        ]
+      }
+    },
+    {
+      "name": "entry text is null",
+      "expect": "wrong_type",
+      "frame": {
+        "t": "history",
+        "s": "s1",
+        "entries": [
+          {
+            "role": "user",
+            "text": null,
+            "at": 1717200000000
+          }
+        ]
+      }
+    },
+    {
+      "name": "raw: duplicate key",
+      "expect": "non_canonical",
+      "raw": "{\"t\":\"history\",\"s\":\"s1\",\"s\":\"s1\",\"entries\":[]}"
+    },
+    {
+      "name": "raw: __proto__ smuggle inside entry",
+      "expect": "unexpected_key",
+      "raw": "{\"entries\":[{\"__proto__\":{},\"at\":1717200000000,\"role\":\"user\",\"text\":\"hi\"}],\"s\":\"s1\",\"t\":\"history\"}"
+    },
+    {
+      "name": "entry timestamp 0 means unknown (ACP replay)",
+      "expect": "ok",
+      "frame": {
+        "t": "history",
+        "s": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.b:c",
+        "entries": [
+          {
+            "role": "user",
+            "text": "replayed without timestamps",
+            "at": 0
+          }
+        ]
+      }
+    }
+  ]
+}

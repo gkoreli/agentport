@@ -1,0 +1,87 @@
+{
+  "type": "connect.pending",
+  "cases": [
+    {
+      "name": "minimal valid",
+      "expect": "ok",
+      "frame": {
+        "t": "connect.pending",
+        "code": "R7KP-92MX",
+        "expiresAt": 1754400000000
+      }
+    },
+    {
+      "name": "boundary: expiresAt at TIMESTAMP_MAX",
+      "expect": "ok",
+      "frame": {
+        "t": "connect.pending",
+        "code": "2345-6789",
+        "expiresAt": 4102444800000
+      }
+    },
+    {
+      "name": "missing code",
+      "expect": "missing_key",
+      "frame": {
+        "t": "connect.pending",
+        "expiresAt": 1754400000000
+      }
+    },
+    {
+      "name": "unknown extra key",
+      "expect": "unexpected_key",
+      "frame": {
+        "t": "connect.pending",
+        "code": "R7KP-92MX",
+        "expiresAt": 1754400000000,
+        "ttl": 60
+      }
+    },
+    {
+      "name": "expiresAt is a string",
+      "expect": "wrong_type",
+      "frame": {
+        "t": "connect.pending",
+        "code": "R7KP-92MX",
+        "expiresAt": "soon"
+      }
+    },
+    {
+      "name": "expiresAt one past TIMESTAMP_MAX",
+      "expect": "out_of_range",
+      "frame": {
+        "t": "connect.pending",
+        "code": "R7KP-92MX",
+        "expiresAt": 4102444800001
+      }
+    },
+    {
+      "name": "code one char over pattern cap",
+      "expect": "too_long",
+      "frame": {
+        "t": "connect.pending",
+        "code": "R7KP-92MXX",
+        "expiresAt": 1754400000000
+      }
+    },
+    {
+      "name": "lowercase code",
+      "expect": "bad_format",
+      "frame": {
+        "t": "connect.pending",
+        "code": "r7kp-92mx",
+        "expiresAt": 1754400000000
+      }
+    },
+    {
+      "name": "duplicate expiresAt key",
+      "expect": "non_canonical",
+      "raw": "{\"t\":\"connect.pending\",\"code\":\"R7KP-92MX\",\"expiresAt\":1754400000000,\"expiresAt\":1754400000001}"
+    },
+    {
+      "name": "__proto__ key smuggle",
+      "expect": "unexpected_key",
+      "raw": "{\"__proto__\":{},\"t\":\"connect.pending\"}"
+    }
+  ]
+}

@@ -85,13 +85,20 @@ section is the short implementation checklist, not a second protocol spec.
    from the authenticated socket. Never trust a self-reported identity in a
    frame.
 4. **Only participants may speak.** Routing checks session membership *and*
-   `mayOriginate(role, type)`, so a client cannot fake a `tool.call` and an
-   agent cannot fake an `approval.response`.
-5. **You can only reach agents you own.** The relay checks the live
+   `mayOriginate(role, type)`. On the socket that admits only lifecycle frames
+   plus `enc`; the per-direction content rule lives inside `openSealed`, which
+   the relay cannot apply because it sees ciphertext.
+5. **Nothing reaches a handler unvalidated** (ADR-019 §1). `decodeFrame` is the
+   only way a frame becomes typed: byte cap → raw depth scan → parse →
+   canonical-form check → exact-`t` registry → strict schema. `openSealed`
+   applies the same decoder to decrypted plaintext. Frame schemas in
+   `messages.ts` are the single source of truth — the TypeScript types are
+   inferred from them, so a validator and its type cannot drift.
+6. **You can only reach agents you own.** The relay checks the live
    connection's presented cert against the opener's stamped key, and the
    daemon re-checks `client === cert.user` itself — the invariant holds even
    against a lying relay.
-6. **Secret keys never cross the wire.** Only public keys, signatures, and
+7. **Secret keys never cross the wire.** Only public keys, signatures, and
    certs identify endpoints; attachment secrets remain in endpoint memory.
 
 These are mandatory acceptance properties. ADR-018 maps them to current
@@ -112,7 +119,8 @@ Open the demo, hit **Pair a new agent**, paste the code, then **Connect
 agent**. The daemon's pairing link (`/pair#code=…`) auto-fills the dialog.
 
 ```bash
-npm run e2e        # full loop, no browser, ~1s, 18 checks
+npm run e2e        # full loop over real sockets, no browser, 72 checks
+npm run wire:check # wire validation: 411 fixture cases across all 40 frames
 npm run typecheck  # tsc -b over all packages
 npm run deploy     # build the site + wrangler deploy
 
@@ -211,12 +219,67 @@ The agent panel's transcript is the protocol-neutral Nisli chat set in
   that assumes Node. Both must run in a browser.
 - Comments explain *why* a boundary exists, not what a line does.
 
+## Wire validation
+
+Everything about the wire lives in three files, and adding a frame or a field
+means touching them and nothing else:
+
+- `packages/protocol/src/schema.ts` — the combinator core. Hand-rolled, no
+  dependency: this ships inside `connect.js`, into other people's pages. Exact
+  objects (an unknown key rejects, which is what makes `__proto__` smuggling
+  structurally impossible), no coercion anywhere, validated values rebuilt onto
+  fresh objects, and `WireViolation{code, path}` whose code comes from a closed
+  set and whose path contains only schema-defined names. Attacker bytes never
+  reach a log, an error frame, or a metric.
+- `packages/protocol/src/limits.ts` — every bound, each with the reasoning that
+  chose it. Change a limit here, not at a call site.
+- `packages/protocol/src/messages.ts` — one schema per frame, `FRAME_SCHEMAS`
+  as the registry, and the exported types **inferred** from the schemas. There
+  is no second hand-written interface to drift from.
+
+The wire form is **AgentPort canonical JSON v1** = `canonicalJson()`: keys
+sorted by UTF-16 code unit, no whitespace, ECMAScript number and string
+serialization. Each frame therefore has exactly ONE valid encoding, and
+`decodeFrame` rejects every other spelling (`non_canonical`) — which is what
+closes duplicate keys and ambiguous representations without writing a parser.
+Ordering and escaping line up with RFC 8785 (JCS) over the value space the
+schemas admit, but do not call it JCS; it is not a certified implementation.
+Deliberately, this is the *same* function that canonicalizes cert and
+delegation bodies for signing: one dialect, not two that drift.
+
+Consequence: **the relay and the endpoints deploy together.** An older peer
+emitting insertion-order JSON is rejected visibly rather than slipped into an
+ambiguous-parse gap. The relay already rejected unknown frame types, so
+protocol changes already required deploying it first; this widens that to
+field-level changes.
+
+Two rules that are easy to get wrong:
+
+- **Sender-side bounds come before the counter moves.** `seal()` refuses an
+  oversized plaintext before `encrypt()` advances the nonce, so a local bug
+  cannot spend a counter on a frame the peer will reject.
+- **Classify sealed failures by whether the peer was authenticated.** The
+  nonce is compared before the AEAD tag, so a wrong nonce — replayed, skipped,
+  or fabricated — costs an on-path observer nothing to produce. It and any
+  tamper failure leave the channel untouched: drop, continue, and let liveness
+  timeouts handle a genuinely stalled session. Only a `WireViolation` from
+  `openSealed`, which can only be raised *after* the tag verified, is
+  session-fatal: the peer itself sealed something invalid or forbidden.
+  Getting this backwards hands a passive intermediary a kill switch over
+  every session it can see — `npm run wire:check` asserts the split directly.
+
+`npm run wire:check` is the acceptance gate: fixtures in
+`scripts/fixtures/wire/` (valid, boundary, and hostile cases per frame type),
+a coverage gate over `FRAME_SCHEMAS`, programmatic bounds, and sealed-path
+tests using the real crypto. A new frame type fails the coverage gate until it
+has fixtures.
+
 ## State of things
 
 Working: pairing, cert issuance and verification, directory + presence,
 capability grants with TTL, prompt streaming, tool-call round-trip, approval
-round-trip, cancellation, session teardown, and the full demo UI. 18 e2e checks
-pass.
+round-trip, cancellation, session teardown, and the full demo UI. 72 e2e checks
+and 411 wire-validation cases pass.
 
 Not built yet, in rough priority order:
 

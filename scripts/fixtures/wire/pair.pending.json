@@ -1,0 +1,114 @@
+{
+  "type": "pair.pending",
+  "cases": [
+    {
+      "name": "minimal valid",
+      "expect": "ok",
+      "frame": {
+        "t": "pair.pending",
+        "code": "R7KP-92MX",
+        "expiresAt": 1754400000000
+      }
+    },
+    {
+      "name": "boundary: expiresAt at TIMESTAMP_MAX",
+      "expect": "ok",
+      "frame": {
+        "t": "pair.pending",
+        "code": "2345-6789",
+        "expiresAt": 4102444800000
+      }
+    },
+    {
+      "name": "boundary: expiresAt at TIMESTAMP_MIN",
+      "expect": "ok",
+      "frame": {
+        "t": "pair.pending",
+        "code": "ZZZZ-AAAA",
+        "expiresAt": 1577836800000
+      }
+    },
+    {
+      "name": "missing expiresAt",
+      "expect": "missing_key",
+      "frame": {
+        "t": "pair.pending",
+        "code": "R7KP-92MX"
+      }
+    },
+    {
+      "name": "unknown extra key",
+      "expect": "unexpected_key",
+      "frame": {
+        "t": "pair.pending",
+        "code": "R7KP-92MX",
+        "expiresAt": 1754400000000,
+        "extra": 1
+      }
+    },
+    {
+      "name": "code is a number",
+      "expect": "wrong_type",
+      "frame": {
+        "t": "pair.pending",
+        "code": 123,
+        "expiresAt": 1754400000000
+      }
+    },
+    {
+      "name": "expiresAt one past TIMESTAMP_MAX",
+      "expect": "out_of_range",
+      "frame": {
+        "t": "pair.pending",
+        "code": "R7KP-92MX",
+        "expiresAt": 4102444800001
+      }
+    },
+    {
+      "name": "expiresAt one before TIMESTAMP_MIN",
+      "expect": "out_of_range",
+      "frame": {
+        "t": "pair.pending",
+        "code": "R7KP-92MX",
+        "expiresAt": 1577836799999
+      }
+    },
+    {
+      "name": "expiresAt is a float",
+      "expect": "wrong_type",
+      "frame": {
+        "t": "pair.pending",
+        "code": "R7KP-92MX",
+        "expiresAt": 1754400000000.5
+      }
+    },
+    {
+      "name": "code one char over pattern cap",
+      "expect": "too_long",
+      "frame": {
+        "t": "pair.pending",
+        "code": "R7KP-92MXX",
+        "expiresAt": 1754400000000
+      }
+    },
+    {
+      "name": "lowercase code",
+      "expect": "bad_format",
+      "frame": {
+        "t": "pair.pending",
+        "code": "r7kp-92mx",
+        "expiresAt": 1754400000000
+      }
+    },
+    {
+      "name": "duplicate code key",
+      "expect": "non_canonical",
+      "raw": "{\"t\":\"pair.pending\",\"code\":\"AAAA-2222\",\"code\":\"BBBB-3333\",\"expiresAt\":1754400000000}"
+    },
+    {
+      "name": "__proto__ key smuggle",
+      "expect": "unexpected_key",
+      "raw": "{\"__proto__\":{},\"t\":\"pair.pending\"}"
+    }
+  ]
+}

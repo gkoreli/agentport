@@ -1,0 +1,71 @@
+{
+  "type": "session.detach",
+  "cases": [
+    {
+      "name": "minimal valid detach",
+      "expect": "ok",
+      "frame": {
+        "t": "session.detach",
+        "s": "sess_0123456789abcdef01234567"
+      }
+    },
+    {
+      "name": "maximal valid: session id at 64-char limit",
+      "expect": "ok",
+      "frame": {
+        "t": "session.detach",
+        "s": "ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss"
+      }
+    },
+    {
+      "name": "missing required s",
+      "expect": "missing_key",
+      "frame": {
+        "t": "session.detach"
+      }
+    },
+    {
+      "name": "unknown extra key (detach carries no reason)",
+      "expect": "unexpected_key",
+      "frame": {
+        "t": "session.detach",
+        "s": "sess_0123456789abcdef01234567",
+        "reason": "client gone"
+      }
+    },
+    {
+      "name": "s is null",
+      "expect": "wrong_type",
+      "frame": {
+        "t": "session.detach",
+        "s": null
+      }
+    },
+    {
+      "name": "session id one char over 64 limit",
+      "expect": "too_long",
+      "frame": {
+        "t": "session.detach",
+        "s": "sssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss"
+      }
+    },
+    {
+      "name": "session id with a space, outside the id charset",
+      "expect": "bad_format",
+      "frame": {
+        "t": "session.detach",
+        "s": "bad id"
+      }
+    },
+    {
+      "name": "raw: whitespace breaks canonical form",
+      "expect": "non_canonical",
+      "raw": "{ \"t\":\"session.detach\",\"s\":\"sess_0123456789abcdef01234567\"}"
+    },
+    {
+      "name": "raw: __proto__ key smuggle",
+      "expect": "unexpected_key",
+      "raw": "{\"__proto__\":{\"polluted\":true},\"s\":\"sess_0123456789abcdef01234567\",\"t\":\"session.detach\"}"
+    }
+  ]
+}

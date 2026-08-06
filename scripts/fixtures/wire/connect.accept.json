@@ -1,0 +1,71 @@
+{
+  "type": "connect.accept",
+  "cases": [
+    {
+      "name": "minimal valid",
+      "expect": "ok",
+      "frame": {
+        "t": "connect.accept",
+        "code": "R7KP-92MX"
+      }
+    },
+    {
+      "name": "boundary: code at alphabet edges",
+      "expect": "ok",
+      "frame": {
+        "t": "connect.accept",
+        "code": "2Z9A-Z2A9"
+      }
+    },
+    {
+      "name": "missing code",
+      "expect": "missing_key",
+      "frame": {
+        "t": "connect.accept"
+      }
+    },
+    {
+      "name": "unknown extra key",
+      "expect": "unexpected_key",
+      "frame": {
+        "t": "connect.accept",
+        "code": "R7KP-92MX",
+        "granted": true
+      }
+    },
+    {
+      "name": "code is a boolean",
+      "expect": "wrong_type",
+      "frame": {
+        "t": "connect.accept",
+        "code": true
+      }
+    },
+    {
+      "name": "code missing dash group",
+      "expect": "bad_format",
+      "frame": {
+        "t": "connect.accept",
+        "code": "R7KP92MX"
+      }
+    },
+    {
+      "name": "code one char over pattern cap",
+      "expect": "too_long",
+      "frame": {
+        "t": "connect.accept",
+        "code": "R7KP-92MXX"
+      }
+    },
+    {
+      "name": "leading whitespace inside braces",
+      "expect": "non_canonical",
+      "raw": "{ \"t\":\"connect.accept\",\"code\":\"R7KP-92MX\"}"
+    },
+    {
+      "name": "__proto__ key smuggle",
+      "expect": "unexpected_key",
+      "raw": "{\"__proto__\":{},\"t\":\"connect.accept\"}"
+    }
+  ]
+}

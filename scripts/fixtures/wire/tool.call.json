@@ -1,0 +1,176 @@
+{
+  "type": "tool.call",
+  "cases": [
+    {
+      "name": "minimal valid",
+      "expect": "ok",
+      "frame": {
+        "t": "tool.call",
+        "s": "s1",
+        "id": "tc1",
+        "name": "inkwell.document.read",
+        "arguments": {}
+      }
+    },
+    {
+      "name": "maximal valid: name at 128-char limit, realistic arguments",
+      "expect": "ok",
+      "frame": {
+        "t": "tool.call",
+        "s": "s1",
+        "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.b:c",
+        "name": "inkwell.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "arguments": {
+          "selector": "#para-2",
+          "text": "Rewritten paragraph",
+          "dryRun": false
+        }
+      }
+    },
+    {
+      "name": "missing arguments",
+      "expect": "missing_key",
+      "frame": {
+        "t": "tool.call",
+        "s": "s1",
+        "id": "tc1",
+        "name": "inkwell.document.read"
+      }
+    },
+    {
+      "name": "unknown extra key",
+      "expect": "unexpected_key",
+      "frame": {
+        "t": "tool.call",
+        "s": "s1",
+        "id": "tc1",
+        "name": "inkwell.document.read",
+        "arguments": {},
+        "timeout": 5
+      }
+    },
+    {
+      "name": "name is a number",
+      "expect": "wrong_type",
+      "frame": {
+        "t": "tool.call",
+        "s": "s1",
+        "id": "tc1",
+        "name": 42,
+        "arguments": {}
+      }
+    },
+    {
+      "name": "name one char over limit",
+      "expect": "too_long",
+      "frame": {
+        "t": "tool.call",
+        "s": "s1",
+        "id": "tc1",
+        "name": "inkwell.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "arguments": {}
+      }
+    },
+    {
+      "name": "name with forbidden character",
+      "expect": "bad_format",
+      "frame": {
+        "t": "tool.call",
+        "s": "s1",
+        "id": "tc1",
+        "name": "bad name!",
+        "arguments": {}
+      }
+    },
+    {
+      "name": "arguments nesting-depth bomb (20 levels)",
+      "expect": "too_deep",
+      "frame": {
+        "t": "tool.call",
+        "s": "s1",
+        "id": "tc1",
+        "name": "inkwell.document.read",
+        "arguments": {
+          "d": {
+            "d": {
+              "d": {
+                "d": {
+                  "d": {
+                    "d": {
+                      "d": {
+                        "d": {
+                          "d": {
+                            "d": {
+                              "d": {
+                                "d": {
+                                  "d": {
+                                    "d": {
+                                      "d": {
+                                        "d": {
+                                          "d": {
+                                            "d": {
+                                              "d": {
+                                                "leaf": true
+                                              }
+                                            }
+                                          }
+                                        }
+                                      }
+                                    }
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "raw: duplicate key",
+      "expect": "non_canonical",
+      "raw": "{\"t\":\"tool.call\",\"s\":\"s1\",\"id\":\"tc1\",\"id\":\"tc2\",\"name\":\"inkwell.document.read\",\"arguments\":{}}"
+    },
+    {
+      "name": "raw: __proto__ smuggle",
+      "expect": "unexpected_key",
+      "raw": "{\"__proto__\":{},\"arguments\":{},\"id\":\"tc1\",\"name\":\"inkwell.document.read\",\"s\":\"s1\",\"t\":\"tool.call\"}"
+    },
+    {
+      "name": "embedded arguments smuggle a __proto__ key",
+      "expect": "bad_format",
+      "raw": "{\"arguments\":{\"__proto__\":{\"admin\":true}},\"id\":\"tc1\",\"name\":\"inkwell.document.read\",\"s\":\"s1\",\"t\":\"tool.call\"}"
+    },
+    {
+      "name": "arguments is an array, not an object",
+      "expect": "wrong_type",
+      "frame": {
+        "t": "tool.call",
+        "s": "s1",
+        "id": "tc1",
+        "name": "inkwell.document.read",
+        "arguments": []
+      }
+    },
+    {
+      "name": "argument value carries an unpaired surrogate",
+      "expect": "bad_format",
+      "frame": {
+        "t": "tool.call",
+        "s": "s1",
+        "id": "tc1",
+        "name": "inkwell.document.read",
+        "arguments": {
+          "note": "lone \udfff here"
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,45 @@
+{
+  "type": "pair.begin",
+  "cases": [
+    {
+      "name": "minimal valid (type is the whole frame)",
+      "expect": "ok",
+      "frame": {
+        "t": "pair.begin"
+      }
+    },
+    {
+      "name": "unknown extra key",
+      "expect": "unexpected_key",
+      "frame": {
+        "t": "pair.begin",
+        "extra": true
+      }
+    },
+    {
+      "name": "top-level JSON string instead of object",
+      "expect": "wrong_type",
+      "raw": "\"pair.begin\""
+    },
+    {
+      "name": "misspelled frame type",
+      "expect": "unknown_type",
+      "raw": "{\"t\":\"pair.begone\"}"
+    },
+    {
+      "name": "trailing whitespace inside braces",
+      "expect": "non_canonical",
+      "raw": "{\"t\":\"pair.begin\" }"
+    },
+    {
+      "name": "__proto__ key smuggle",
+      "expect": "unexpected_key",
+      "raw": "{\"__proto__\":{},\"t\":\"pair.begin\"}"
+    },
+    {
+      "name": "unterminated JSON",
+      "expect": "bad_json",
+      "raw": "{\"t\":\"pair.begin\""
+    }
+  ]
+}

@@ -1,5 +1,6 @@
 import { WebSocketServer, type WebSocket } from 'ws';
 import {
+  MAX_FRAME_CHARS,
   createLogger,
   encodeFrame,
   randomId,
@@ -33,7 +34,16 @@ export class Relay {
     this.#log = createLogger('relay.socket', { sink: options.sink });
     this.core = new RelayCore({ sink: options.sink, now: options.now });
 
-    this.#wss = new WebSocketServer({ port: options.port ?? 8787, host: options.host ?? '127.0.0.1' });
+    this.#wss = new WebSocketServer({
+      port: options.port ?? 8787,
+      host: options.host ?? '127.0.0.1',
+      // ws defaults to 100 MiB, which would let a peer buffer 100 MB into
+      // relay memory before decodeFrame ever ran. Cap at the protocol frame
+      // bound — the same ceiling the hosted relay inherits from Cloudflare's
+      // message cap — so the self-hosted relay is no more permissive.
+      // decodeFrame's char cap stays as the inner guard (chars ≤ UTF-8 bytes).
+      maxPayload: MAX_FRAME_CHARS,
+    });
     this.#wss.on('connection', (socket) => this.#onConnection(socket));
     this.#wss.on('error', (err) => this.#log.error('websocket server failed', { err }));
   }
@@ -73,7 +83,16 @@ export class Relay {
     this.#peers.set(socket, peer);
     this.core.open(peer);
 
-    socket.on('message', (data) => this.core.message(peer, data.toString()));
+    // Text frames only, matching the Worker host (which ignores non-string
+    // messages): silently stringifying binary would give the Node relay a
+    // second, host-specific way to spell the same frame.
+    socket.on('message', (data, isBinary) => {
+      if (isBinary) {
+        this.#log.warn('dropping binary websocket message', { data: { bytes: (data as Buffer).length } });
+        return;
+      }
+      this.core.message(peer, data.toString());
+    });
     const done = () => {
       if (!this.#peers.delete(socket)) return;
       this.core.close(peer);

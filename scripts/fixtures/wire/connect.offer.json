@@ -1,0 +1,472 @@
+{
+  "type": "connect.offer",
+  "cases": [
+    {
+      "name": "minimal valid",
+      "expect": "ok",
+      "frame": {
+        "t": "connect.offer",
+        "code": "R7KP-92MX",
+        "surface": {
+          "name": "Inkwell",
+          "origin": "https://inkwell.example"
+        },
+        "grant": {
+          "tools": [
+            {
+              "name": "inkwell.document.replaceSelection",
+              "description": "Replace the currently selected text in the document.",
+              "inputSchema": {
+                "type": "object",
+                "properties": {
+                  "text": {
+                    "type": "string",
+                    "description": "Replacement text"
+                  }
+                },
+                "required": [
+                  "text"
+                ],
+                "additionalProperties": false
+              }
+            }
+          ],
+          "alwaysAsk": [],
+          "expiresAt": 1754400000000
+        },
+        "client": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+        "epk": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "epkSig": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdeffedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+      }
+    },
+    {
+      "name": "maximal: route/context present, origin at 256-char cap",
+      "expect": "ok",
+      "frame": {
+        "t": "connect.offer",
+        "code": "R7KP-92MX",
+        "surface": {
+          "name": "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN",
+          "origin": "https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "route": "/docs/launch-plan",
+          "context": {
+            "title": "Launch plan",
+            "selection": "The quick brown fox"
+          }
+        },
+        "grant": {
+          "tools": [
+            {
+              "name": "inkwell.document.replaceSelection",
+              "description": "Replace the currently selected text in the document.",
+              "inputSchema": {
+                "type": "object",
+                "properties": {
+                  "text": {
+                    "type": "string",
+                    "description": "Replacement text"
+                  }
+                },
+                "required": [
+                  "text"
+                ],
+                "additionalProperties": false
+              },
+              "requiresApproval": true
+            }
+          ],
+          "alwaysAsk": [
+            "inkwell.document.replaceSelection"
+          ],
+          "expiresAt": 4102444800000
+        },
+        "client": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+        "epk": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "epkSig": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdeffedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+      }
+    },
+    {
+      "name": "missing client",
+      "expect": "missing_key",
+      "frame": {
+        "t": "connect.offer",
+        "code": "R7KP-92MX",
+        "surface": {
+          "name": "Inkwell",
+          "origin": "https://inkwell.example"
+        },
+        "grant": {
+          "tools": [
+            {
+              "name": "inkwell.document.replaceSelection",
+              "description": "Replace the currently selected text in the document.",
+              "inputSchema": {
+                "type": "object",
+                "properties": {
+                  "text": {
+                    "type": "string",
+                    "description": "Replacement text"
+                  }
+                },
+                "required": [
+                  "text"
+                ],
+                "additionalProperties": false
+              }
+            }
+          ],
+          "alwaysAsk": [],
+          "expiresAt": 1754400000000
+        },
+        "epk": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "epkSig": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdeffedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+      }
+    },
+    {
+      "name": "unknown top-level key",
+      "expect": "unexpected_key",
+      "frame": {
+        "t": "connect.offer",
+        "code": "R7KP-92MX",
+        "surface": {
+          "name": "Inkwell",
+          "origin": "https://inkwell.example"
+        },
+        "grant": {
+          "tools": [
+            {
+              "name": "inkwell.document.replaceSelection",
+              "description": "Replace the currently selected text in the document.",
+              "inputSchema": {
+                "type": "object",
+                "properties": {
+                  "text": {
+                    "type": "string",
+                    "description": "Replacement text"
+                  }
+                },
+                "required": [
+                  "text"
+                ],
+                "additionalProperties": false
+              }
+            }
+          ],
+          "alwaysAsk": [],
+          "expiresAt": 1754400000000
+        },
+        "client": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+        "epk": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "epkSig": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdeffedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+        "note": "hi"
+      }
+    },
+    {
+      "name": "alwaysAsk is a string",
+      "expect": "wrong_type",
+      "frame": {
+        "t": "connect.offer",
+        "code": "R7KP-92MX",
+        "surface": {
+          "name": "Inkwell",
+          "origin": "https://inkwell.example"
+        },
+        "grant": {
+          "tools": [
+            {
+              "name": "inkwell.document.replaceSelection",
+              "description": "Replace the currently selected text in the document.",
+              "inputSchema": {
+                "type": "object",
+                "properties": {
+                  "text": {
+                    "type": "string",
+                    "description": "Replacement text"
+                  }
+                },
+                "required": [
+                  "text"
+                ],
+                "additionalProperties": false
+              }
+            }
+          ],
+          "alwaysAsk": "all",
+          "expiresAt": 1754400000000
+        },
+        "client": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+        "epk": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "epkSig": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdeffedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+      }
+    },
+    {
+      "name": "client key one hex char short",
+      "expect": "bad_format",
+      "frame": {
+        "t": "connect.offer",
+        "code": "R7KP-92MX",
+        "surface": {
+          "name": "Inkwell",
+          "origin": "https://inkwell.example"
+        },
+        "grant": {
+          "tools": [
+            {
+              "name": "inkwell.document.replaceSelection",
+              "description": "Replace the currently selected text in the document.",
+              "inputSchema": {
+                "type": "object",
+                "properties": {
+                  "text": {
+                    "type": "string",
+                    "description": "Replacement text"
+                  }
+                },
+                "required": [
+                  "text"
+                ],
+                "additionalProperties": false
+              }
+            }
+          ],
+          "alwaysAsk": [],
+          "expiresAt": 1754400000000
+        },
+        "client": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "epk": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "epkSig": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdeffedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+      }
+    },
+    {
+      "name": "grant expiresAt before 2020",
+      "expect": "out_of_range",
+      "frame": {
+        "t": "connect.offer",
+        "code": "R7KP-92MX",
+        "surface": {
+          "name": "Inkwell",
+          "origin": "https://inkwell.example"
+        },
+        "grant": {
+          "tools": [
+            {
+              "name": "inkwell.document.replaceSelection",
+              "description": "Replace the currently selected text in the document.",
+              "inputSchema": {
+                "type": "object",
+                "properties": {
+                  "text": {
+                    "type": "string",
+                    "description": "Replacement text"
+                  }
+                },
+                "required": [
+                  "text"
+                ],
+                "additionalProperties": false
+              }
+            }
+          ],
+          "alwaysAsk": [],
+          "expiresAt": 1577836799999
+        },
+        "client": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+        "epk": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "epkSig": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdeffedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+      }
+    },
+    {
+      "name": "surface context nested past MAX_JSON_DEPTH",
+      "expect": "too_deep",
+      "frame": {
+        "t": "connect.offer",
+        "code": "R7KP-92MX",
+        "surface": {
+          "name": "Inkwell",
+          "origin": "https://inkwell.example",
+          "context": {
+            "a": {
+              "a": {
+                "a": {
+                  "a": {
+                    "a": {
+                      "a": {
+                        "a": {
+                          "a": {
+                            "a": {
+                              "a": {
+                                "a": {
+                                  "a": {
+                                    "a": {
+                                      "a": {
+                                        "a": {
+                                          "a": {
+                                            "a": {
+                                              "a": {
+                                                "a": {
+                                                  "a": true
+                                                }
+                                              }
+                                            }
+                                          }
+                                        }
+                                      }
+                                    }
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "grant": {
+          "tools": [
+            {
+              "name": "inkwell.document.replaceSelection",
+              "description": "Replace the currently selected text in the document.",
+              "inputSchema": {
+                "type": "object",
+                "properties": {
+                  "text": {
+                    "type": "string",
+                    "description": "Replacement text"
+                  }
+                },
+                "required": [
+                  "text"
+                ],
+                "additionalProperties": false
+              }
+            }
+          ],
+          "alwaysAsk": [],
+          "expiresAt": 1754400000000
+        },
+        "client": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+        "epk": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "epkSig": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdeffedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+      }
+    },
+    {
+      "name": "alwaysAsk one entry over MAX_TOOLS_PER_GRANT",
+      "expect": "too_many",
+      "frame": {
+        "t": "connect.offer",
+        "code": "R7KP-92MX",
+        "surface": {
+          "name": "Inkwell",
+          "origin": "https://inkwell.example"
+        },
+        "grant": {
+          "tools": [
+            {
+              "name": "inkwell.document.replaceSelection",
+              "description": "Replace the currently selected text in the document.",
+              "inputSchema": {
+                "type": "object",
+                "properties": {
+                  "text": {
+                    "type": "string",
+                    "description": "Replacement text"
+                  }
+                },
+                "required": [
+                  "text"
+                ],
+                "additionalProperties": false
+              }
+            }
+          ],
+          "alwaysAsk": [
+            "tool.0",
+            "tool.1",
+            "tool.2",
+            "tool.3",
+            "tool.4",
+            "tool.5",
+            "tool.6",
+            "tool.7",
+            "tool.8",
+            "tool.9",
+            "tool.10",
+            "tool.11",
+            "tool.12",
+            "tool.13",
+            "tool.14",
+            "tool.15",
+            "tool.16",
+            "tool.17",
+            "tool.18",
+            "tool.19",
+            "tool.20",
+            "tool.21",
+            "tool.22",
+            "tool.23",
+            "tool.24",
+            "tool.25",
+            "tool.26",
+            "tool.27",
+            "tool.28",
+            "tool.29",
+            "tool.30",
+            "tool.31",
+            "tool.32",
+            "tool.33",
+            "tool.34",
+            "tool.35",
+            "tool.36",
+            "tool.37",
+            "tool.38",
+            "tool.39",
+            "tool.40",
+            "tool.41",
+            "tool.42",
+            "tool.43",
+            "tool.44",
+            "tool.45",
+            "tool.46",
+            "tool.47",
+            "tool.48",
+            "tool.49",
+            "tool.50",
+            "tool.51",
+            "tool.52",
+            "tool.53",
+            "tool.54",
+            "tool.55",
+            "tool.56",
+            "tool.57",
+            "tool.58",
+            "tool.59",
+            "tool.60",
+            "tool.61",
+            "tool.62",
+            "tool.63",
+            "tool.64"
+          ],
+          "expiresAt": 1754400000000
+        },
+        "client": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+        "epk": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "epkSig": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdeffedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+      }
+    },
+    {
+      "name": "whitespace before value",
+      "expect": "non_canonical",
+      "raw": "{\"t\":\"connect.offer\",\"code\": \"R7KP-92MX\"}"
+    },
+    {
+      "name": "__proto__ key smuggle",
+      "expect": "unexpected_key",
+      "raw": "{\"__proto__\":{},\"t\":\"connect.offer\"}"
+    }
+  ]
+}

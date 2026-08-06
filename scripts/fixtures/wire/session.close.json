@@ -1,0 +1,67 @@
+{
+  "type": "session.close",
+  "cases": [
+    {
+      "name": "minimal valid close (reason omitted)",
+      "expect": "ok",
+      "frame": {
+        "t": "session.close",
+        "s": "sess_0123456789abcdef01234567"
+      }
+    },
+    {
+      "name": "maximal valid: reason at 256-char limit",
+      "expect": "ok",
+      "frame": {
+        "t": "session.close",
+        "s": "sess_0123456789abcdef01234567",
+        "reason": "rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr"
+      }
+    },
+    {
+      "name": "missing required s",
+      "expect": "missing_key",
+      "frame": {
+        "t": "session.close",
+        "reason": "bye"
+      }
+    },
+    {
+      "name": "unknown extra key",
+      "expect": "unexpected_key",
+      "frame": {
+        "t": "session.close",
+        "s": "sess_0123456789abcdef01234567",
+        "force": true
+      }
+    },
+    {
+      "name": "reason is a boolean",
+      "expect": "wrong_type",
+      "frame": {
+        "t": "session.close",
+        "s": "sess_0123456789abcdef01234567",
+        "reason": false
+      }
+    },
+    {
+      "name": "reason one char over 256 limit",
+      "expect": "too_long",
+      "frame": {
+        "t": "session.close",
+        "s": "sess_0123456789abcdef01234567",
+        "reason": "rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr"
+      }
+    },
+    {
+      "name": "raw: escaped solidus breaks canonical form",
+      "expect": "non_canonical",
+      "raw": "{\"t\":\"session.close\",\"s\":\"sess_0123456789abcdef01234567\",\"reason\":\"a\\/b\"}"
+    },
+    {
+      "name": "raw: __proto__ key smuggle",
+      "expect": "unexpected_key",
+      "raw": "{\"__proto__\":{\"polluted\":true},\"s\":\"sess_0123456789abcdef01234567\",\"t\":\"session.close\"}"
+    }
+  ]
+}

@@ -1,0 +1,137 @@
+{
+  "type": "pair.offer",
+  "cases": [
+    {
+      "name": "minimal valid (agent without location)",
+      "expect": "ok",
+      "frame": {
+        "t": "pair.offer",
+        "code": "R7KP-92MX",
+        "agent": {
+          "pubkey": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+          "name": "Goga's VPS Agent",
+          "runtime": "claude-code"
+        }
+      }
+    },
+    {
+      "name": "maximal: location present, name at 128-char cap",
+      "expect": "ok",
+      "frame": {
+        "t": "pair.offer",
+        "code": "R7KP-92MX",
+        "agent": {
+          "pubkey": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+          "name": "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN",
+          "runtime": "claude-code",
+          "location": "Personal VPS"
+        }
+      }
+    },
+    {
+      "name": "agent missing runtime",
+      "expect": "missing_key",
+      "frame": {
+        "t": "pair.offer",
+        "code": "R7KP-92MX",
+        "agent": {
+          "pubkey": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+          "name": "Agent"
+        }
+      }
+    },
+    {
+      "name": "missing agent",
+      "expect": "missing_key",
+      "frame": {
+        "t": "pair.offer",
+        "code": "R7KP-92MX"
+      }
+    },
+    {
+      "name": "unknown key inside agent",
+      "expect": "unexpected_key",
+      "frame": {
+        "t": "pair.offer",
+        "code": "R7KP-92MX",
+        "agent": {
+          "pubkey": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+          "name": "Goga's VPS Agent",
+          "runtime": "claude-code",
+          "model": "secret"
+        }
+      }
+    },
+    {
+      "name": "agent is a string",
+      "expect": "wrong_type",
+      "frame": {
+        "t": "pair.offer",
+        "code": "R7KP-92MX",
+        "agent": "not-an-object"
+      }
+    },
+    {
+      "name": "uppercase hex pubkey",
+      "expect": "bad_format",
+      "frame": {
+        "t": "pair.offer",
+        "code": "R7KP-92MX",
+        "agent": {
+          "pubkey": "ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB",
+          "name": "Goga's VPS Agent",
+          "runtime": "claude-code"
+        }
+      }
+    },
+    {
+      "name": "pubkey one hex char short",
+      "expect": "bad_format",
+      "frame": {
+        "t": "pair.offer",
+        "code": "R7KP-92MX",
+        "agent": {
+          "pubkey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "name": "Goga's VPS Agent",
+          "runtime": "claude-code"
+        }
+      }
+    },
+    {
+      "name": "agent name one char over cap",
+      "expect": "too_long",
+      "frame": {
+        "t": "pair.offer",
+        "code": "R7KP-92MX",
+        "agent": {
+          "pubkey": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+          "name": "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN",
+          "runtime": "claude-code"
+        }
+      }
+    },
+    {
+      "name": "empty agent name",
+      "expect": "too_short",
+      "frame": {
+        "t": "pair.offer",
+        "code": "R7KP-92MX",
+        "agent": {
+          "pubkey": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+          "name": "",
+          "runtime": "claude-code"
+        }
+      }
+    },
+    {
+      "name": "whitespace after comma",
+      "expect": "non_canonical",
+      "raw": "{\"t\":\"pair.offer\", \"code\":\"R7KP-92MX\"}"
+    },
+    {
+      "name": "__proto__ key smuggle",
+      "expect": "unexpected_key",
+      "raw": "{\"__proto__\":{},\"t\":\"pair.offer\"}"
+    }
+  ]
+}

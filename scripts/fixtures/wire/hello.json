@@ -1,0 +1,117 @@
+{
+  "type": "hello",
+  "cases": [
+    {
+      "name": "minimal valid",
+      "expect": "ok",
+      "frame": {
+        "t": "hello",
+        "v": "agentport/1",
+        "role": "client"
+      }
+    },
+    {
+      "name": "maximal valid: v at exact 32-char limit, agent role",
+      "expect": "ok",
+      "frame": {
+        "t": "hello",
+        "v": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "role": "agent"
+      }
+    },
+    {
+      "name": "missing role",
+      "expect": "missing_key",
+      "frame": {
+        "t": "hello",
+        "v": "agentport/1"
+      }
+    },
+    {
+      "name": "unknown extra key",
+      "expect": "unexpected_key",
+      "frame": {
+        "t": "hello",
+        "v": "agentport/1",
+        "role": "client",
+        "extra": true
+      }
+    },
+    {
+      "name": "v is a number",
+      "expect": "wrong_type",
+      "frame": {
+        "t": "hello",
+        "v": 42,
+        "role": "client"
+      }
+    },
+    {
+      "name": "v one past its 32-char limit",
+      "expect": "too_long",
+      "frame": {
+        "t": "hello",
+        "v": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "role": "client"
+      }
+    },
+    {
+      "name": "v empty (min 1)",
+      "expect": "too_short",
+      "frame": {
+        "t": "hello",
+        "v": "",
+        "role": "client"
+      }
+    },
+    {
+      "name": "role outside enum",
+      "expect": "bad_format",
+      "frame": {
+        "t": "hello",
+        "v": "agentport/1",
+        "role": "relay"
+      }
+    },
+    {
+      "name": "raw: whitespace is non-canonical",
+      "expect": "non_canonical",
+      "raw": "{\"t\": \"hello\",\"v\":\"agentport/1\",\"role\":\"client\"}"
+    },
+    {
+      "name": "raw: \\u0041 escape of a plain char is non-canonical",
+      "expect": "non_canonical",
+      "raw": "{\"t\":\"hello\",\"v\":\"\\u0041gentport\",\"role\":\"client\"}"
+    },
+    {
+      "name": "raw: duplicate key is non-canonical",
+      "expect": "non_canonical",
+      "raw": "{\"t\":\"hello\",\"v\":\"a\",\"v\":\"a\",\"role\":\"client\"}"
+    },
+    {
+      "name": "raw: __proto__ smuggle is just an unknown key",
+      "expect": "unexpected_key",
+      "raw": "{\"__proto__\":{},\"role\":\"client\",\"t\":\"hello\",\"v\":\"agentport/1\"}"
+    },
+    {
+      "name": "raw: truncated JSON",
+      "expect": "bad_json",
+      "raw": "{\"t\":\"hello\""
+    },
+    {
+      "name": "raw: near-miss frame type",
+      "expect": "unknown_type",
+      "raw": "{\"t\":\"helo\"}"
+    },
+    {
+      "name": "raw: nesting past the pre-parse depth scan",
+      "expect": "too_deep",
+      "raw": "{\"role\":\"client\",\"t\":\"hello\",\"v\":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[0]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}"
+    },
+    {
+      "name": "raw: brackets inside a string do not count toward depth",
+      "expect": "ok",
+      "raw": "{\"role\":\"client\",\"t\":\"hello\",\"v\":\"[[[[[[[[\"}"
+    }
+  ]
+}

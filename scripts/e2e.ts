@@ -18,7 +18,11 @@ import { DemoWriterRuntime, type AgentRuntime, type TurnContext } from '../packa
 import { AgentWallet, type SiteTool } from '../packages/client/src/index.js';
 import {
   Deferred,
+  PROTOCOL_VERSION,
+  authChallengeMessage,
+  canonicalJson,
   generateKeyPair,
+  sign,
   signCert,
   signDelegation,
   type Hex,
@@ -464,6 +468,69 @@ check(
   { unknownSession, wrongToken },
 );
 
+// A resume answer is authority over someone else's session. An unrelated
+// agent — authenticated, but not the one the resume was routed to — must not
+// be able to answer one, even knowing the session id.
+{
+  const impostorKeys = generateKeyPair();
+  const impostor = new NodeWebSocket(relayUrl);
+  const impostorFrames: string[] = [];
+  await new Promise((resolve) => impostor.on('open', resolve));
+  impostor.on('message', (data) => impostorFrames.push(data.toString()));
+  const answered = new Deferred<void>();
+  impostor.on('message', (data) => {
+    const frame = JSON.parse(data.toString()) as { t: string; nonce?: string };
+    if (frame.t === 'challenge') {
+      impostor.send(canonicalJson({
+        t: 'identify',
+        pubkey: impostorKeys.publicKey,
+        sig: sign(impostorKeys.secretKey, authChallengeMessage(frame.nonce!)),
+        announce: { name: 'Impostor', runtime: 'demo-writer' },
+      }));
+    }
+    if (frame.t === 'ready') answered.resolve();
+  });
+  impostor.send(canonicalJson({ t: 'hello', v: PROTOCOL_VERSION, role: 'agent' }));
+  await answered.promise;
+
+  // A resume is now in flight to Resume Agent. Its token is wrong, so the real
+  // daemon will refuse it — which makes a forged ACCEPTANCE the sharp test: if
+  // the relay let an unrelated agent answer, this doomed resume would succeed.
+  const racer = new AgentWallet({ relayUrl, userSecretKey: generateKeyPair().secretKey, socketFactory });
+  await racer.connect();
+  const racing = racer.resumeSession({
+    id: liveSession.id,
+    agent: resumeAgentKeys.publicKey,
+    token: 'e'.repeat(48),
+    tools: inkwellTools(),
+    decide: () => true,
+  });
+  impostor.send(canonicalJson({
+    t: 'session.resumed',
+    s: liveSession.id,
+    agentName: 'Impostor',
+    runtime: 'demo-writer',
+    surface: { name: 'Inkwell', origin: 'https://inkwell.test' },
+    grant: { tools: [], alwaysAsk: [], expiresAt: Date.now() + 60_000 },
+    missed: 0,
+    epk: 'a'.repeat(64),
+    epkSig: 'b'.repeat(128),
+  }));
+  const outcome = await racing.then(() => 'resumed').catch((err: Error) => err.message);
+  check(
+    'an unrelated agent cannot answer a resume it was not routed',
+    outcome.includes('not_resumable'),
+    { outcome },
+  );
+  check(
+    'the forged resume answer is refused at the relay',
+    impostorFrames.some((raw) => raw.includes('"forbidden"')),
+    impostorFrames.slice(-1),
+  );
+  impostor.close();
+  racer.close();
+}
+
 // The legitimate tab comes back.
 const reopened = new AgentWallet({ relayUrl, userSecretKey: generateKeyPair().secretKey, socketFactory });
 await reopened.connect();
@@ -565,7 +632,9 @@ console.log('\n10. the relay is blind (ADR-003)');
   await sealDaemon.start();
 
   const sealUser = generateKeyPair();
-  const observedWallet = new AgentWallet({ relayUrl: tapUrl, userSecretKey: sealUser.secretKey, socketFactory });
+  // The short handshake timeout is what converts the strip-agent-proof attack
+  // below from a hang into a rejection the test can observe.
+  const observedWallet = new AgentWallet({ relayUrl: tapUrl, userSecretKey: sealUser.secretKey, socketFactory, handshakeTimeoutMs: 1_500 });
   await observedWallet.connect();
   const offer = await observedWallet.claimPairing(await sealPairing.promise);
   await observedWallet.approvePairing(offer);
@@ -589,7 +658,7 @@ console.log('\n10. the relay is blind (ADR-003)');
   check('content frame types are hidden', !observed.some((m) => /"t":"(delta|prompt|tool\.call|tool\.result|approval)/.test(m)));
   check('sealed frames did cross it', observed.filter((m) => m.includes('"t":"enc"')).length >= 4, observed.filter((m) => m.includes('"t":"enc"')).length);
   check('tampered ciphertext was rejected without desynchronising the channel', sealLogs.some((line) => line.includes('failed to open sealed frame')), sealLogs);
-  check('a replayed authenticated frame was rejected', sealLogs.some((line) => line.includes('nonce out of sequence')), sealLogs);
+  check('a replayed authenticated frame was rejected', sealLogs.some((line) => line.includes('dropped out-of-sequence sealed frame')), sealLogs);
 
   sealedSession.close();
 
@@ -601,7 +670,10 @@ console.log('\n10. the relay is blind (ADR-003)');
     tools: inkwellTools(),
     decide: () => true,
   }).catch((err: Error) => { strippedAgentProof = err.message; });
-  check('omitting the agent sealing proof aborts instead of downgrading', strippedAgentProof.includes('omitted its sealing-key proof'), strippedAgentProof);
+  // Strict decode rejects the mangled session.opened outright (missing epk),
+  // so the wallet never sees an answer and the handshake deadline fires —
+  // fail-closed either way, with no plaintext downgrade path left to take.
+  check('omitting the agent sealing proof aborts instead of downgrading', strippedAgentProof.includes('handshake timed out'), strippedAgentProof);
   observedWallet.close();
 
   attack = 'strip-client-proof';
@@ -614,7 +686,10 @@ console.log('\n10. the relay is blind (ADR-003)');
     tools: inkwellTools(),
     decide: () => true,
   }).catch((err: Error) => { strippedClientProof = err.message; });
-  check('omitting the client sealing proof is denied by the daemon', strippedClientProof.includes('sealing_required'), strippedClientProof);
+  // The schema requires epk/epkSig on session.open, so the RELAY now rejects
+  // the stripped frame at decode — the daemon's own sealing_required check
+  // became unreachable dead code and was deleted with it.
+  check('omitting the client sealing proof is rejected at the relay', strippedClientProof.includes('missing_key at session.open.epk'), strippedClientProof);
   downgradeWallet.close();
 
   attack = 'rewrite-grant';

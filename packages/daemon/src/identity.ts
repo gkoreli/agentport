@@ -18,7 +18,11 @@ export interface AgentIdentity {
 export function loadIdentity(path: string, defaults: { name: string; runtime: string; location?: string }): AgentIdentity {
   try {
     const stored = JSON.parse(readFileSync(path, 'utf8')) as AgentIdentity;
-    return { ...stored, publicKey: publicKeyOf(stored.secretKey) };
+    // fromHex is lowercase-only (wire canonicalization); a hand-edited or
+    // third-party identity file may spell the secret uppercase. Normalize at
+    // this edge instead of widening the decoder's accepted domain.
+    const secretKey = stored.secretKey.toLowerCase();
+    return { ...stored, secretKey, publicKey: publicKeyOf(secretKey) };
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
   }

@@ -16,7 +16,7 @@ const check = (label: string, ok: boolean, detail?: unknown) => {
 const { openConnectModal } = await import('../site/src/modal.js');
 const { mountPanel } = await import('../site/src/agentport-ui.js');
 const { signal, flush, html } = await import('@nisli/core');
-const { answerProofBinding, deriveSealChannel, generateKeyPair, generateSealKeyPair, openSealed, seal, signEpk } = await import('../packages/protocol/src/index.js');
+const { answerProofBinding, canonicalJson, deriveSealChannel, generateKeyPair, generateSealKeyPair, openSealed, seal, signEpk } = await import('../packages/protocol/src/index.js');
 void signal;
 
 console.log('1. connect modal');
@@ -79,7 +79,9 @@ class FakeRelay {
     this.#listeners[type] = fn;
   }
   #reply(frame: unknown) {
-    setTimeout(() => this.#listeners.message?.({ data: JSON.stringify(frame) }), 0);
+    // canonicalJson, not JSON.stringify: the wallet's strict decoder rejects
+    // any non-canonical wire form, fakes included.
+    setTimeout(() => this.#listeners.message?.({ data: canonicalJson(frame) }), 0);
   }
   reply(frame: unknown) {
     this.#reply(frame);
@@ -90,7 +92,7 @@ class FakeRelay {
     if (frame.t === 'enc' && this.#channel) {
       try {
         // Surface the inner type so assertions can see through the sealing.
-        FakeRelay.frames.push(`enc:${(openSealed(this.#channel.receive, frame as never) as { t: string }).t}`);
+        FakeRelay.frames.push(`enc:${(openSealed(this.#channel.receive, frame as never, 'client') as { t: string }).t}`);
       } catch {
         // counter frames the fake does not consume stay opaque; fine.
       }
@@ -101,7 +103,8 @@ class FakeRelay {
       this.#reply({ t: 'ready', role: 'client', pubkey: frame.pubkey });
     }
     if (frame.t === 'connect.begin') {
-      this.#reply({ t: 'connect.pending', code: 'TEST-CODE', expiresAt: Date.now() + 60_000 });
+      // The code must satisfy CODE_PATTERN — the minting alphabet has no O.
+      this.#reply({ t: 'connect.pending', code: 'TEST-CDEF', expiresAt: Date.now() + 60_000 });
       // Complete the session too, so the panel can exercise its live AG-UI
       // path rather than stopping at a successful connection handshake.
       const mine = generateSealKeyPair();

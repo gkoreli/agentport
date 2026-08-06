@@ -76,13 +76,31 @@ export function encrypt(state: CipherState, plaintext: Uint8Array, associatedDat
   return { nonce: toHex(nonce), ciphertext: toHex(ciphertext) };
 }
 
-/** Advances state only after nonce and AEAD authentication both succeed. */
+/**
+ * A frame whose nonce is not the one this side expects — replayed, skipped,
+ * or fabricated. Deliberately NOT a WireViolation: the nonce is compared
+ * before the AEAD tag is checked, so anyone on the path can produce this
+ * without holding a key. Treating it as a peer protocol violation would hand
+ * a passive intermediary a session kill switch. State is untouched, so the
+ * caller drops the frame and the channel remains usable for the real next
+ * one; if a frame truly was skipped the session stalls, which liveness
+ * timeouts handle — a stall is recoverable, a teardown is not.
+ */
+export class NonceMismatchError extends Error {
+  constructor() {
+    super('channel nonce out of sequence');
+    this.name = 'NonceMismatchError';
+  }
+}
+
+/**
+ * Advances state only after nonce and AEAD authentication both succeed.
+ * The incoming nonce is never echoed into the error — it is attacker-supplied
+ * bytes and stays out of every message and log.
+ */
 export function decrypt(state: CipherState, message: Ciphertext, associatedData: Uint8Array): Uint8Array {
   const nonce = nonceBytes(state.nonce);
-  const expected = toHex(nonce);
-  if (message.nonce !== expected) {
-    throw new Error(`channel nonce out of sequence (expected ${expected}, got ${message.nonce})`);
-  }
+  if (message.nonce !== toHex(nonce)) throw new NonceMismatchError();
   const plaintext = xchacha20poly1305(state.key, nonce, associatedData).decrypt(fromHex(message.ciphertext));
   state.nonce++;
   return plaintext;

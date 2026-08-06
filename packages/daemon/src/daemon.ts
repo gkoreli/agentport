@@ -2,8 +2,19 @@ import { WebSocket } from 'ws';
 import {
   Deferred,
   Emitter,
+  MAX_ERROR_CHARS,
+  MAX_FRAME_CHARS,
+  MAX_HISTORY_ENTRIES,
+  MAX_MISSED_COUNT,
+  MAX_REASON_CHARS,
+  MAX_SEALED_PLAINTEXT_BYTES,
+  MAX_TEXT_CHARS,
   PROTOCOL_VERSION,
   SEALED_TYPES,
+  TIMESTAMP_MAX,
+  TIMESTAMP_MIN,
+  NonceMismatchError,
+  WireViolation,
   answerProofBinding,
   authChallengeMessage,
   createLogger,
@@ -77,8 +88,13 @@ interface SessionState {
 const DETACH_GRACE_MS = 30 * 60 * 1000;
 const MAX_RESUME_ATTEMPTS = 10;
 
-/** Frames a client may legitimately put inside a sealed envelope. */
-const CLIENT_SEALABLE = new Set<string>(['prompt', 'prompt.cancel', 'tool.result', 'approval.response', 'history.request']);
+/**
+ * Char budget for one history frame's entries. UTF-8 never exceeds 3 bytes
+ * per UTF-16 code unit, so a char budget of bytes/3 cannot overflow the
+ * sealed-plaintext byte bound however the text encodes; the subtraction
+ * covers the frame envelope around the entries array.
+ */
+const HISTORY_BUDGET_CHARS = Math.floor(MAX_SEALED_PLAINTEXT_BYTES / 3) - 1024;
 
 export interface DaemonOptions {
   relayUrl: string;
@@ -155,18 +171,37 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
 
   #dial(): void {
     if (this.#stopped) return;
-    const socket = new WebSocket(this.#options.relayUrl);
+    // maxPayload caps what a broken or hostile relay can buffer into daemon
+    // memory before decodeFrame's own char bound runs (ws client default is
+    // 100 MiB) — the same ceiling the relay itself enforces.
+    const socket = new WebSocket(this.#options.relayUrl, { maxPayload: MAX_FRAME_CHARS });
     this.#socket = socket;
 
     socket.on('open', () => {
       this.#send({ t: 'hello', v: PROTOCOL_VERSION, role: 'agent' });
     });
-    socket.on('message', (data) => {
+    socket.on('message', (data, isBinary) => {
+      // Text frames only — mirrors both relay hosts; binary has no meaning
+      // in this protocol and stringifying it would invent one.
+      if (isBinary) {
+        this.#log.warn('dropped binary relay message', { data: { relayUrl: this.#options.relayUrl } });
+        return;
+      }
       let frame: Frame;
       try {
         frame = decodeFrame(data.toString());
       } catch (err) {
-        this.#log.warn('dropped undecodable frame', { err, data: { relayUrl: this.#options.relayUrl } });
+        // The relay already validates at origination, so this firing means a
+        // broken or hostile relay — drop the frame as defense in depth. Only
+        // the violation's stable code and schema path may be logged; the
+        // frame's own bytes never appear anywhere (ADR-019 §1).
+        if (err instanceof WireViolation) {
+          this.#log.warn('dropped invalid relay frame', {
+            data: { code: err.code, path: err.path, relayUrl: this.#options.relayUrl },
+          });
+        } else {
+          this.#log.warn('dropped undecodable frame', { err, data: { relayUrl: this.#options.relayUrl } });
+        }
         return;
       }
       void this.#onFrame(frame).catch((err: unknown) => {
@@ -263,7 +298,11 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     if (session.detachedAt !== undefined && SEALED_TYPES.has(frame.t)) {
       // Nobody is listening; count, never buffer. The conversation already
       // lives in the runtime's own store, which is what replays on resume.
-      session.missed++;
+      // Saturate: `missed` is routing metadata with a wire bound, and a
+      // session.resumed carrying an out-of-domain count would be a frame we
+      // could not legally send — turning a long detachment into a session
+      // that can never be resumed at all.
+      if (session.missed < MAX_MISSED_COUNT) session.missed++;
       return;
     }
     if (SEALED_TYPES.has(frame.t)) {
@@ -377,24 +416,39 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
 
       case 'enc': {
         const session = this.#sessions.get(frame.s);
-        if (!session?.sealChannel) {
-          this.#log.warn('dropping sealed frame because the session has no channel', { sessionId: frame.s });
+        if (!session) {
+          this.#log.warn('dropping sealed frame for unknown session', { sessionId: frame.s });
           return;
         }
         let inner: SessionFrame;
         try {
-          inner = openSealed(session.sealChannel.receive, frame);
+          // openSealed owns the whole inner boundary (ADR-019 §1): plaintext
+          // bound, strict inner-frame validation, the client-sealable set,
+          // and the envelope/inner session-id match.
+          inner = openSealed(session.sealChannel.receive, frame, 'client');
         } catch (err) {
-          this.#log.warn('failed to open sealed frame', { sessionId: frame.s, err });
-          return;
-        }
-        // The relay can no longer see inner types, so the origination check
-        // the relay used to make lives here now.
-        if (!CLIENT_SEALABLE.has(inner.t)) {
-          this.#log.warn('client sealed a frame it may not originate; dropping it', {
-            sessionId: frame.s,
-            data: { frameType: inner.t },
-          });
+          // Two failure classes (see openSealed). A WireViolation happened
+          // AFTER authentication: the client itself sealed an invalid or
+          // forbidden frame, or the channel skipped a frame it can never
+          // recover — session-fatal. A plain decrypt error is tampered or
+          // replayed input that the relay could have injected; state is
+          // untouched, so the frame is dropped and the session survives.
+          // Only the stable code and schema path are loggable — never nonce,
+          // ciphertext, or plaintext bytes.
+          if (err instanceof WireViolation) {
+            this.#log.error('sealed frame rejected; closing session', {
+              sessionId: frame.s,
+              data: { code: err.code, path: err.path },
+            });
+            await this.#closeSession(session, 'seal_violation');
+          } else if (err instanceof NonceMismatchError) {
+            this.#log.warn('dropped out-of-sequence sealed frame', { sessionId: frame.s });
+          } else {
+            this.#log.warn('failed to open sealed frame; dropping it', {
+              sessionId: frame.s,
+              data: { code: 'decrypt_failed' },
+            });
+          }
           return;
         }
         return this.#onFrame(inner, true);
@@ -403,7 +457,10 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
 
       case 'session.close': {
         const session = this.#sessions.get(frame.s);
-        if (session) await this.#closeSession(session, frame.reason ?? 'client_closed', false);
+        // The client's own reason string is not re-sent (notify=false) and is
+        // client-controlled, so it stays out of our logs too; the stable label
+        // records who initiated the close.
+        if (session) await this.#closeSession(session, 'client_closed', false);
         return;
       }
 
@@ -417,7 +474,15 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
           this.#log.warn('history replay failed; using observed transcript', { sessionId: frame.s, err });
           return null;
         });
-        this.#sendSession(session, { t: 'history', s: frame.s, entries: replayed ?? session.transcript });
+        const bounded = this.#boundedHistory(frame.s, replayed ?? session.transcript);
+        this.#sendSession(session, {
+          t: 'history',
+          s: frame.s,
+          entries: bounded.entries,
+          // Tell the client the transcript is partial rather than letting a
+          // bounded replay masquerade as the whole conversation.
+          ...(bounded.truncated ? { truncated: true } : {}),
+        });
         return;
       }
 
@@ -708,11 +773,11 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
       signal: controller.signal,
       say: (text) => {
         record('agent', text);
-        this.#sendSession(session, { t: 'delta', s: session.id, promptId: frame.id, text });
+        this.#streamText(session, 'delta', frame.id, text);
       },
       think: (text) => {
         record('thought', text);
-        this.#sendSession(session, { t: 'thought', s: session.id, promptId: frame.id, text });
+        this.#streamText(session, 'thought', frame.id, text);
       },
       callTool: async (name, args, signal) => {
         try {
@@ -746,7 +811,7 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
         s: session.id,
         promptId: frame.id,
         stopReason: 'error',
-        error: toErr(err).message,
+        error: this.#bounded(toErr(err).message, MAX_ERROR_CHARS, 'done.error', session.id),
       });
     } finally {
       session.prompts.delete(frame.id);
@@ -836,6 +901,85 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     return deferred.promise.finally(() => signal?.removeEventListener('abort', abort));
   }
 
+  /**
+   * Truncates an operational string (error detail, close reason) to its wire
+   * bound. Only lengths are logged: runtime error messages can embed tool
+   * output, which is hostile data, not log material.
+   */
+  #bounded(value: string, max: number, field: string, sessionId?: string): string {
+    if (value.length <= max) return value;
+    this.#log.warn('outbound string truncated to wire bound', {
+      ...(sessionId ? { sessionId } : {}),
+      data: { field, max, length: value.length },
+    });
+    return `${value.slice(0, max - 1)}…`;
+  }
+
+  /**
+   * Conversation content is never truncated silently: a runtime chunk larger
+   * than the wire's text bound is split across frames instead. Empty text
+   * still emits one frame, matching the pre-bounding behavior.
+   */
+  #streamText(session: SessionState, t: 'delta' | 'thought', promptId: string, text: string): void {
+    if (text.length > MAX_TEXT_CHARS) {
+      this.#log.info('splitting oversized runtime text across frames', {
+        sessionId: session.id,
+        data: { type: t, length: text.length, frames: Math.ceil(text.length / MAX_TEXT_CHARS) },
+      });
+    }
+    let offset = 0;
+    do {
+      let end = Math.min(offset + MAX_TEXT_CHARS, text.length);
+      // Never cut between a surrogate pair: the halves are not well-formed
+      // Unicode, and the wire schema rejects them. Back off one unit when the
+      // boundary lands inside a pair (a chunk of exactly one high surrogate
+      // cannot happen, since MAX_TEXT_CHARS is far larger than 1).
+      const code = text.charCodeAt(end - 1);
+      if (end < text.length && code >= 0xd800 && code <= 0xdbff) end--;
+      this.#sendSession(session, { t, s: session.id, promptId, text: text.slice(offset, end) });
+      offset = end;
+    } while (offset < text.length);
+  }
+
+  /**
+   * History is a replay, not the source of truth — the runtime's own store
+   * keeps the full text — so the wire copy is bounded: newest entries kept up
+   * to the schema's entry cap and a conservative sealed-plaintext budget,
+   * oversized lines truncated. Timestamps outside the protocol domain become
+   * 0 — the schema's explicit "unknown" (ACP replay has no timestamps) — and
+   * are never fabricated from our own clock.
+   */
+  #boundedHistory(sessionId: string, source: HistoryEntry[]): { entries: HistoryEntry[]; truncated: boolean } {
+    let truncated = 0;
+    let unstamped = 0;
+    const bounded = source.map((entry): HistoryEntry => {
+      const cut = entry.text.length > MAX_TEXT_CHARS;
+      if (cut) truncated++;
+      const inDomain = entry.at >= TIMESTAMP_MIN && entry.at <= TIMESTAMP_MAX;
+      if (!inDomain && entry.at !== 0) unstamped++;
+      return {
+        role: entry.role,
+        text: cut ? `${entry.text.slice(0, MAX_TEXT_CHARS - 1)}…` : entry.text,
+        at: inDomain ? entry.at : 0,
+      };
+    });
+    let used = 0;
+    let keep = 0;
+    for (let i = bounded.length - 1; i >= 0 && keep < MAX_HISTORY_ENTRIES; i--) {
+      used += JSON.stringify(bounded[i]!).length + 1;
+      if (used > HISTORY_BUDGET_CHARS) break;
+      keep++;
+    }
+    const dropped = bounded.length - keep;
+    if (truncated > 0 || unstamped > 0 || dropped > 0) {
+      this.#log.warn('history replay bounded for the wire', {
+        sessionId,
+        data: { entries: bounded.length, dropped, truncatedTexts: truncated, unknownTimestamps: unstamped },
+      });
+    }
+    return { entries: bounded.slice(bounded.length - keep), truncated: truncated > 0 || dropped > 0 };
+  }
+
   #cancelInFlight(session: SessionState, reason: string): void {
     for (const controller of session.prompts.values()) controller.abort();
     for (const pending of session.toolCalls.values()) pending.reject(new Error(reason));
@@ -856,7 +1000,13 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     } catch (err) {
       this.#log.error('runtime failed to close session', { sessionId: session.id, err, data: { reason } });
     } finally {
-      if (notify) this.#send({ t: 'session.close', s: session.id, reason });
+      if (notify) {
+        this.#send({
+          t: 'session.close',
+          s: session.id,
+          reason: this.#bounded(reason, MAX_REASON_CHARS, 'session.close.reason', session.id),
+        });
+      }
       this.#log.info('session closed', { sessionId: session.id, data: { reason } });
     }
   }

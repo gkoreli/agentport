@@ -1,0 +1,80 @@
+{
+  "type": "ready",
+  "cases": [
+    {
+      "name": "minimal valid",
+      "expect": "ok",
+      "frame": {
+        "t": "ready",
+        "role": "client",
+        "pubkey": "0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d"
+      }
+    },
+    {
+      "name": "maximal valid: bound present, pubkey at its fixed 64-hex length",
+      "expect": "ok",
+      "frame": {
+        "t": "ready",
+        "role": "agent",
+        "pubkey": "4e5f60714e5f60714e5f60714e5f60714e5f60714e5f60714e5f60714e5f6071",
+        "bound": true
+      }
+    },
+    {
+      "name": "missing pubkey",
+      "expect": "missing_key",
+      "frame": {
+        "t": "ready",
+        "role": "client"
+      }
+    },
+    {
+      "name": "unknown extra key",
+      "expect": "unexpected_key",
+      "frame": {
+        "t": "ready",
+        "role": "client",
+        "pubkey": "0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d",
+        "extra": null
+      }
+    },
+    {
+      "name": "bound is a string",
+      "expect": "wrong_type",
+      "frame": {
+        "t": "ready",
+        "role": "agent",
+        "pubkey": "4e5f60714e5f60714e5f60714e5f60714e5f60714e5f60714e5f60714e5f6071",
+        "bound": "true"
+      }
+    },
+    {
+      "name": "pubkey at 63 chars instead of 64",
+      "expect": "bad_format",
+      "frame": {
+        "t": "ready",
+        "role": "client",
+        "pubkey": "0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3"
+      }
+    },
+    {
+      "name": "role outside enum",
+      "expect": "bad_format",
+      "frame": {
+        "t": "ready",
+        "role": "server",
+        "pubkey": "0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d"
+      }
+    },
+    {
+      "name": "raw: whitespace is non-canonical",
+      "expect": "non_canonical",
+      "raw": "{\"t\":\"ready\",\"role\":\"client\", \"pubkey\":\"0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d\"}"
+    },
+    {
+      "name": "raw: __proto__ smuggle is just an unknown key",
+      "expect": "unexpected_key",
+      "raw": "{\"__proto__\":{},\"pubkey\":\"0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d\",\"role\":\"client\",\"t\":\"ready\"}"
+    }
+  ]
+}

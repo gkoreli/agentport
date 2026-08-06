@@ -1,0 +1,76 @@
+{
+  "type": "history.request",
+  "cases": [
+    {
+      "name": "minimal valid",
+      "expect": "ok",
+      "frame": {
+        "t": "history.request",
+        "s": "s1"
+      }
+    },
+    {
+      "name": "session id at 64-char limit",
+      "expect": "ok",
+      "frame": {
+        "t": "history.request",
+        "s": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.b:c"
+      }
+    },
+    {
+      "name": "missing s",
+      "expect": "missing_key",
+      "frame": {
+        "t": "history.request"
+      }
+    },
+    {
+      "name": "unknown extra key",
+      "expect": "unexpected_key",
+      "frame": {
+        "t": "history.request",
+        "s": "s1",
+        "extra": true
+      }
+    },
+    {
+      "name": "s is a number",
+      "expect": "wrong_type",
+      "frame": {
+        "t": "history.request",
+        "s": 42
+      }
+    },
+    {
+      "name": "s one char over limit",
+      "expect": "too_long",
+      "frame": {
+        "t": "history.request",
+        "s": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    },
+    {
+      "name": "s with forbidden character",
+      "expect": "bad_format",
+      "frame": {
+        "t": "history.request",
+        "s": "bad id"
+      }
+    },
+    {
+      "name": "raw: whitespace is non-canonical",
+      "expect": "non_canonical",
+      "raw": "{\"t\":\"history.request\", \"s\":\"s1\"}"
+    },
+    {
+      "name": "raw: duplicate key",
+      "expect": "non_canonical",
+      "raw": "{\"t\":\"history.request\",\"s\":\"a\",\"s\":\"b\"}"
+    },
+    {
+      "name": "raw: __proto__ smuggle",
+      "expect": "unexpected_key",
+      "raw": "{\"__proto__\":{},\"s\":\"s1\",\"t\":\"history.request\"}"
+    }
+  ]
+}

@@ -1,0 +1,78 @@
+{
+  "type": "connect.claim",
+  "cases": [
+    {
+      "name": "minimal valid",
+      "expect": "ok",
+      "frame": {
+        "t": "connect.claim",
+        "code": "R7KP-92MX"
+      }
+    },
+    {
+      "name": "boundary: code at alphabet edges",
+      "expect": "ok",
+      "frame": {
+        "t": "connect.claim",
+        "code": "AZ29-ZA92"
+      }
+    },
+    {
+      "name": "missing code",
+      "expect": "missing_key",
+      "frame": {
+        "t": "connect.claim"
+      }
+    },
+    {
+      "name": "unknown extra key",
+      "expect": "unexpected_key",
+      "frame": {
+        "t": "connect.claim",
+        "code": "R7KP-92MX",
+        "agent": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+      }
+    },
+    {
+      "name": "code is an array",
+      "expect": "wrong_type",
+      "frame": {
+        "t": "connect.claim",
+        "code": [
+          "R7KP-92MX"
+        ]
+      }
+    },
+    {
+      "name": "code contains excluded digit 1",
+      "expect": "bad_format",
+      "frame": {
+        "t": "connect.claim",
+        "code": "R7KP-92M1"
+      }
+    },
+    {
+      "name": "code one char over pattern cap",
+      "expect": "too_long",
+      "frame": {
+        "t": "connect.claim",
+        "code": "R7KP-92MXX"
+      }
+    },
+    {
+      "name": "\\u-escaped letter in code",
+      "expect": "non_canonical",
+      "raw": "{\"t\":\"connect.claim\",\"code\":\"\\u00437KP-92MX\"}"
+    },
+    {
+      "name": "__proto__ key smuggle",
+      "expect": "unexpected_key",
+      "raw": "{\"__proto__\":{},\"t\":\"connect.claim\"}"
+    },
+    {
+      "name": "top-level JSON array",
+      "expect": "wrong_type",
+      "raw": "[\"connect.claim\"]"
+    }
+  ]
+}

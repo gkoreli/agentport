@@ -1,0 +1,190 @@
+{
+  "type": "identify",
+  "cases": [
+    {
+      "name": "minimal valid",
+      "expect": "ok",
+      "frame": {
+        "t": "identify",
+        "pubkey": "4e5f60714e5f60714e5f60714e5f60714e5f60714e5f60714e5f60714e5f6071",
+        "sig": "c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00"
+      }
+    },
+    {
+      "name": "maximal valid: full AgentCert (name at 128-char limit) + announce",
+      "expect": "ok",
+      "frame": {
+        "t": "identify",
+        "pubkey": "4e5f60714e5f60714e5f60714e5f60714e5f60714e5f60714e5f60714e5f6071",
+        "sig": "c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00",
+        "cert": {
+          "user": "0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d",
+          "agent": "4e5f60714e5f60714e5f60714e5f60714e5f60714e5f60714e5f60714e5f6071",
+          "name": "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn",
+          "runtime": "claude-code",
+          "location": "Personal VPS",
+          "issuedAt": 1754400000000,
+          "sig": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+        },
+        "announce": {
+          "name": "Unbound Agent",
+          "runtime": "goose",
+          "location": "MacBook"
+        }
+      }
+    },
+    {
+      "name": "valid: cert without optional location",
+      "expect": "ok",
+      "frame": {
+        "t": "identify",
+        "pubkey": "4e5f60714e5f60714e5f60714e5f60714e5f60714e5f60714e5f60714e5f6071",
+        "sig": "c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00",
+        "cert": {
+          "user": "0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d",
+          "agent": "4e5f60714e5f60714e5f60714e5f60714e5f60714e5f60714e5f60714e5f6071",
+          "name": "A",
+          "runtime": "codex",
+          "issuedAt": 1754400000000,
+          "sig": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+        }
+      }
+    },
+    {
+      "name": "missing sig",
+      "expect": "missing_key",
+      "frame": {
+        "t": "identify",
+        "pubkey": "4e5f60714e5f60714e5f60714e5f60714e5f60714e5f60714e5f60714e5f6071"
+      }
+    },
+    {
+      "name": "cert missing its sig",
+      "expect": "missing_key",
+      "frame": {
+        "t": "identify",
+        "pubkey": "4e5f60714e5f60714e5f60714e5f60714e5f60714e5f60714e5f60714e5f6071",
+        "sig": "c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00",
+        "cert": {
+          "user": "0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d",
+          "agent": "4e5f60714e5f60714e5f60714e5f60714e5f60714e5f60714e5f60714e5f6071",
+          "name": "A",
+          "runtime": "codex",
+          "issuedAt": 1754400000000
+        }
+      }
+    },
+    {
+      "name": "unknown extra key at top level",
+      "expect": "unexpected_key",
+      "frame": {
+        "t": "identify",
+        "pubkey": "4e5f60714e5f60714e5f60714e5f60714e5f60714e5f60714e5f60714e5f6071",
+        "sig": "c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00",
+        "extra": "x"
+      }
+    },
+    {
+      "name": "unknown extra key inside announce",
+      "expect": "unexpected_key",
+      "frame": {
+        "t": "identify",
+        "pubkey": "4e5f60714e5f60714e5f60714e5f60714e5f60714e5f60714e5f60714e5f6071",
+        "sig": "c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00",
+        "announce": {
+          "name": "A",
+          "runtime": "goose",
+          "os": "linux"
+        }
+      }
+    },
+    {
+      "name": "pubkey is a number",
+      "expect": "wrong_type",
+      "frame": {
+        "t": "identify",
+        "pubkey": 42,
+        "sig": "c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00"
+      }
+    },
+    {
+      "name": "cert is a string",
+      "expect": "wrong_type",
+      "frame": {
+        "t": "identify",
+        "pubkey": "4e5f60714e5f60714e5f60714e5f60714e5f60714e5f60714e5f60714e5f6071",
+        "sig": "c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00",
+        "cert": "trust-me"
+      }
+    },
+    {
+      "name": "cert.name one past 128-char limit",
+      "expect": "too_long",
+      "frame": {
+        "t": "identify",
+        "pubkey": "4e5f60714e5f60714e5f60714e5f60714e5f60714e5f60714e5f60714e5f6071",
+        "sig": "c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00",
+        "cert": {
+          "user": "0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d",
+          "agent": "4e5f60714e5f60714e5f60714e5f60714e5f60714e5f60714e5f60714e5f6071",
+          "name": "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn",
+          "runtime": "claude-code",
+          "location": "Personal VPS",
+          "issuedAt": 1754400000000,
+          "sig": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+        }
+      }
+    },
+    {
+      "name": "cert.issuedAt 1ms before 2020 domain",
+      "expect": "out_of_range",
+      "frame": {
+        "t": "identify",
+        "pubkey": "4e5f60714e5f60714e5f60714e5f60714e5f60714e5f60714e5f60714e5f6071",
+        "sig": "c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00",
+        "cert": {
+          "user": "0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d",
+          "agent": "4e5f60714e5f60714e5f60714e5f60714e5f60714e5f60714e5f60714e5f6071",
+          "name": "Goga's VPS Agent",
+          "runtime": "claude-code",
+          "location": "Personal VPS",
+          "issuedAt": 1577836799999,
+          "sig": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+        }
+      }
+    },
+    {
+      "name": "pubkey uppercase hex",
+      "expect": "bad_format",
+      "frame": {
+        "t": "identify",
+        "pubkey": "4E5F60714E5F60714E5F60714E5F60714E5F60714E5F60714E5F60714E5F6071",
+        "sig": "c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00"
+      }
+    },
+    {
+      "name": "sig at 127 chars instead of 128",
+      "expect": "bad_format",
+      "frame": {
+        "t": "identify",
+        "pubkey": "4e5f60714e5f60714e5f60714e5f60714e5f60714e5f60714e5f60714e5f6071",
+        "sig": "c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee0"
+      }
+    },
+    {
+      "name": "raw: exponent-form timestamp is non-canonical",
+      "expect": "non_canonical",
+      "raw": "{\"t\":\"identify\",\"pubkey\":\"4e5f60714e5f60714e5f60714e5f60714e5f60714e5f60714e5f60714e5f6071\",\"sig\":\"c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00\",\"cert\":{\"user\":\"0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d\",\"agent\":\"4e5f60714e5f60714e5f60714e5f60714e5f60714e5f60714e5f60714e5f6071\",\"name\":\"Goga's VPS Agent\",\"runtime\":\"claude-code\",\"location\":\"Personal VPS\",\"issuedAt\":1.7544e12,\"sig\":\"deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef\"}}"
+    },
+    {
+      "name": "raw: duplicate pubkey key is non-canonical",
+      "expect": "non_canonical",
+      "raw": "{\"t\":\"identify\",\"pubkey\":\"4e5f60714e5f60714e5f60714e5f60714e5f60714e5f60714e5f60714e5f6071\",\"pubkey\":\"4e5f60714e5f60714e5f60714e5f60714e5f60714e5f60714e5f60714e5f6071\",\"sig\":\"c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00\"}"
+    },
+    {
+      "name": "raw: __proto__ smuggle is just an unknown key",
+      "expect": "unexpected_key",
+      "raw": "{\"__proto__\":{\"polluted\":true},\"pubkey\":\"4e5f60714e5f60714e5f60714e5f60714e5f60714e5f60714e5f60714e5f6071\",\"sig\":\"c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00\",\"t\":\"identify\"}"
+    }
+  ]
+}

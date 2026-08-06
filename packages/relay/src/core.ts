@@ -1,5 +1,7 @@
 import {
+  MAX_MALFORMED_FRAMES,
   PROTOCOL_VERSION,
+  WireViolation,
   authChallengeMessage,
   createLogger,
   decodeFrame,
@@ -7,7 +9,6 @@ import {
   mayOriginate,
   pairingCode,
   randomBytes,
-  toErr,
   toHex,
   verify,
   verifyCert,
@@ -61,6 +62,8 @@ interface Conn {
   sessions: Set<string>;
   /** Failed guesses, so a socket cannot brute-force a connect code. */
   claimAttempts: number;
+  /** Strict-decode violations; MAX_MALFORMED_FRAMES of them closes the socket. */
+  malformed: number;
 }
 
 /** Pure routing: which two sockets may speak on this id. Nothing else. */
@@ -109,7 +112,12 @@ export class RelayCore {
   #pending = new Map<string, Pending>();
   #connects = new Map<string, PendingConnect>();
   /** Clients whose resume is in flight to a daemon, keyed by session id. */
-  #pendingResumes = new Map<string, { conn: Conn; at: number }>();
+  /**
+   * In-flight resumes: the waiting client AND the agent the frame was routed
+   * to. Pinning the agent is what stops any other authenticated agent from
+   * answering a resume it was never asked about.
+   */
+  #pendingResumes = new Map<string, { conn: Conn; agent: Conn; at: number }>();
   #log: Logger;
   #now: () => number;
 
@@ -128,6 +136,7 @@ export class RelayCore {
       bound: false,
       sessions: new Set(),
       claimAttempts: 0,
+      malformed: 0,
     };
     this.#conns.add(conn);
     this.#byPeer.set(peer, conn);
@@ -140,8 +149,7 @@ export class RelayCore {
     try {
       frame = decodeFrame(data);
     } catch (err) {
-      this.#log.warn('rejected undecodable frame', { err });
-      return this.#fail(conn, 'bad_frame', 'could not parse frame');
+      return this.#malformed(conn, err);
     }
     try {
       this.#onFrame(conn, frame);
@@ -150,7 +158,9 @@ export class RelayCore {
         err,
         data: { frameType: frame.t, role: conn.role, peer: conn.pubkey?.slice(0, 8) },
       });
-      this.#fail(conn, 'internal', toErr(err).message);
+      // The real error is server-side context only. Reflecting err.message to
+      // the peer would echo attacker-influenced bytes back out (ADR-019 §1).
+      this.#fail(conn, 'internal', 'internal relay error');
     }
   }
 
@@ -179,6 +189,12 @@ export class RelayCore {
       this.#sessions.delete(id);
     }
 
+    // A resume whose client or agent socket is gone can never be answered;
+    // leaving the entry would hold routing state a peer no longer owns.
+    for (const [id, resume] of this.#pendingResumes) {
+      if (resume.conn === conn || resume.agent === conn) this.#pendingResumes.delete(id);
+    }
+
     for (const [code, pending] of this.#pending) {
       if (pending.conn === conn) this.#pending.delete(code);
     }
@@ -197,6 +213,35 @@ export class RelayCore {
 
   #fail(conn: Conn, code: string, message: string, ref?: string): void {
     conn.peer.send({ t: 'error', code, message, ...(ref ? { ref } : {}) });
+  }
+
+  /**
+   * A frame that failed strict decoding (ADR-019 §1–2). The peer learns only
+   * the violation code and the schema-defined path — never its own bytes
+   * back — and a socket that keeps sending garbage gets disconnected:
+   * legitimate peers produce zero malformed frames, so the counter only ever
+   * bites attackers and broken implementations.
+   */
+  #malformed(conn: Conn, err: unknown): void {
+    const violation = err instanceof WireViolation ? err : undefined;
+    if (violation) {
+      this.#log.warn('rejected malformed frame', {
+        data: { code: violation.code, path: violation.path, role: conn.role },
+      });
+    } else {
+      // decodeFrame's contract is to throw WireViolation only; anything else
+      // is an engine-level failure (e.g. stringify recursion depth). Still
+      // malformed input — but log it as the bug report it is.
+      this.#log.error('frame decode threw outside WireViolation', { err });
+    }
+    conn.malformed += 1;
+    if (conn.malformed >= MAX_MALFORMED_FRAMES) {
+      this.#fail(conn, 'too_many_malformed', 'too many malformed frames');
+      return conn.peer.close();
+    }
+    // WireViolation.message is `${code} at ${path}` (or the bare code) —
+    // built from the closed code set and schema-defined path segments only.
+    this.#fail(conn, 'bad_frame', violation ? violation.message : 'undecodable frame');
   }
 
   #onFrame(conn: Conn, frame: Frame): void {
@@ -346,9 +391,6 @@ export class RelayCore {
 
   #onConnectBegin(conn: Conn, frame: Extract<Frame, { t: 'connect.begin' }>): void {
     if (conn.role !== 'client') return this.#fail(conn, 'role', 'only clients may request a connection');
-    if (!frame.epk || !frame.epkSig) {
-      return this.#fail(conn, 'sealing_required', 'connect requests require a sealing-key proof');
-    }
     this.#sweepConnects();
     const code = pairingCode();
     const expiresAt = this.#now() + CONNECT_TTL_MS;
@@ -468,7 +510,7 @@ export class RelayCore {
     // waiting client into the routing entry at that moment. The relay makes no
     // judgement — the daemon minted the token and already made it.
     if (conn.role === 'agent' && (frame.t === 'session.resumed' || frame.t === 'session.denied')) {
-      const waiting = this.#takePendingResume(frame.s);
+      const waiting = this.#takePendingResume(frame.s, conn);
       if (waiting) {
         if (frame.t === 'session.resumed') {
           const existing = session;
@@ -508,17 +550,26 @@ export class RelayCore {
       session.agent.peer.send(frame);
     }
 
-    if (frame.t === 'session.close') {
+    // A denial is as final as a close: leaving the routing entry alive would
+    // let denied opens accumulate relay state an attacker controls the rate
+    // of (ADR-019 §2 — the daemon said no, nothing further will ever route).
+    if (frame.t === 'session.close' || frame.t === 'session.denied') {
       session.client?.sessions.delete(session.id);
       session.agent.sessions.delete(session.id);
       this.#sessions.delete(session.id);
     }
   }
 
-  #takePendingResume(id: string): { conn: Conn; at: number } | undefined {
+  /**
+   * Claims an in-flight resume, but only for the agent it was routed to: a
+   * resume answer is authority over someone else's session, so an unrelated
+   * agent guessing a live session id must not be able to consume it.
+   */
+  #takePendingResume(id: string, answering: Conn): { conn: Conn; agent: Conn; at: number } | undefined {
     const entry = this.#pendingResumes.get(id);
-    this.#pendingResumes.delete(id);
     if (!entry) return undefined;
+    if (entry.agent !== answering) return undefined;
+    this.#pendingResumes.delete(id);
     if (this.#now() - entry.at > PENDING_RESUME_TTL_MS) return undefined;
     return this.#conns.has(entry.conn) ? entry : undefined;
   }
@@ -536,7 +587,7 @@ export class RelayCore {
       return conn.peer.send({ t: 'session.denied', s: frame.s, reason: 'agent_offline' });
     }
 
-    this.#pendingResumes.set(frame.s, { conn, at: this.#now() });
+    this.#pendingResumes.set(frame.s, { conn, agent: agentConn, at: this.#now() });
     agentConn.peer.send({ ...frame, client: conn.pubkey! });
   }
 
@@ -558,12 +609,10 @@ export class RelayCore {
         verifyDelegation(cert.user, delegation) &&
         delegation.delegate === conn.pubkey &&
         delegation.agent === agentConn.pubkey &&
-        typeof delegation.expiresAt === 'number' &&
-        Number.isFinite(delegation.expiresAt) &&
-        delegation.expiresAt > this.#now() &&
-        // The relay cannot authenticate a browser origin. It preserves the
-        // signed value for the daemon to compare with frame.surface.origin.
-        typeof delegation.origin === 'string',
+        // Semantic expiry only — the field's shape is decodeFrame's problem.
+        // The relay cannot authenticate a browser origin; the signed origin
+        // rides along for the daemon to compare with frame.surface.origin.
+        delegation.expiresAt > this.#now(),
     );
     if (!directlyOwned && !delegated) {
       return conn.peer.send({ t: 'session.denied', s: frame.s, reason: 'not_your_agent' });
@@ -581,8 +630,12 @@ export class RelayCore {
     agentConn.sessions.add(frame.s);
 
     // Stamp the authenticated client key so the agent never has to trust a
-    // self-reported identity.
-    agentConn.peer.send({ ...frame, client: conn.pubkey! });
+    // self-reported identity — and strip viaConnect, which only the relay's
+    // own connect-flow synthesis may assert: the daemon routes approvals to
+    // its local consent surface on it, so a client pre-setting it could move
+    // its own approvals to a terminal nobody is watching. encodeFrame drops
+    // undefined-valued keys, so the stamp erases the field from the wire.
+    agentConn.peer.send({ ...frame, client: conn.pubkey!, viaConnect: undefined });
     this.#log.info('session routed', {
       sessionId: frame.s,
       data: {

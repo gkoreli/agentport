@@ -1,0 +1,78 @@
+{
+  "type": "connect.denied",
+  "cases": [
+    {
+      "name": "minimal valid",
+      "expect": "ok",
+      "frame": {
+        "t": "connect.denied",
+        "code": "R7KP-92MX",
+        "reason": "code expired"
+      }
+    },
+    {
+      "name": "boundary: reason at 256-char cap",
+      "expect": "ok",
+      "frame": {
+        "t": "connect.denied",
+        "code": "R7KP-92MX",
+        "reason": "rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr"
+      }
+    },
+    {
+      "name": "missing code",
+      "expect": "missing_key",
+      "frame": {
+        "t": "connect.denied",
+        "reason": "code expired"
+      }
+    },
+    {
+      "name": "unknown extra key",
+      "expect": "unexpected_key",
+      "frame": {
+        "t": "connect.denied",
+        "code": "R7KP-92MX",
+        "reason": "",
+        "cause": "ttl"
+      }
+    },
+    {
+      "name": "code is a boolean",
+      "expect": "wrong_type",
+      "frame": {
+        "t": "connect.denied",
+        "code": true,
+        "reason": ""
+      }
+    },
+    {
+      "name": "reason one char over cap",
+      "expect": "too_long",
+      "frame": {
+        "t": "connect.denied",
+        "code": "R7KP-92MX",
+        "reason": "rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr"
+      }
+    },
+    {
+      "name": "code too short for pattern",
+      "expect": "bad_format",
+      "frame": {
+        "t": "connect.denied",
+        "code": "AAAA-222",
+        "reason": ""
+      }
+    },
+    {
+      "name": "\\u-escaped letter in reason",
+      "expect": "non_canonical",
+      "raw": "{\"t\":\"connect.denied\",\"code\":\"R7KP-92MX\",\"reason\":\"\\u0041\"}"
+    },
+    {
+      "name": "__proto__ key smuggle",
+      "expect": "unexpected_key",
+      "raw": "{\"__proto__\":{},\"t\":\"connect.denied\"}"
+    }
+  ]
+}

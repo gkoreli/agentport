@@ -352,3 +352,177 @@ may fail before confidentiality or authority is weakened.
 
 This sequencing keeps the product moving while preserving the core rule:
 security failures are explicit states to fix, never reasons to add a fallback.
+
+## Delivery log
+
+### Gate B §1 — strict, bounded wire validation: shipped 2026-08-06
+
+One canonical schema layer now governs every frame. `packages/protocol/src/`
+gains `schema.ts` (hand-rolled combinators, chosen over a library because this
+code ships inside `connect.js` into third-party pages) and `limits.ts` (every
+bound with its rationale); `messages.ts` defines each frame once as a schema
+and *infers* the exported TypeScript types, so no hand-maintained interface
+survives to drift. `decodeFrame` bounds size, scans raw nesting depth before
+any recursive work, parses, requires byte-exact `canonicalJson` form, looks the
+type up in `FRAME_SCHEMAS`, and validates strictly — returning a rebuilt frame
+or throwing `WireViolation{code, path}` built only from schema-defined names.
+`openSealed` applies the same decoder to decrypted plaintext and enforces the
+per-direction sealable sets that moved into the protocol package from their
+duplicated copies in the daemon and wallet.
+
+Against the section's acceptance list:
+
+- *Discriminate by exact type; reject unknown types and unknown fields* —
+  `FRAME_SCHEMAS` exact lookup; `obj()` rejects any unlisted key.
+- *Validate without coercion; hex alphabet and exact byte length; timestamps as
+  safe integers in the protocol domain* — `hex()`, `int()`, and the
+  `[2020, 2100]` timestamp domain. `HistoryEntry.at` additionally admits `0` as
+  an explicit "unknown", because ACP replay carries no timestamps and inventing
+  one would be worse than admitting none.
+- *Bound frame bytes, strings, arrays, object properties, schema depth, and
+  aggregate tool-definition size before expensive processing* — `limits.ts`,
+  plus the pre-parse depth scan and the ws `maxPayload` on both the relay and
+  the daemon client.
+- *Bound ciphertext and decrypted plaintext independently* — `hexRange` on
+  `enc.c`; `MAX_SEALED_PLAINTEXT_BYTES` checked after decrypt, and again in
+  `seal()` before the nonce advances.
+- *Reject duplicate or ambiguous representations* — the canonical-form check
+  (duplicate keys, key-order variance, whitespace, `\/` escapes, `1e3`, `-0`),
+  lowercase-only hex, and unpaired-surrogate rejection on free-form strings.
+  `CapabilityGrant` further refines: unique tool names (the wallet resolved
+  duplicates last-wins while the daemon resolved them first-wins — an attacker
+  choice), and `alwaysAsk` unique and a subset of the granted tools.
+- *Typed frames only after validation; stable public error codes with no
+  payload reflection* — both hold; the relay's `internal` reply no longer
+  echoes raw JavaScript error text, and repeated malformed frames now cost the
+  socket (`MAX_MALFORMED_FRAMES`).
+- *Same definitions in relay, daemon, wallet, extension, site, and tests* —
+  all consume `@agentport/protocol`. The extension holds no wire parser of its
+  own; its ingress is `AgentWallet`.
+
+Evidence: `npm run wire:check` — 411 fixture cases across all 40 frame types
+(valid, boundary-accepted, missing/unknown/wrong-type/oversize/deep, and raw
+hostile seeds including non-canonical and `__proto__` smuggles), a coverage
+gate over `FRAME_SCHEMAS`, programmatic bounds, and sealed-path checks on real
+crypto. `npm run e2e` — 72 checks over real sockets. `npm run integration`
+against a local relay — full ACP-shaped stack. `npm run ui:smoke` — 33 checks.
+`npm run typecheck` plus the four out-of-references projects and
+`npm run check:extension`.
+
+Delivered incidentally from §2 (resource and abuse bounds), because the checks
+belong to the same boundary: per-socket malformed-frame budget, `maxPayload` on
+both Node WebSocket ends, text-frame-only ingress on every host, routing-entry
+cleanup on `session.denied`, and a client handshake deadline so a dropped reply
+fails instead of hanging forever.
+
+Deliberately still open in §2: per-client/agent/socket session quotas,
+pre-authentication byte budgets, pairing-claim rate limits, and pending-map
+caps and sweeps.
+
+Two behavioral consequences worth stating plainly:
+
+1. **Deployment is lockstep.** Canonical form and strict types mean a peer
+   running older code is rejected. The relay already rejected unknown frame
+   types, so protocol changes already required deploying it first; this widens
+   that to field-level changes. `scripts/deploy.ts` ships the Worker and the
+   wallet together.
+2. **`session.opened`/`connect.begin` without sealing proofs die at the relay's
+   decoder**, not at the daemon — the schema requires `epk`/`epkSig`. The
+   daemon's `sealing_required` check became unreachable and was deleted with
+   it; e2e now asserts the relay-side rejection.
+
+#### Library review (required by §1 before adopting a schema library)
+
+An independent survey of zod v4, zod mini, valibot, superstruct,
+`@sinclair/typebox` + Value, arktype, and `@exodus/schemasafe` against this
+section's criteria concluded **hand-rolled**, and the implementation followed
+it. The decisive points, not merely bundle size:
+
+- Every candidate still leaves the security-critical work to us — pre-parse
+  byte and depth bounds, canonical-form enforcement, a budgeted arbitrary-JSON
+  walker, sealed-plaintext limits, direction checks, and non-reflective errors.
+  The bespoke layer that remains is about the size of the whole core.
+- Valibot, the closest fit on size, implements `strictObject` with `key in
+  input`, so inherited names like `__proto__` and `constructor` are a review
+  item rather than reliably-unknown own keys. Our `obj()` uses `Object.keys`
+  and `hasOwnProperty`, so they are ordinary unknown keys and reject.
+- Measured cost for a representative AgentPort schema: zod v4 ≈ 19.8 kB gzip,
+  zod mini ≈ 5.4 kB, valibot ≈ 1.9 kB, superstruct ≈ 1.9 kB, arktype ≈ 44.6 kB.
+  Any of these rides into third-party pages inside `connect.js` for combinators
+  we would use a dozen of. The shipped layer — combinators, limits, all 40
+  frame schemas, the canonical encoder, and the sealed-path checks — costs
+  **3.0 kB gzip** in `connect.js` (34.1 → 37.2 kB, measured by building the
+  bundle at HEAD and again with the change), less than the smallest library
+  before any of the custom work it would still have required.
+- Superstruct's default failure formatting prints the offending value, which
+  directly conflicts with the no-reflection rule.
+
+The same review's calibration note: comparable open protocols cluster at
+64–128 KiB per durable event (Matrix caps a canonical event at 65,536 bytes;
+strfry and nostr-rs-relay default to 131,072-byte payloads). Our 1 MiB frame
+and 480 KiB plaintext are generous by comparison and justified only as an
+exceptional envelope ceiling — which is why history is bounded and chunked and
+oversized deltas are split rather than allowed to approach it.
+
+Four defects the review found in the draft were fixed before commit: the
+sealed-path `TextDecoder` was non-fatal (malformed UTF-8 became U+FFFD and
+could defeat the canonical check downstream); `jsonValue` returned the parsed
+input rather than a rebuilt value; `pattern()` accepted stateful `g`/`y`
+regexes; and the aggregate tool-definition budget this section names had no
+constant (`MAX_GRANT_CHARS`).
+
+#### Review findings fixed before commit
+
+Two independent reviews of the implementation (validation core; sealed-path
+failure classification and adoption) found nine defects. All were fixed and
+each now has a check that fails if it returns.
+
+High:
+
+1. **A forged nonce could end any observable session.** `decrypt()` compares
+   the nonce *before* verifying the AEAD tag, and the draft classified a
+   future-or-unparseable nonce as a `WireViolation` — which both endpoints
+   treat as proof of peer misbehaviour. An on-path observer holding no key
+   could therefore tear down any session it could see. All nonce mismatches
+   are now `NonceMismatchError`: droppable, channel state untouched. A truly
+   skipped frame stalls the session instead of killing it, which is the
+   recoverable failure. `wire:check` asserts future, past, and malformed
+   nonces are all droppable and that the authentic frame still opens after.
+2. **Unbounded relay state from valid messages** (open sessions, pending
+   resumes, pairing and connect entries). Pending resumes are now cleaned on
+   socket close, and denied sessions release their routing entry. The
+   remaining quotas and sweeps are §2 scope, recorded as open above.
+
+Medium:
+
+3. **`seal()` would encrypt a frame the receiver must reject.** A runtime's
+   oversized string or a text split through a surrogate pair advanced both
+   counters and then killed the peer's session. `seal()` now runs the
+   receiver's own `decodeFrame` before `encrypt()`, so a local bug fails at
+   its source. Text splitting no longer cuts between surrogates.
+4. **Authenticated non-UTF-8 was dropped rather than fatal** — the fatal
+   `TextDecoder` threw a `TypeError`, which read as a decrypt failure. It is
+   now a `WireViolation`, matching the rule: post-authentication garbage is
+   the peer's doing.
+5. **The `missed` counter could exceed its wire bound**, making a long
+   detachment produce a `session.resumed` the daemon could not legally send —
+   a session that could never be resumed. It now saturates.
+6. **Sparse arrays bypassed validation.** `.map()` skips holes, so a hole
+   escaped the item schema and changed the encoded length. Both `arr()` and
+   `jsonValue()` now walk indices and reject missing ones.
+7. **Individually-legal fields could sum past the frame bound** (eight maximal
+   history entries exceed `MAX_FRAME_CHARS`). `encodeFrame` now enforces the
+   bound at the single point where a frame becomes bytes — a length compare on
+   a string it already built — so no component can emit a frame its peer is
+   obliged to reject.
+
+Low: `-0` is rejected by `int()` and inside embedded JSON (it is a safe integer
+that canonicalizes to `0`, so accepting it would validate a value that does not
+round-trip); `hex(0)` accepts the empty string; and the pre-parse depth scan
+stops on a closer at depth zero instead of letting the counter go negative and
+buy headroom.
+
+One reported item is intended behavior rather than a defect: an own property
+whose value is `undefined` counts as absent, because `canonicalJson` drops it.
+The round-trip invariant is therefore defined over the validator's rebuilt
+result, not over the object a caller happened to pass in.
