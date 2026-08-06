@@ -20,6 +20,25 @@ assert.equal(
 );
 assert.equal(readPageOutbound({ t: 'prompt.cancel', ref: 's_test', promptId: 'predictable' }), undefined);
 
+// `resume` and `history` were declared in PageOutbound and handled in
+// content.ts, but never validated — so the content script dropped them without
+// a reply and the page's promise never settled. With the extension installed,
+// navigator.agent.resume() hung forever on every load and session.history()
+// could not hydrate a transcript at all. The type-level guard in bridge.ts
+// stops a future member from going the same way; these prove the two that did.
+assert.deepEqual(
+  readPageOutbound({ t: 'resume', rid: 'r_test', request: { name: 'Inkwell', tools: [] } }),
+  { t: 'resume', rid: 'r_test', request: { name: 'Inkwell', tools: [], alwaysAsk: [] } },
+);
+assert.deepEqual(
+  readPageOutbound({ t: 'history', rid: 'r_test', ref: 's_test' }),
+  { t: 'history', rid: 'r_test', ref: 's_test' },
+);
+// A reclaim re-declares the surface's tools, so it is as much an authority
+// statement as the original connect and gets the same sanitizer.
+assert.equal(readPageOutbound({ t: 'resume', rid: 'r_test' }), undefined);
+assert.equal(readPageOutbound({ t: 'history', rid: 'r_test' }), undefined);
+
 console.log('extension boundary check passed');
 
 // --- session lifecycle -----------------------------------------------------

@@ -278,6 +278,20 @@ export function readPageOutbound(value: unknown): PageOutbound | undefined {
       const request = sanitizeConnectRequest(value['request']);
       return rid && request ? { t, rid, request } : undefined;
     }
+    case 'resume': {
+      // Same shape as connect, and deliberately the same sanitizer: a reclaim
+      // re-declares the surface's tools, so it is exactly as much of an
+      // authority statement as the original request and gets exactly as much
+      // scrutiny. The worker still decides whether the origin may reclaim.
+      const rid = str(value['rid'], 64);
+      const request = sanitizeConnectRequest(value['request']);
+      return rid && request ? { t, rid, request } : undefined;
+    }
+    case 'history': {
+      const rid = str(value['rid'], 64);
+      const ref = str(value['ref'], 64);
+      return rid && ref ? { t, rid, ref } : undefined;
+    }
     case 'prompt': {
       const rid = str(value['rid'], 64);
       const ref = str(value['ref'], 64);
@@ -306,9 +320,42 @@ export function readPageOutbound(value: unknown): PageOutbound | undefined {
     case 'webmcp.tools':
       return { t, tools: sanitizeTools(value['tools']) };
     default:
+      // Exhaustiveness, enforced by the compiler rather than by review. `t` is
+      // unknown here, so the assignment only narrows to `never` once every
+      // PageOutbound member above has a case. Adding a member to the union and
+      // forgetting to validate it is then a type error — not a message the
+      // content script silently drops with no reply, leaving the page's promise
+      // to hang forever. `resume` and `history` were exactly that for their
+      // whole existence: declared, handled in content.ts, never validated.
       return undefined;
   }
 }
+
+/**
+ * Every message type `readPageOutbound` validates. `satisfies` proves each name
+ * is real; `UnvalidatedPageOutbound` proves none is missing. Adding a member to
+ * PageOutbound and forgetting to validate it is then a type error rather than a
+ * message the content script silently drops with no reply, leaving the page's
+ * promise to hang forever — which is what `resume` and `history` were for their
+ * whole existence: declared in the union, handled in content.ts, never
+ * validated, so navigator.agent.resume() and session.history() never settled
+ * through the extension at all.
+ */
+const VALIDATED = [
+  'available',
+  'connect',
+  'resume',
+  'history',
+  'prompt',
+  'prompt.cancel',
+  'tool.result',
+  'close',
+  'webmcp.tools',
+] as const satisfies readonly PageOutbound['t'][];
+
+type UnvalidatedPageOutbound = Exclude<PageOutbound['t'], (typeof VALIDATED)[number]>;
+const _everyPageMessageIsValidated: UnvalidatedPageOutbound[] = [];
+void _everyPageMessageIsValidated;
 
 /** Ids minted on the trusted side. Never derived from anything the page sent. */
 export function mintId(prefix: string): string {
