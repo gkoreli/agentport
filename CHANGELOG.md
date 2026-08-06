@@ -10,6 +10,38 @@ they moved.
 
 ## Unreleased
 
+### A refused connection no longer looks like a hung one
+
+`beginConnect().accepted` awaited `session.opened` or `connect.denied`. The
+daemon refusing the open the relay synthesises after the owner said yes sends
+`session.denied` — which was in neither waiter's type list, so the frame
+arrived, `#resolve` found no queue for it, and the page waited forever on a
+question that had already been answered. A refusal the caller never hears is
+indistinguishable from a hang.
+
+Reachable today by an expired connect approval, and about to carry more: a
+revoked agent denies through this same path, so a page that hangs on denial
+would turn revocation into a UI where nothing appears to happen.
+
+This is the third instance of the same shape found in one day — a happy path
+complete while its failure path silently is not. The others were the
+extension's page boundary (resume and history declared, handled, never
+validated) and the sealable registries (frames registered everywhere except
+the set that decides whether to encrypt them).
+
+- `accepted` now settles on all three outcomes and rejects with the reason.
+- The e2e check races a 10-second deadline, so a regression **fails** instead
+  of hanging the suite — which is what the first version of this check did.
+- `DaemonOptions.now`, a test-only clock seam matching `RelayOptions.now`, so
+  the connect-approval expiry is provable without sleeping for it. The TTL and
+  its sweep are fable's (`c295f40`); this adds only the seam that lets the
+  expiry itself — rather than just its consumption — be checked.
+- `WalletOptions.reconnect` is deleted. Its doc comment said "pass false when
+  the caller owns reconnection (the extension's service worker does)", and
+  after `e9f06d7` the service worker demonstrably does not; nothing passed it.
+  A flag with no caller is decoration, and one reconnect implementation with
+  no switch cannot be switched wrong.
+
 ### A frame that forgets to be sealable no longer compiles
 
 `messages.ts` carried four hand-written `Set<string>` registries with no type

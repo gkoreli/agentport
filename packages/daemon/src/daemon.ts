@@ -158,6 +158,13 @@ export interface DaemonOptions {
    * reasoning: the requesting page must not be the one saying yes.
    */
   onLocalApproval?: (summary: string, call?: { name: string; arguments: Record<string, unknown> }) => Promise<boolean>;
+  /**
+   * Test-only clock seam, as `RelayOptions.now` is. The approval window is
+   * minutes long by design, and an expiry check that has to sleep for one is a
+   * check nobody runs — so the only property here that cannot be observed
+   * without it is the one that matters most.
+   */
+  now?: () => number;
   sink?: LogSink;
 }
 
@@ -202,6 +209,10 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     this.#options = options;
     this.#log = createLogger('daemon', { sink: options.sink });
     this.#revocations = options.revocations ?? memoryRevocations();
+  }
+
+  #now(): number {
+    return this.#options.now?.() ?? Date.now();
   }
 
   get identity(): AgentIdentity {
@@ -272,7 +283,7 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     this.#heartbeat = setInterval(() => {
       // Detached sessions do not wait forever: past the grace, close the
       // runtime and forget the token.
-      const staleOffer = Date.now() - CONNECT_APPROVAL_TTL_MS;
+      const staleOffer = this.#now() - CONNECT_APPROVAL_TTL_MS;
       for (const [epk, offer] of this.#offerSeals) {
         if (offer.at < staleOffer) this.#offerSeals.delete(epk);
       }
@@ -506,7 +517,7 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
           return;
         }
         const mine = generateSealKeyPair();
-        this.#offerSeals.set(frame.epk, { keys: mine, at: Date.now() });
+        this.#offerSeals.set(frame.epk, { keys: mine, at: this.#now() });
         verify = fingerprintWords(frame.epk, mine.publicKey);
         let accepted = false;
         try {
@@ -873,7 +884,7 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     let mine: KeyPair;
     if (frame.viaConnect) {
       const approved = this.#offerSeals.get(frame.epk);
-      if (!approved || approved.at < Date.now() - CONNECT_APPROVAL_TTL_MS) {
+      if (!approved || approved.at < this.#now() - CONNECT_APPROVAL_TTL_MS) {
         this.#offerSeals.delete(frame.epk);
         this.#send({ t: 'session.denied', s: frame.s, reason: 'connect_not_approved' });
         return;

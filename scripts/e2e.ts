@@ -454,6 +454,56 @@ await ephemeral
   });
 check('a connected page still cannot open its own session', directDenied.includes('not_your_agent'), directDenied);
 
+// An approval is a decision the owner made NOW, so it must stop being
+// spendable. Two properties, and the second is the one that used to hang:
+// the daemon refuses a stale approval, AND the page is TOLD it was refused.
+// A refusal the caller never hears is indistinguishable from a hang, and
+// "denied because revoked" travels this same wire.
+{
+  let clockSkew = 0;
+  const expiringKeys = generateKeyPair();
+  const expiringDaemon = new AgentDaemon({
+    relayUrl,
+    identity: { ...expiringKeys, name: 'Impatient Agent', runtime: 'demo-writer' },
+    createRuntime: () => new DemoWriterRuntime(),
+    now: () => Date.now() + clockSkew,
+    // The offer is stored before consent is asked, so moving the clock here
+    // lands the expiry between the owner saying yes and the page redeeming it.
+    onConnectOffer: async () => {
+      clockSkew += 12 * 60 * 1000;
+      return true;
+    },
+  });
+  await expiringDaemon.start();
+
+  const latePage = new AgentWallet({
+    relayUrl,
+    userSecretKey: generateKeyPair().secretKey,
+    socketFactory,
+  });
+  await latePage.connect();
+  const late = await latePage.beginConnect({
+    surface: { name: 'Inkwell', origin: 'https://inkwell.test' },
+    tools: inkwellTools(),
+    decide: () => true,
+  });
+  expiringDaemon.claimConnect(late.code);
+
+  let staleOffer = '';
+  const settled = await Promise.race([
+    late.accepted.then(() => 'opened').catch((err: Error) => {
+      staleOffer = err.message;
+      return 'refused';
+    }),
+    new Promise<string>((resolve) => setTimeout(() => resolve('hung'), 10_000)),
+  ]);
+  check('an expired approval is refused, and the page is told', settled === 'refused', { settled, staleOffer });
+  check('the refusal says it was not approved', staleOffer.includes('connect_not_approved'), staleOffer);
+
+  latePage.close();
+  await expiringDaemon.stop();
+}
+
 dropInSession.close();
 ephemeral.close();
 await dropInDaemon.stop();

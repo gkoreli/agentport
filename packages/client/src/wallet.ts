@@ -68,15 +68,6 @@ export interface WalletOptions {
    * waits (drop-in connect approval) are deliberately not covered.
    */
   handshakeTimeoutMs?: number;
-  /**
-   * Redial the relay when the socket drops unexpectedly, and re-establish
-   * every live session on the new one. Default true: a browser tab loses its
-   * socket for reasons that have nothing to do with the user's intent — a
-   * sleep, a wifi change, a relay restart — and the attachment is supposed to
-   * be the durable thing. Pass false when the caller owns reconnection
-   * (the extension's service worker does).
-   */
-  reconnect?: boolean;
 }
 
 /**
@@ -236,7 +227,7 @@ export class AgentWallet extends Emitter<WalletEvents> {
       // Only THIS socket's death counts: a late close from a socket we already
       // replaced must not schedule a second redial chain.
       if (this.#socket !== socket) return;
-      if (this.#shutdown || this.#options.reconnect === false) {
+      if (this.#shutdown) {
         this.emit('closed', undefined);
         return;
       }
@@ -272,6 +263,11 @@ export class AgentWallet extends Emitter<WalletEvents> {
    * survives a sleeping laptop — the only thing missing was anyone trying.
    */
   #scheduleReconnect(): void {
+    // There is exactly one reconnect implementation and no switch to turn it
+    // off. The extension's service worker used to carry a second one; it was
+    // deleted (e9f06d7) after it turned out to be not merely redundant but
+    // harmful — its teardown sent session.close over the NEW socket, killing
+    // the attachment it had just restored.
     if (this.#shutdown) return;
     if (this.#sessions.size === 0 && this.#reconnectAttempt === 0) {
       // Nothing to preserve and nothing in flight: report the close honestly
@@ -441,8 +437,16 @@ export class AgentWallet extends Emitter<WalletEvents> {
     const pending = await this.#await('connect.pending');
 
     const accepted = (async () => {
-      const reply = await this.#await('session.opened', 'connect.denied');
-      if (reply.t === 'connect.denied') {
+      // Three ways this ends, and every one of them must settle the promise.
+      // `connect.denied` is the owner saying no at the code; `session.denied`
+      // is the daemon refusing the open the relay synthesised after they said
+      // yes — an expired approval, a revoked agent, an expired grant. That
+      // second one used to be in nobody's waiter list, so the frame arrived,
+      // #resolve found no queue for it, and the page waited forever on a
+      // question that had already been answered. A refusal the caller never
+      // hears is indistinguishable from a hang.
+      const reply = await this.#await('session.opened', 'connect.denied', 'session.denied');
+      if (reply.t === 'connect.denied' || reply.t === 'session.denied') {
         throw new Error(`connection declined: ${reply.reason}`);
       }
       const opened = reply;
