@@ -22,7 +22,14 @@
  * further out than the relay).
  */
 
-import { isPromptId, randomId, type ToolDefinition } from '@agentport/protocol';
+import {
+  MAX_PLAN_STEPS,
+  MAX_PLAN_STEP_CHARS,
+  isPromptId,
+  randomId,
+  type PlanStep,
+  type ToolDefinition,
+} from '@agentport/protocol';
 
 /** Envelope discriminator. Present on every frame in both directions. */
 export const ENVELOPE = 'agentport/ext/1';
@@ -237,6 +244,45 @@ export function sanitizeTools(value: unknown): ToolDefinition[] {
     if (!tool || seen.has(tool.name)) continue;
     seen.add(tool.name);
     out.push(tool);
+  }
+  return out;
+}
+
+const PLAN_STATUS = new Set<PlanStep['status']>(['pending', 'active', 'done']);
+const PLAN_PRIORITY = new Set<NonNullable<PlanStep['priority']>>(['high', 'medium', 'low']);
+
+/**
+ * One plan snapshot, rebuilt for the surface that renders it.
+ *
+ * All-or-nothing on purpose. A plan is a snapshot of what the agent intends
+ * *now* (`Plan` in messages.ts), so dropping a bad step and rendering the rest
+ * would show the user a checklist the agent never produced — the same failure
+ * the snapshot-not-delta rule exists to prevent. `undefined` means "not
+ * renderable"; the caller says so rather than inventing a plan.
+ *
+ * The bounds are the wire's own (`MAX_PLAN_STEPS`, `MAX_PLAN_STEP_CHARS`), so
+ * a snapshot that crossed the sealed channel intact is never refused here for
+ * being too big — only one our own plumbing mangled would be.
+ */
+export function sanitizePlanSteps(value: unknown): PlanStep[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  if (value.length > MAX_PLAN_STEPS) return undefined;
+  const out: PlanStep[] = [];
+  for (const entry of value) {
+    if (!isRecord(entry)) return undefined;
+    const text = str(entry['text'], MAX_PLAN_STEP_CHARS);
+    if (text === undefined) return undefined;
+    const status = entry['status'];
+    if (typeof status !== 'string' || !PLAN_STATUS.has(status as PlanStep['status'])) return undefined;
+    const priority = entry['priority'];
+    if (priority !== undefined && (typeof priority !== 'string' || !PLAN_PRIORITY.has(priority as NonNullable<PlanStep['priority']>))) {
+      return undefined;
+    }
+    out.push({
+      text,
+      status: status as PlanStep['status'],
+      ...(priority === undefined ? {} : { priority: priority as NonNullable<PlanStep['priority']> }),
+    });
   }
   return out;
 }

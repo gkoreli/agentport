@@ -16,7 +16,7 @@
  */
 
 import type { SiteTool } from '@agentport/client';
-import { createLogger, type HistoryEntry, type ToolDefinition } from '@agentport/protocol';
+import { createLogger, type HistoryEntry, type PlanStep, type ToolDefinition } from '@agentport/protocol';
 import type { ChatUpdate } from '../../../src/nisli-ui/ui/chat/index.js';
 import {
   ENVELOPE,
@@ -26,6 +26,7 @@ import {
   isRecord,
   mintId,
   readPageOutbound,
+  sanitizePlanSteps,
   sanitizeTools,
   type ContentToWorker,
   type ExtensionProviderErrorReason,
@@ -418,6 +419,10 @@ interface OverlayBridge {
   addUserMessage(content: string): void;
   apply(update: ChatUpdate): void;
   notice(text: string): void;
+  /** Replace the agent's checklist. An empty array clears it. */
+  plan(steps: readonly PlanStep[]): void;
+  /** Fingerprint words for the current attachment; '' hides the line. */
+  verify(words: string): void;
   reset(): void;
 }
 
@@ -433,13 +438,27 @@ let widgetToolSeq = 0;
 let widgetLiveSinceBind = false;
 const widgetTextMessages = new Set<string>();
 const widgetReasoningMessages = new Set<string>();
+/**
+ * State of the CURRENT attachment, held here rather than only in the overlay.
+ *
+ * The overlay iframe does not exist yet at document_start, which is exactly
+ * when `reclaimWidget` binds a session that may already be mid-turn — and a
+ * `chat.reset` during a history replay clears the panel. Keeping the values
+ * here means `showWidgetAttached` can restate them whenever the panel appears
+ * or is cleared, instead of the user losing a plan or a set of fingerprint
+ * words to a timing accident.
+ */
+let widgetPlan: readonly PlanStep[] = [];
+let widgetVerify = '';
 
 interface WidgetAttachment {
   ref: string;
-  info: { agentName: string };
+  info: { agentName: string; verify?: string };
   /** Turns the agent is still working on, so a document that arrives mid-turn
    *  renders a running turn instead of an idle composer. */
   activePrompts?: string[];
+  /** The plan of the turn in flight, when the worker is holding one. */
+  plan?: unknown;
 }
 
 function displayJson(value: unknown): string {
@@ -508,6 +527,8 @@ function overlay(): OverlayBridge {
     widgetAttaching = false;
     widgetTextMessages.clear();
     widgetReasoningMessages.clear();
+    widgetPlan = [];
+    widgetVerify = '';
     widgetSurfaceAlive = false;
     overlaySuppressed = true;
     overlayInstance = undefined;
@@ -525,6 +546,8 @@ function overlay(): OverlayBridge {
         if (widgetRef) tell({ t: 'close', ref: widgetRef, reason: 'user_detached' });
         widgetRef = undefined;
         widgetPromptId = undefined;
+        widgetPlan = [];
+        widgetVerify = '';
         overlay().reset();
         return;
       case 'overlay.layout':
@@ -578,6 +601,8 @@ function overlay(): OverlayBridge {
     addUserMessage: (content) => send({ t: 'chat.add-user', content }),
     apply: (update) => send({ t: 'chat.update', update }),
     notice: (text) => send({ t: 'overlay.notice', text }),
+    plan: (steps) => send({ t: 'overlay.plan', steps }),
+    verify: (words) => send({ t: 'overlay.verify', words }),
     reset: () => send({ t: 'chat.reset' }),
   };
   return overlayInstance;
@@ -605,6 +630,12 @@ function bindWidget(ref: string, routes: Map<string, ToolRoute>): void {
 
 function showWidgetAttached(ui: OverlayBridge, agentName: string): void {
   ui.setState('attached', agentName);
+  // The one place the attachment's own state is put on screen. It runs on a
+  // fresh attach, on a reclaim after navigation, and after a history replay's
+  // `reset` — so a plan and a set of fingerprint words are never lost to
+  // whichever of those happened to come last.
+  ui.verify(widgetVerify);
+  ui.plan(widgetPlan);
   // A turn was already running when this document arrived; render it as such
   // so the composer offers Stop instead of pretending the agent is idle.
   if (widgetPromptId) ui.apply({ type: 'run.start' });
@@ -641,6 +672,9 @@ async function attachWidget(): Promise<void> {
     else for (const tool of local) routes.set(tool.name, tool.handler);
 
     bindWidget(value.ref, routes);
+    // A fresh attachment: fresh sealing keys, and no turn yet to have a plan.
+    widgetVerify = typeof value.info.verify === 'string' ? value.info.verify : '';
+    widgetPlan = [];
     showWidgetAttached(ui, value.info.agentName);
     ui.notice(
       usingWebMcp
@@ -702,6 +736,25 @@ async function reclaimWidget(): Promise<void> {
   bindWidget(value.ref, new Map(local.map((tool) => [tool.name, tool.handler])));
   const active = value.activePrompts?.[0];
   if (typeof active === 'string') widgetPromptId = active;
+  // The attachment survived the navigation; so does what it was doing. The
+  // worker held both, because this document kept nothing across the boundary.
+  widgetVerify = typeof value.info.verify === 'string' ? value.info.verify : '';
+  if (value.plan === undefined) {
+    widgetPlan = [];
+  } else {
+    const steps = sanitizePlanSteps(value.plan);
+    if (steps) {
+      widgetPlan = steps;
+    } else {
+      // Only our own plumbing can produce this — the snapshot passed the wire
+      // schema before the worker ever held it. Show no plan rather than a
+      // mangled one, and say so, because it means these two halves disagree.
+      widgetPlan = [];
+      log.error('the wallet handed back a plan this document cannot render', {
+        data: { origin: location.origin },
+      });
+    }
+  }
 
   await documentReady();
   if (widgetRef !== value.ref) return; // detached or closed while we waited
@@ -791,11 +844,32 @@ function onWidgetEvent(event: string, payload: unknown): void {
     onWidgetClosed(reason);
     return;
   }
+  if (!isRecord(payload)) return;
+  const promptId = typeof payload['promptId'] === 'string' ? payload['promptId'] : undefined;
+
+  // `plan` and `reattached` describe the ATTACHMENT, not the conversation, so
+  // they are recorded before the overlay is consulted: a reclaim binds at
+  // document_start, long before any iframe exists, and losing a plan or the
+  // current fingerprint words to that gap is not acceptable. They also
+  // deliberately do not set `widgetLiveSinceBind` — neither is something the
+  // agent said, so neither may suppress the history replay.
+  if (event === 'plan' || event === 'reattached') {
+    if (!widgetRef) {
+      // The user hit Detach (or this document never bound) and the worker's
+      // `closed` is still in flight. Nothing here belongs to a live attachment,
+      // so render none of it — showing fingerprint words for a session that is
+      // going away is worse than showing nothing.
+      log.info('ignored attachment state for a widget that is not attached', { data: { event } });
+      return;
+    }
+    if (event === 'plan') onWidgetPlan(promptId, payload['steps']);
+    else onWidgetReattached(payload['verify']);
+    return;
+  }
+
   const ui = overlayInstance;
   if (!ui) return;
-  if (!isRecord(payload)) return;
   widgetLiveSinceBind = true;
-  const promptId = typeof payload['promptId'] === 'string' ? payload['promptId'] : undefined;
   if (event === 'delta' && promptId) {
     if (!widgetTextMessages.has(promptId)) {
       widgetTextMessages.add(promptId);
@@ -835,8 +909,92 @@ function onWidgetEvent(event: string, payload: unknown): void {
     ui.apply(failed
       ? { type: 'run.error', error: String(payload['error'] ?? 'Agent run failed') }
       : { type: 'run.end' });
-    if (widgetPromptId === promptId) widgetPromptId = undefined;
+    if (widgetPromptId === promptId) {
+      widgetPromptId = undefined;
+      // The turn is over, so its checklist stops being what the agent intends.
+      // Leaving it up would advertise finished work as current, and the next
+      // turn may produce no plan at all to replace it. (The site panel keeps a
+      // finished plan on screen; that is a bug there, not a difference worth
+      // reproducing — see the report accompanying this change.)
+      if (widgetPlan.length > 0) {
+        widgetPlan = [];
+        ui.plan([]);
+      }
+    }
   }
+}
+
+/**
+ * A plan snapshot for the turn this document believes is running.
+ *
+ * Replaces the checklist outright — never appended to the transcript, because
+ * a plan is revised as the agent discovers work and every revision replayed as
+ * a message would read as repetition rather than as progress.
+ */
+function onWidgetPlan(promptId: string | undefined, steps: unknown): void {
+  if (!promptId || promptId !== widgetPromptId) {
+    // The turn ended (`done` cleared `widgetPromptId`) or this plan belongs to
+    // one this document never picked up. Rendering it would put a checklist of
+    // intentions above a composer that is idle, so it is dropped — and said out
+    // loud, because a plan for an unknown turn means this document and the
+    // worker disagree about what is running.
+    log.warn('dropped a plan for a turn this document is not running', {
+      data: { promptId: promptId ?? 'missing', running: widgetPromptId ?? 'none' },
+    });
+    return;
+  }
+  const next = sanitizePlanSteps(steps);
+  if (!next) {
+    // The snapshot passed the wire schema before the wallet ever saw it, so
+    // this can only be our own plumbing corrupting it. Keep the last good plan
+    // rather than replace it with a fabricated one, and report it.
+    log.error('dropped a plan snapshot that failed validation inside the extension', {
+      data: { promptId },
+    });
+    return;
+  }
+  widgetPlan = next;
+  overlayInstance?.plan(next);
+}
+
+/**
+ * The socket dropped and the wallet put this attachment back on a fresh one.
+ *
+ * The fingerprint words CHANGE here: ADR-003 mints a new ephemeral keypair per
+ * attachment, so anyone comparing them against their daemon's consent screen is
+ * now comparing against stale ones. They are therefore persistent state, not a
+ * notice that scrolls away.
+ */
+function onWidgetReattached(words: unknown): void {
+  widgetVerify = typeof words === 'string' ? words : '';
+  // The turn that was in flight lost its answer, so its plan describes nothing.
+  widgetPlan = [];
+  const lost = widgetPromptId;
+  widgetPromptId = undefined;
+
+  const ui = overlayInstance;
+  if (!ui) {
+    // No panel yet — a reclaim binds this session at document_start. The state
+    // set above is what `showWidgetAttached` puts on screen when one appears,
+    // so nothing is lost; it is only late.
+    log.info('reattached on fresh sealing keys before this document had a panel', {
+      data: { origin: location.origin, lostTurn: Boolean(lost) },
+    });
+    return;
+  }
+  ui.verify(widgetVerify);
+  ui.plan([]);
+  if (!lost) {
+    ui.notice('Reconnected — your agent is back, on new sealing keys.');
+    return;
+  }
+  // Settle the run here rather than waiting for the worker's rejection of that
+  // prompt: `widgetPromptId` has already moved on, so `sendFromWidget`'s error
+  // handler will ignore that reply and the user is told once, not twice. Told,
+  // though — the answer really is gone, and only the agent's own store has what
+  // it did while nobody was listening.
+  ui.apply({ type: 'run.end' });
+  ui.notice('Reconnected on new sealing keys. The turn in flight lost its answer — ask again, or check your agent’s own history.');
 }
 
 /**
@@ -858,6 +1016,10 @@ function onWidgetClosed(reason: string): void {
   widgetAttaching = false;
   widgetTextMessages.clear();
   widgetReasoningMessages.clear();
+  // Nothing here describes a live attachment any more. `reset` below clears the
+  // panel's copy; these are the source it would otherwise be restated from.
+  widgetPlan = [];
+  widgetVerify = '';
   const ui = overlayInstance;
   ui?.reset();
   ui?.notice(detachNotice(reason));

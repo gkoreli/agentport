@@ -9,12 +9,14 @@
  */
 
 import { computed, each, html, signal, when } from '@nisli/core';
+import { createLogger, type PlanStep } from '@agentport/protocol';
 import {
   Chat,
   createChatStore,
   type ChatUpdate,
   type ContentBlock,
 } from '../../../src/nisli-ui/ui/chat/index.js';
+import { sanitizePlanSteps } from './bridge.js';
 
 export type WidgetPhase = 'idle' | 'attaching' | 'attached';
 
@@ -23,6 +25,20 @@ export type OverlayCommand =
   | { t: 'overlay.show' }
   | { t: 'overlay.state'; phase: WidgetPhase; agentName?: string }
   | { t: 'overlay.notice'; text: string }
+  /**
+   * The agent's plan for the turn it is running. A SNAPSHOT: this replaces the
+   * checklist outright, and an empty array clears it. It is deliberately not a
+   * `chat.update` — a plan is what the agent intends now, not something it
+   * said, and replaying each revision as a message would read as repetition.
+   */
+  | { t: 'overlay.plan'; steps: readonly PlanStep[] }
+  /**
+   * Fingerprint words for the CURRENT attachment. Persistent state, not a
+   * notice: a reconnect mints fresh sealing keys (ADR-003), so the words change
+   * underneath a user who was comparing them with their daemon's consent
+   * screen. They have to stay on screen to be comparable at all.
+   */
+  | { t: 'overlay.verify'; words: string }
   | { t: 'chat.add-user'; content: string | readonly ContentBlock[] }
   | { t: 'chat.update'; update: ChatUpdate }
   | { t: 'chat.reset' }
@@ -62,6 +78,17 @@ button:focus-visible, textarea:focus-visible { outline:2px solid var(--accent); 
 .attach button { border:1px solid var(--accent); border-radius:9px; padding:9px 14px; background:var(--accent); color:#fff; font-weight:650; }
 .notices { display:grid; gap:5px; padding:0 2px 8px; }
 .notice { color:var(--muted); font-size:11px; }
+.verify { color:var(--muted); font-size:10px; letter-spacing:.04em; padding:0 2px 7px; }
+.verify code { font:10px/1.4 ui-monospace,monospace; color:#cfd6e2; }
+.plan { border:1px solid var(--line); border-radius:10px; background:#12161d; padding:9px 11px; margin-bottom:9px; display:grid; gap:6px; }
+.plan-label { color:var(--muted); font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.06em; }
+.plan ol { margin:0; padding:0; list-style:none; display:grid; gap:4px; }
+.plan-step { display:grid; grid-template-columns:14px 1fr; gap:7px; align-items:baseline; font-size:12px; line-height:1.45; color:var(--muted); }
+.plan-mark { font-size:11px; text-align:center; }
+.plan-step[data-status="active"] { color:var(--text); }
+.plan-step[data-status="active"] .plan-mark { color:var(--accent); }
+.plan-step[data-status="done"] .plan-mark { color:var(--ok); }
+.plan-step[data-status="done"] span:last-child { text-decoration:line-through; opacity:.7; }
 .sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
 [data-slot="chat"] { display:flex; flex:1; min-height:0; flex-direction:column; gap:9px; }
 [data-slot="message-scroller"] { position:relative; display:flex; flex:1; min-height:0; overflow:hidden; }
@@ -114,6 +141,8 @@ button:focus-visible, textarea:focus-visible { outline:2px solid var(--accent); 
 [data-slot="chat-composer-send"][disabled] { opacity:.4; cursor:default; }
 `;
 
+const log = createLogger('extension.overlay');
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
@@ -129,6 +158,10 @@ export function mountOverlay(port: MessagePort): void {
   const phase = signal<WidgetPhase>('idle');
   const agentName = signal('');
   const notices = signal<Array<{ id: number; text: string }>>([]);
+  // Attachment state, deliberately outside the chat store: neither is anything
+  // the agent *said*, and both are replaced wholesale rather than accumulated.
+  const plan = signal<readonly PlanStep[]>([]);
+  const verify = signal('');
   const chat = createChatStore();
   const pendingPrompts = new Map<string, (accepted: boolean) => void>();
   let noticeSeq = 0;
@@ -161,11 +194,39 @@ export function mountOverlay(port: MessagePort): void {
         </button>
       </div>`)}
     <div class="chat-shell" class:active="${attached}" inert="${computed(() => !attached.value)}">
+      ${when(
+        computed(() => verify.value !== ''),
+        () => html`<div class="verify" title="Compare these words with your agent's consent screen">
+          verify <code>${verify}</code>
+        </div>`,
+      )}
       <div class="notices">${each(
         notices,
         (notice) => notice.id,
         (notice) => html`<div class="notice">${computed(() => notice.value.text)}</div>`,
       )}</div>
+      ${when(
+        computed(() => plan.value.length > 0),
+        () => html`<section class="plan" aria-label="Agent plan">
+          <div class="plan-label">Plan</div>
+          <ol>
+            ${each(
+              plan,
+              (step, index) => `${index}:${step.text}`,
+              (step) => {
+                const status = computed(() => step.value.status);
+                const mark = computed(() =>
+                  step.value.status === 'done' ? '✓' : step.value.status === 'active' ? '▸' : '○',
+                );
+                return html`<li class="plan-step" data-status=${status}>
+                  <span class="plan-mark" aria-hidden="true">${mark}</span>
+                  <span>${computed(() => step.value.text)}</span>
+                </li>`;
+              },
+            )}
+          </ol>
+        </section>`,
+      )}
       ${Chat({
         entries: chat.entries,
         busy: chat.running,
@@ -210,6 +271,25 @@ export function mountOverlay(port: MessagePort): void {
       case 'overlay.notice':
         if (typeof command.text === 'string') notices.value = [...notices.value.slice(-1), { id: ++noticeSeq, text: command.text }];
         return;
+      case 'overlay.plan': {
+        // Rebuilt here rather than trusted, with the SAME validator the content
+        // script used — there is one definition of a renderable plan, not one
+        // per hop. A snapshot that does not survive it is refused whole: half a
+        // checklist would show intent the agent never expressed.
+        const steps = sanitizePlanSteps(command.steps);
+        if (!steps) {
+          // Unreachable unless the content script and this frame disagree: it
+          // validates with this same function before sending. Keep whatever is
+          // already on screen, and say so rather than diverge in silence.
+          log.error('refused an unrenderable plan snapshot from the content script');
+          return;
+        }
+        plan.value = steps;
+        return;
+      }
+      case 'overlay.verify':
+        if (typeof command.words === 'string') verify.value = command.words;
+        return;
       case 'chat.add-user':
         if (typeof command.content === 'string' || Array.isArray(command.content)) chat.addUserMessage(command.content as string | ContentBlock[]);
         return;
@@ -219,6 +299,11 @@ export function mountOverlay(port: MessagePort): void {
       case 'chat.reset':
         chat.reset();
         notices.value = [];
+        // A reset is "this panel now shows nothing about an attachment", so the
+        // plan and the fingerprint words go with it. The content script restates
+        // whatever is still current through `showWidgetAttached`.
+        plan.value = [];
+        verify.value = '';
         phase.value = 'idle';
         agentName.value = '';
         return;

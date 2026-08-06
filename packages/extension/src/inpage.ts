@@ -27,6 +27,7 @@ import {
   TO_PAGE,
   TO_WALLET,
   isRecord,
+  sanitizePlanSteps,
   type PageEnvelope,
   type PageInbound,
   type PageOutbound,
@@ -158,6 +159,22 @@ class PageSession implements PageAgentSession {
           stopReason: String(payload['stopReason'] ?? 'end_turn'),
           error: payload['error'] as string | undefined,
         });
+        return;
+      case 'plan': {
+        // Snapshot, never an append: the site replaces its checklist with this
+        // one. A malformed snapshot is dropped whole rather than half-rendered
+        // — see `sanitizePlanSteps`, which is the same validator the
+        // extension's own widget renders through.
+        const steps = sanitizePlanSteps(payload['steps']);
+        if (!steps) return;
+        this.emit('plan', { promptId: String(payload['promptId']), steps });
+        return;
+      }
+      case 'reattached':
+        // The socket dropped and the attachment came back on fresh sealing
+        // keys. The site keeps its handle — that is the point — but every
+        // prompt and history request in flight lost its answer, so it is told.
+        this.emit('reattached', typeof payload['verify'] === 'string' ? { verify: payload['verify'] } : {});
         return;
       case 'tool':
         this.emit('tool', payload as SessionEvents['tool']);
