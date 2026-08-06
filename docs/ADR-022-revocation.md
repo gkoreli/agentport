@@ -218,6 +218,13 @@ must verify and must name this agent. Rebinding becomes something the user
 chose — `unpair` first, deliberately — which is what makes R6 load-bearing
 rather than tidy.
 
+It is worth naming the class rather than just the bug. This is the same shape
+as the three registry defects found the same day: **the trusting side assumed
+a well-formed peer.** ADR-018's invariant 1 says the relay cannot forge a
+binding, and that remains true — it says nothing about the daemon accepting
+one it was handed. An invariant stated about one party is not a property of
+the system until the other party checks too.
+
 This does not close the whole class. An unbound agent can still be claimed by
 whoever gets the code first, and a runtime that can rewrite the daemon's own
 source can do anything at all. Containment is Gate C's job. What this closes

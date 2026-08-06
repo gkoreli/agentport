@@ -195,7 +195,9 @@ const WalletApp = component('agentport-wallet-app', () => {
       const name = computed(() => tool.value.name);
       const description = computed(() => tool.value.description);
       const gated = computed(
-        () => tool.value.requiresApproval === true || (request.value?.request.alwaysAsk.includes(tool.value.name) ?? false),
+        () =>
+          tool.value.requiresApproval === true ||
+          (request.value?.request.grant.alwaysAsk.includes(tool.value.name) ?? false),
       );
       return html`<li class="tool-row">
         <span><strong>${name}</strong><small>${description}</small></span>

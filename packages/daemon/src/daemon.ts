@@ -99,6 +99,14 @@ interface SessionState {
 
 /** How long a detached session is held for a client to come back. */
 const DETACH_GRACE_MS = 30 * 60 * 1000;
+
+/**
+ * How long an approved-but-unredeemed connect offer stays redeemable. The
+ * relay expires the connect code itself after three minutes, so an approval
+ * outliving that by much is authority with nothing left to spend it on;
+ * doubling it leaves room for a slow page without leaving a standing yes.
+ */
+const CONNECT_APPROVAL_TTL_MS = 6 * 60 * 1000;
 const MAX_RESUME_ATTEMPTS = 10;
 
 /**
@@ -168,8 +176,19 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
   #options: DaemonOptions;
   #socket: WebSocket | undefined;
   #sessions = new Map<string, SessionState>();
-  /** Sealing keypairs minted at connect-offer time, keyed by the client epk. */
-  #offerSeals = new Map<string, KeyPair>();
+  /**
+   * Sealing keypairs minted at connect-offer time, keyed by the client epk,
+   * with the moment they were approved.
+   *
+   * An approval the widget never redeemed used to sit here for the process's
+   * lifetime: consent said yes, the session never opened, and the keypair
+   * stayed redeemable. That is a standing "yes" for a decision the user made
+   * once, minutes or days ago — and unlike a delegation it carries no origin,
+   * so revoking an origin structurally cannot reach it (ADR-022). The
+   * heartbeat expires it on the same schedule the relay expires the connect
+   * code itself.
+   */
+  #offerSeals = new Map<string, { keys: KeyPair; at: number }>();
   #log: Logger;
   #readyDeferred = new Deferred<{ bound: boolean }>();
   #authenticated = false;
@@ -253,6 +272,10 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     this.#heartbeat = setInterval(() => {
       // Detached sessions do not wait forever: past the grace, close the
       // runtime and forget the token.
+      const staleOffer = Date.now() - CONNECT_APPROVAL_TTL_MS;
+      for (const [epk, offer] of this.#offerSeals) {
+        if (offer.at < staleOffer) this.#offerSeals.delete(epk);
+      }
       const cutoff = Date.now() - DETACH_GRACE_MS;
       for (const session of [...this.#sessions.values()]) {
         if (session.detachedAt !== undefined && session.detachedAt < cutoff) {
@@ -483,7 +506,7 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
           return;
         }
         const mine = generateSealKeyPair();
-        this.#offerSeals.set(frame.epk, mine);
+        this.#offerSeals.set(frame.epk, { keys: mine, at: Date.now() });
         verify = fingerprintWords(frame.epk, mine.publicKey);
         let accepted = false;
         try {
@@ -850,11 +873,12 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     let mine: KeyPair;
     if (frame.viaConnect) {
       const approved = this.#offerSeals.get(frame.epk);
-      if (!approved) {
+      if (!approved || approved.at < Date.now() - CONNECT_APPROVAL_TTL_MS) {
+        this.#offerSeals.delete(frame.epk);
         this.#send({ t: 'session.denied', s: frame.s, reason: 'connect_not_approved' });
         return;
       }
-      mine = approved;
+      mine = approved.keys;
       this.#offerSeals.delete(frame.epk);
     } else {
       mine = generateSealKeyPair();

@@ -131,10 +131,14 @@ npm run agui:check # every emitted AG-UI event parsed by @ag-ui/core's schemas
 npm run typecheck  # tsc -b over all packages
 npm run deploy     # build the site + wrangler deploy
 
-# these three are checked separately, outside the project references
+# these FOUR are checked separately, outside the project references — and
+# they are the only thing that typechecks them at all, because every one is
+# bundled by esbuild, which does not typecheck. A type error here still
+# BUILDS and still ships.
 npx tsc -p examples/inkwell/tsconfig.json
 npx tsc -p site/tsconfig.json          # browser code (DOM lib)
 npx tsc -p site/tsconfig.worker.json   # worker code (workers-types)
+npx tsc -p wallet/tsconfig.json        # the hosted wallet origin app
 ```
 
 Browser and Worker type-check separately on purpose: `@cloudflare/workers-types`

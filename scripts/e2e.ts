@@ -411,6 +411,35 @@ await dropInSession.prompt('Add a line.');
 check('gated write was approved by the owner, not the page', localApprovals.length > 0, localApprovals);
 check('document changed', doc.text.endsWith('Add a line.'), doc.text);
 
+// An approval the widget never redeems must not stay redeemable. Unlike a
+// delegation it carries no origin, so revocation cannot reach it (ADR-022) —
+// its own expiry is the only thing that ends it.
+{
+  const abandoned = new AgentWallet({ relayUrl, userSecretKey: generateKeyPair().secretKey, socketFactory });
+  await abandoned.connect();
+  const stale = await abandoned.beginConnect({
+    surface: { name: 'Abandoned', origin: 'https://abandoned.test' },
+    tools: inkwellTools(),
+    decide: () => true,
+  });
+  dropInDaemon.claimConnect(stale.code);
+  await stale.accepted;
+  // Same page key, same approval, redeemed a second time: the daemon consumed
+  // the keypair when the first session opened, so there is no standing yes.
+  let reused = '';
+  await abandoned
+    .openSession({
+      agent: dropInAgentKeys.publicKey,
+      surface: { name: 'Abandoned', origin: 'https://abandoned.test' },
+      tools: inkwellTools(),
+    })
+    .catch((err: Error) => {
+      reused = err.message;
+    });
+  check('a consumed connect approval cannot be spent twice', reused.length > 0, reused);
+  abandoned.close();
+}
+
 // The important negative: the page still cannot reach that agent directly.
 let directDenied = '';
 await ephemeral
