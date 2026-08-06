@@ -125,8 +125,8 @@ Open the demo, hit **Pair a new agent**, paste the code, then **Connect
 agent**. The daemon's pairing link (`/pair#code=…`) auto-fills the dialog.
 
 ```bash
-npm run e2e        # full loop over real sockets, no browser, 100 checks
-npm run wire:check # wire validation: 485 fixture cases across all 43 frames
+npm run e2e        # full loop over real sockets, no browser, 108 checks
+npm run wire:check # wire validation: 492 fixture cases across all 43 frames
 npm run agui:check # every emitted AG-UI event parsed by @ag-ui/core's schemas
 npm run typecheck  # tsc -b over all packages
 npm run deploy     # build the site + wrangler deploy
@@ -313,8 +313,8 @@ has fixtures.
 Working: pairing, cert issuance and verification, directory + presence,
 capability grants with TTL, prompt streaming, plan reporting, tool-call
 round-trip, approval round-trip, cancellation, reconnect with in-place session
-resume, session teardown, revocation, and the full demo UI. 100 e2e checks
-and 485 wire-validation cases pass.
+resume, session teardown, revocation, authority-tagged approvals, and the full
+demo UI. 108 e2e checks and 492 wire-validation cases pass.
 
 Not built yet, in rough priority order:
 

@@ -954,3 +954,51 @@ per-action-class revocation (all the extension's lane); no multi-relay fan-out
 (a cert names no relay); and no containment of the local CLI seam, which stays
 reachable by anything running as the user until Gate C. Nothing reachable
 there grants — every verb only narrows what the agent accepts.
+
+---
+
+## ADR-023: An approval says what it is for — accepted (shipped 2026-08-06)
+
+Full record: [`ADR-023-approval-authority.md`](ADR-023-approval-authority.md).
+
+The consent review found that gated site-tool calls and the runtime's own
+tool-permission requests reach the same untyped boolean decider with nothing
+distinguishing them. True, and the interesting part is not the one it names.
+The attack is not auto-approval — the extension never branches on the tool
+name and always asks a human. The attack is that the consent window renders
+the summary the request carried, and the runtime's own requests carry
+agent-chosen text steered by page content. So an own-tool request can be made
+to read exactly like a granted site tool, **inside the one window a page
+cannot forge**, above the arguments of what is actually the agent's own shell.
+It does not bypass the decider; it asks the human a question that
+misrepresents what they are approving, in the surface whose whole value is
+that it cannot be faked.
+
+So the authority domain is not an input to a future policy engine — it is a
+thing every consent surface must *say*, before anything the agent wrote. The
+daemon stamps it and the runtime gets no parameter: `TurnContext`'s
+`requestApproval` is the only path a runtime can reach, so everything arriving
+there is its own capability by construction, and a parameter would have made
+it a self-declared field. The set is closed at two, and the sizing rule is the
+rendering rule — a member that cannot be explained to a user in one clause is
+probably two domains.
+
+`ApprovalResponse` also now carries a digest of the call, recomputed by the
+responder from what it was shown rather than echoed. Not for today's code,
+where a fresh correlation id and a human at the keyboard nearly suffice, but
+for the answer nobody looks at: the moment a policy engine or a remembered
+decision can produce a "yes" — which is what ADR-021 wants — that yes must be
+pinned to the call it was made about, or a stored approval for one call
+satisfies another.
+
+Two defects closed on the way, both about the failure path rather than the
+happy one. A human title was being written into a `TOOL_NAME_PATTERN` field,
+so a title with a forbidden character rejected the whole frame and the user
+was never asked. And a throw inside an `.onRequest` handler never reaches the
+wire, so the agent waited for a permission response that would never come:
+loud at the sender is silent on the wire, and the wire is where the peer is
+waiting. Internal failure is now a denial with a logged reason.
+
+R9 records one property this change does *not* assert — that a replayed
+`approval.response` is ignored — with the reason it could not be tested
+honestly, rather than shipping a check that would pass either way.
