@@ -124,6 +124,13 @@ checklist above the transcript.
 - `DemoWriterRuntime` reports and advances a plan, so the path is exercised
   without an LLM — the repo's dogfooding rule: an abstraction nobody calls is
   decoration.
+- **The plan dies with the turn.** It was cleared on close, attach and history
+  seed, but not when a run ended — so a cancelled or failed turn left steps
+  sitting at `active`/`pending`, advertising intent the agent no longer held,
+  and a following turn that reported no plan inherited the previous one.
+  Cleared on `RUN_FINISHED`, `RUN_ERROR`, and the reattach path that ends a
+  run. Found by extension-work while mirroring this into the extension
+  overlay; both surfaces now behave identically.
 
 Found while building it: `messages.ts` had a **fourth** place a frame type must
 be registered — a hand-written `SESSION_FRAME_TYPES` set with no type link to

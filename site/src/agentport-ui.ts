@@ -178,11 +178,18 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
           chat.apply({ type: 'run.end' });
           currentRunId = null;
           busy.value = false;
+          // A plan is what the agent intends NOW, so it dies with the turn.
+          // Keeping a finished checklist would be readable but not truthful:
+          // a cancelled or failed turn leaves steps sitting at active/pending
+          // forever, advertising intent the agent no longer holds, and a next
+          // turn that reports no plan would inherit the previous one.
+          plan.value = [];
           return;
         case 'RUN_ERROR':
           chat.apply({ type: 'run.error', error: event.message });
           currentRunId = null;
           busy.value = false;
+          plan.value = [];
           notice.value = event.message;
           return;
         case 'CUSTOM':
@@ -212,6 +219,7 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
             // never arrive.
             busy.value = false;
             currentRunId = null;
+            plan.value = [];
             chat.apply({ type: 'run.end' });
           } else if (event.name === 'agentport.closed') {
             for (const approval of pendingApprovals.value) approval.resolve(false);

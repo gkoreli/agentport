@@ -296,6 +296,14 @@ check('a second snapshot replaces rather than appends', planSteps().length === 2
 check('the finished step advanced to done', planSteps()[0]?.getAttribute('data-status') === 'done');
 check('the next step became active', planSteps()[1]?.getAttribute('data-status') === 'active');
 
+// A finished turn's checklist must not outlive it: a cancelled or failed turn
+// would leave steps at active/pending forever, advertising intent the agent no
+// longer holds, and a next turn reporting no plan would inherit this one.
+FakeRelay.latest!.sealedReply({ t: 'done', s: 'sess_test', promptId: 'p_ui', stopReason: 'end_turn' } as never);
+await new Promise((resolve) => setTimeout(resolve, 50));
+flush();
+check('the plan is cleared when the turn ends', clickMount.querySelectorAll('.ap-plan-step').length === 0, rendered().slice(-160));
+
 console.log('\n5c. a reconnect is visible, not silent');
 // The panel must not sit disabled waiting for a `done` that died with the old
 // socket, and the new fingerprint words must be shown: a silent rekey would
