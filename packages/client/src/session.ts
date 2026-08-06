@@ -9,6 +9,7 @@ import {
   MAX_TEXT_CHARS,
   WireViolation,
   createLogger,
+  hashCall,
   isPromptId,
   jsonValue,
   randomId,
@@ -431,7 +432,16 @@ export class AgentSession extends Emitter<SessionEvents> implements AgentSession
       });
     }
     this.emit('approval', { ...prompt, granted });
-    this.#send({ t: 'approval.response', s: this.id, id: frame.id, granted });
+    // Recomputed from what the decider was actually shown, never echoed from
+    // the request — echoing a peer's digest proves nothing (ADR-023 R6).
+    const callHash = prompt.call ? hashCall(prompt.call) : undefined;
+    this.#send({
+      t: 'approval.response',
+      s: this.id,
+      id: frame.id,
+      granted,
+      ...(callHash ? { callHash } : {}),
+    });
   }
 
   #finish(reason: string): void {

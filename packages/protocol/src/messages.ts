@@ -721,6 +721,12 @@ export const ApprovalRequest = obj({
   summary: str(0, MAX_DESCRIPTION_CHARS),
   /** The tool call this approval gates, when applicable. */
   call: opt(obj({ name: toolName, arguments: record })),
+  /**
+   * `hashCall(call)`, present exactly when `call` is. The answering side
+   * recomputes it from what it rendered and sends it back, so a decision can
+   * be checked against the call it was made about (ADR-023 R6).
+   */
+  callHash: opt(hex(32)),
 });
 export type ApprovalRequest = Infer<typeof ApprovalRequest>;
 
@@ -729,6 +735,13 @@ export const ApprovalResponse = obj({
   s: idField,
   id: idField,
   granted: bool(),
+  /**
+   * Recomputed by the responder from the call it was shown — never echoed
+   * from the request, because echoing a peer's digest proves nothing. A
+   * mismatch means the answer is about a different call than the question,
+   * and the daemon refuses it.
+   */
+  callHash: opt(hex(32)),
 });
 export type ApprovalResponse = Infer<typeof ApprovalResponse>;
 

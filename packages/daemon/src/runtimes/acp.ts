@@ -140,8 +140,22 @@ export class AcpRuntime implements AgentRuntime {
     // https://github.com/agentclientprotocol/claude-agent-acp/blob/main/src/tests/acp-agent.test.ts
     const acpConnection = client({ name: 'agentport' })
       .onNotification(methods.client.session.update, (request) => this.#sessionUpdate(request.params))
-      .onRequest(methods.client.session.requestPermission, (request) =>
-        this.#requestPermission(request.params, request.signal))
+      .onRequest(methods.client.session.requestPermission, async (request) => {
+        // A throw here never reaches the agent — it just never answers, and
+        // the agent waits for a permission response that will never come
+        // until the turn aborts. Our error becomes the peer's hang, which is
+        // the same disease as a handler set nobody registered, one level up.
+        //
+        // Inside a request handler the only acceptable outcome is an answer,
+        // so an internal failure becomes a DENIAL with a logged reason.
+        // Denying is the honest answer: the user was never asked.
+        try {
+          return await this.#requestPermission(request.params, request.signal);
+        } catch (err) {
+          this.#log.error('permission request failed internally; denying', { err });
+          return { outcome: { outcome: 'cancelled' } };
+        }
+      })
       .connect(stream);
     this.#acpConnection = acpConnection;
     const connection = acpConnection.agent;

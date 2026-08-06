@@ -26,6 +26,7 @@ import {
   delegationLifetimeOk,
   fingerprintWords,
   generateSealKeyPair,
+  hashCall,
   hashGrant,
   openSealed,
   openProofBinding,
@@ -82,7 +83,7 @@ interface SessionState {
    */
   transcript: HistoryEntry[];
   toolCalls: Map<string, Deferred<unknown>>;
-  approvals: Map<string, Deferred<boolean>>;
+  approvals: Map<string, { decision: Deferred<boolean>; callHash?: string }>;
   prompts: Map<string, AbortController>;
   /** Symmetric key sealing this attachment's content frames (ADR-003). */
   sealChannel: SealChannel;
@@ -691,8 +692,24 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
       case 'approval.response': {
         const pending = this.#sessions.get(frame.s)?.approvals.get(frame.id);
         if (!pending) return;
+        // Delete BEFORE resolve, and let delete's own result be the interlock
+        // (see the abort path). That ordering — not the id being unguessable —
+        // is what makes a replayed response a no-op and stops a timeout racing
+        // an answer into a double resolve. A refactor that resolves first, or
+        // that keeps answered ids around for idempotency, kills the property
+        // silently, which is why e2e now asserts it.
         this.#sessions.get(frame.s)!.approvals.delete(frame.id);
-        pending.resolve(frame.granted);
+        // The answer must be about the question (ADR-023 R6). A decision that
+        // did not come from a human reading this exact call — a policy engine,
+        // a remembered "yes" — cannot be replayed onto a different one.
+        if (pending.callHash !== frame.callHash) {
+          this.#log.warn('approval answered a different call than it asked about', {
+            sessionId: frame.s,
+          });
+          pending.decision.resolve(false);
+          return;
+        }
+        pending.decision.resolve(frame.granted);
         return;
       }
 
@@ -1134,7 +1151,8 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
 
     const id = randomId('appr_');
     const deferred = new Deferred<boolean>();
-    session.approvals.set(id, deferred);
+    const callHash = call ? hashCall(call) : undefined;
+    session.approvals.set(id, { decision: deferred, ...(callHash ? { callHash } : {}) });
     const abort = () => {
       if (!session.approvals.delete(id)) return;
       deferred.resolve(false);
@@ -1156,6 +1174,7 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
         domain: 'runtime_own_tool',
         summary,
         ...(call ? { call } : {}),
+        ...(callHash ? { callHash } : {}),
       });
     }
     return deferred.promise.finally(() => signal?.removeEventListener('abort', abort));
@@ -1244,7 +1263,7 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     for (const controller of session.prompts.values()) controller.abort();
     for (const pending of session.toolCalls.values()) pending.reject(new Error(reason));
     session.toolCalls.clear();
-    for (const pending of session.approvals.values()) pending.resolve(false);
+    for (const pending of session.approvals.values()) pending.decision.resolve(false);
     session.approvals.clear();
   }
 

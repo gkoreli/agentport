@@ -205,6 +205,55 @@ that pattern forbids does not degrade — it rejects the whole frame, so the
 user is never asked and the agent's permission request hangs on a `Deferred`
 until the turn aborts. A human title does not belong in a tool-name field.
 
+### R8. A throw inside a request handler becomes the peer's hang
+
+`#requestPermission` is registered with `.onRequest`. `seal()` validates its
+own output before encrypting — correct, so a frame the far end would reject
+fails at the sender as a local bug rather than tearing down the peer's
+session. But inside a request handler that throw never reaches the wire: the
+agent waits for a permission response that will never come, until the turn
+aborts. **Loud at the sender is silent on the wire, and the wire is where the
+peer is waiting.**
+
+The title fix above removes today's reachable cause. It does not remove the
+class — an over-long summary, an arguments object past the JSON node bound, or
+a runtime that namespaces tool names differently all reach the same throw. So
+the handler now converts an internal failure into a **denial with a logged
+reason**. Denying is the honest answer, because the user was never asked.
+
+This is the third shape of one disease, and all three are now written down:
+
+1. **A handler set the compiler cannot check** — a message arrives and nobody
+   is listening. Four instances in one day; three are now compile errors and
+   the fourth (per-call waiter lists, which have nothing to be total over) is
+   covered by a liveness backstop instead.
+2. **A check that hangs rather than fails** — a hang is indistinguishable from
+   slowness, so nobody waits to find out. Every path that can refuse, deny or
+   time out needs its own deadline.
+3. **A throw inside a request handler** — a message never leaves and the peer
+   is listening forever.
+
+All three are the failure path being incomplete while the happy path is fine.
+
+### R9. One property this change does NOT assert, and why
+
+Replay of an `approval.response` is dead, and R6 records the reason: delete
+before resolve, with the map as the single source of liveness. **Nothing
+asserts it, and this change does not add the assertion.**
+
+The honest reason is that it is not reachable from an ordinary client. Sealed
+frames carry a strict monotonic nonce, so duplicating one on the wire is
+refused at the channel layer before any handler sees it — the property is
+only exercisable by a *peer that seals a fresh frame with a duplicate id*,
+which needs a purpose-built hostile client rather than a tap. Writing a check
+that exercises the channel's replay guard and calling it a test of the handler
+would be exactly the vacuity the house rules forbid: it would pass whether or
+not the handler property held.
+
+So: recorded as a known gap with its cost, not silently skipped. The refactor
+this guards against — resolving before deleting, or keeping answered ids for
+idempotency — remains catchable only by review until that client exists.
+
 ## Consequences
 
 Approval frames are **sealed content**, not lifecycle — so unlike ADR-022's

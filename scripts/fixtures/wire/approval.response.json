@@ -70,6 +70,28 @@
       "name": "raw: __proto__ smuggle",
       "expect": "unexpected_key",
       "raw": "{\"__proto__\":{},\"granted\":true,\"id\":\"a1\",\"s\":\"s1\",\"t\":\"approval.response\"}"
+    },
+    {
+      "name": "valid: the recomputed digest",
+      "expect": "ok",
+      "frame": {
+        "t": "approval.response",
+        "s": "s1",
+        "id": "a1",
+        "granted": true,
+        "callHash": "b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7"
+      }
+    },
+    {
+      "name": "digest uppercase hex",
+      "expect": "bad_format",
+      "frame": {
+        "t": "approval.response",
+        "s": "s1",
+        "id": "a1",
+        "granted": true,
+        "callHash": "B7B7B7B7B7B7B7B7B7B7B7B7B7B7B7B7B7B7B7B7B7B7B7B7B7B7B7B7B7B7B7B7"
+      }
     }
   ]
 }
