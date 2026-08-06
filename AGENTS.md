@@ -203,6 +203,38 @@ The agent panel's transcript is the protocol-neutral Nisli chat set in
   errors, no vacuous tests (a test whose assertions cannot fail proves
   nothing), no security by assertion — invariants get checks in e2e.
 
+## What makes a check evidence
+
+Every rule below was paid for by a check that looked green and proved
+nothing. They are cheap to apply and each one has caught a real instance.
+
+1. **Watch it fail.** Revert the fix in place and re-run. A check nobody has
+   seen fail is not evidence — including a type-level assertion, where
+   `const _: Unvalidated[] = []` is satisfied by an empty array whatever
+   `Unvalidated` is.
+2. **Fail for the right reason.** A check that can fail but cannot see the
+   failure mode it was written for is not evidence either. If reverting the
+   fix makes it fail with an unrelated message, it is testing something else.
+3. **Never hang.** A check that hangs on the bug it targets is not a check at
+   all: a hang is indistinguishable from slowness and nobody waits to find
+   out. Every path that can refuse, deny or time out needs its own deadline.
+4. **Beware string keys.** A check keyed on a string that another change may
+   legitimately move has an expiry date — it stops being able to fail as a
+   side effect of an unrelated edit, and still reports green.
+5. **A failure is evidence about the check as often as about the code.** The
+   reflex to fix the code first is how a correct implementation gets bent to
+   match a wrong expectation.
+6. **When the only available check would lie, do not write it — record the
+   gap and its cost.** A gap in the record looks like incompleteness; a
+   passing check that proves nothing looks like rigour. Prefer the first.
+   ADR-023 R9 is the worked example.
+
+And three shapes of one disease, all found in a single day, all of them the
+failure path being incomplete while the happy path is fine: a handler set the
+compiler cannot check (a message arrives and nobody is listening); a check
+that hangs rather than fails; and a throw inside a request handler (a message
+never leaves and the peer listens forever). See ADR-023 R8.
+
 ## Errors and logging
 
 - Every catch block either rethrows or logs through the shared logger with a
