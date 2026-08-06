@@ -371,7 +371,13 @@ export class AgentWallet extends Emitter<WalletEvents> {
    */
   async revoke(agent: Hex, origin: string): Promise<number> {
     this.#sendRaw({ t: 'revoke', agent, origin });
-    const frame = await this.#await('revoked');
+    // Deadlined, like every other round-trip with no human in it. Withdrawing
+    // authority is precisely the operation a user must not be left guessing
+    // about: silence has to become a visible failure they can act on, not a
+    // spinner. It is also the shape that makes a check on this path usable —
+    // a test that hangs on the bug it targets is not a check, because a hang
+    // is indistinguishable from slowness and nobody waits to find out.
+    const frame = await this.#awaitTimed('revoke', 'revoked');
     return frame.sessions;
   }
 
