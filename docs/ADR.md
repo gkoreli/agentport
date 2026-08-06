@@ -839,3 +839,36 @@ constructor exceptions.
 - [Chromium: cross-world scoped-registry isolation fix](https://chromium.googlesource.com/chromium/src/+/40b2818870e8acc4d968e4ea966decc9b5c8c020%5E%21/)
 - [Lit Labs scoped-registry mixin source](https://github.com/lit/lit/blob/main/packages/labs/scoped-registry-mixin/src/scoped-registry-mixin.ts)
 - [lit-html `creationScope` implementation](https://github.com/lit/lit/blob/main/packages/lit-html/src/lit-html.ts)
+
+---
+
+## ADR-021: The web harness — your own agent drives any website — proposed
+
+Full record: [`ADR-021-web-harness.md`](ADR-021-web-harness.md).
+
+The extension already lends generic page tools to the user's agent on sites
+that declared nothing (`packages/extension/src/pagetools.ts`), through the same
+grant, consent, and sealing path as a declared surface. That is not a fallback
+— it is the widest form of the product, and the one thing a browser vendor's
+built-in assistant cannot copy: it is the *same agent* the user already runs,
+with their memory, prompts, MCP servers, and files.
+
+Two things block it, both found by using it. A navigation kills the session —
+deliberately, at `packages/extension/src/sw.ts:725`, where only `from === 'page'`
+surfaces get orphan-and-reclaim — so the one surface built for multi-page flows
+cannot survive succeeding at a click. And every gated call re-asks, because
+nothing remembers a decision, which on a generic harness means a dialog every
+few seconds and a user trained to approve without reading.
+
+The decision: **the attachment belongs to the user and the origin, not to the
+document.** Sessions survive same-origin navigation and detach across origins;
+navigation becomes a real tool rather than something that happens to the agent;
+consent is remembered per origin and per action class, expiring and revocable,
+never a blanket allow-all; site-declared tools win where they overlap with
+synthesized ones.
+
+The hard part is prompt injection, and this makes it harder: on an arbitrary
+page the agent reads attacker-controlled text while holding tools over that
+same page, and remembered consent means some of those tools no longer stop to
+ask. Remembered approval therefore ships only with scoping, visibility,
+revocation, and the ADR-019 Gate C capability firewall — not before.

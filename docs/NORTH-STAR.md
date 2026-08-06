@@ -86,6 +86,56 @@ granting a **user-chosen remote agent** a **site-defined toolset**, with
 consent that happens where the user's key is and content that nobody in the
 middle can read.
 
+## The widest form of the claim: every website, not just the ones that opted in
+
+The integration story above assumes a site chose to participate — it declared
+tools, or it registered them with WebMCP. That is the clean case, and it is
+where the primitive eventually lands.
+
+But most of the web will never declare anything. And a browser extension can
+supply the missing half: it can read and drive the page the user is already
+looking at, and lend *that* to the user's agent as a capability grant. The site
+did not opt in and does not need to.
+
+This is the same product, taken to its widest form:
+
+- **On a site that declared tools**, the agent gets the site's own intent —
+  named actions that carry meaning, with the site's own approval hints.
+- **On a site that declared nothing**, the agent gets the generic page harness
+  — read, find, fill, click, scroll, navigate — supplied by the extension.
+- **On a site that declared some things**, it gets both, with the site's own
+  tools preferred where they overlap, because a named action beats synthesized
+  clicks every time.
+
+The user should not have to know which case they are in.
+
+The part that makes this different from a browser vendor shipping an assistant:
+**it is the same agent.** Not a different assistant that lives in the browser
+and knows nothing about you — the one already running on your machine, with
+your memory, your prompts, your MCP servers, your files, the context of
+everything else you have been doing with it. A browser-vendor assistant is
+another agent to bring things to. This one is the agent you already brought
+everything to, now able to see and act on the page in front of you.
+
+What that demands, and where we currently fall short:
+
+- **A session must outlive a navigation.** Driving a real website means
+  clicking something and going somewhere. An agent whose session dies the
+  moment it succeeds at clicking a link is not an automation harness; it is a
+  demo. The attachment belongs to the *user and the origin*, not to the
+  document instance.
+- **Consent must be remembered.** "Attached, then detached" is about the
+  agent's authority ending, not about making the user re-approve the same
+  agent for the same site every few minutes. Approving once should mean
+  something durable and revocable, and per-call approval should be reserved
+  for what actually deserves it.
+- **The harness must be good enough to trust.** Generic page tools are what
+  the agent falls back to when a site says nothing, so their failure modes are
+  the product's failure modes.
+
+None of this weakens what the site learns: the site is not a party to any of
+it. On an undeclared site, the site does not even know an agent is present.
+
 ## What we will never be
 
 These are load-bearing. A change that violates one is wrong even if it is
