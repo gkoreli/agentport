@@ -353,9 +353,18 @@ const VALIDATED = [
   'webmcp.tools',
 ] as const satisfies readonly PageOutbound['t'][];
 
-type UnvalidatedPageOutbound = Exclude<PageOutbound['t'], (typeof VALIDATED)[number]>;
-const _everyPageMessageIsValidated: UnvalidatedPageOutbound[] = [];
-void _everyPageMessageIsValidated;
+/**
+ * Fails the build naming any PageOutbound member the switch does not validate.
+ * The constraint is what does the work: `Exclude<>` narrowing to `never` is the
+ * only way to satisfy it, so a missing member produces "Type '"history"' does
+ * not satisfy the constraint 'never'". An earlier version of this guard
+ * declared `const _: Unvalidated[] = []` instead — vacuous, because an empty
+ * array literal is assignable to any array type, so it silently proved nothing.
+ */
+type AssertNever<T extends never> = T;
+type _EveryPageMessageIsValidated = AssertNever<
+  Exclude<PageOutbound['t'], (typeof VALIDATED)[number]>
+>;
 
 /** Ids minted on the trusted side. Never derived from anything the page sent. */
 export function mintId(prefix: string): string {
