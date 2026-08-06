@@ -867,8 +867,18 @@ consent is remembered per origin and per action class, expiring and revocable,
 never a blanket allow-all; site-declared tools win where they overlap with
 synthesized ones.
 
-The hard part is prompt injection, and this makes it harder: on an arbitrary
-page the agent reads attacker-controlled text while holding tools over that
-same page, and remembered consent means some of those tools no longer stop to
-ask. Remembered approval therefore ships only with scoping, visibility,
-revocation, and the ADR-019 Gate C capability firewall — not before.
+The consent half of that was then rejected by an independent security review
+(`docs/reviews/web-harness-consent.md`) and the record rewritten. Remembering
+approval "per action class" is unsound however it is scoped: `click` is not a
+security class (one click can purchase, publish, authorize or delete), and
+`fill` is not a step before data egress but data egress itself — it dispatches
+`input`/`change` events the page's own scripts observe, so an "ask before
+Submit" policy never fires. The corrected model remembers **attaching and
+reading**, never mutating; every generic fill, click, submit and navigation
+keeps an explicit approval.
+
+The review also found a defect this proposal would have made dangerous: gated
+page calls and the runtime's OWN tool-permission requests share one untyped
+boolean decider with no provenance field, so a remembered page policy could
+satisfy an approval that was never about the page. Approvals need an
+extension-trusted authority domain before anything can be remembered at all.

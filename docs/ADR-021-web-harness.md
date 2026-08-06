@@ -92,31 +92,76 @@ The agent must also be told the page changed. A tool result that silently
 describes a different document than the one the agent reasoned about is the
 kind of confusion that produces wrong actions.
 
-### 3. Consent is remembered, scoped, and revocable
+### 3. Consent is remembered — for attaching and reading, NOT for mutating
 
-Replace per-call re-asking with a durable, inspectable grant:
+**This section was rewritten after an independent security review
+(`docs/reviews/web-harness-consent.md`) rejected the original proposal.** What
+follows is the corrected model; the original is described below so the
+reasoning is not lost.
 
-- **Attach once per origin.** Approving an agent for an origin persists until
-  revoked or expired. Storage is the extension's own, per origin, alongside the
-  existing per-origin identity (`packages/extension/src/storage.ts:90`).
-- **Per-call approval is reserved for what deserves it.** Reads
-  (`page.info`, `page.readText`, `page.readSelection`, `page.listElements`)
-  never gate. Writes (`page.fill`, `page.click`, navigation) gate by policy,
-  and the user can say "allow this kind of action on this origin".
-- **Never a blanket allow-all.** "Approve everything this agent ever does
-  anywhere" is not a setting we offer. Scope is always an origin and a class of
-  action.
-- **Always visible, always revocable.** A list of origins currently holding the
-  agent, with one action to cut each off, and one to cut all. Ties into the
-  existing unbuilt revocation work (`CertStore.remove` exists and nothing calls
-  it).
-- **Expiry stays.** A remembered approval has a lifetime; it is not a
-  permanent capability.
+What was proposed: remember approval per origin *and per action class*, so a
+user could say "allow clicks on this site" and stop being asked. That is
+unsound, for reasons that survive every scoping refinement:
 
-This is not a weakening of invariant 2 ("consent happens where the key is").
-The decision still happens in extension chrome the page cannot draw. What
-changes is that a decision the user already made is honored instead of being
-asked again.
+- **`click` is not a security class.** One click can navigate, purchase,
+  publish, authorize, send, or delete. A count of one is already enough for an
+  irreversible effect.
+- **`fill` is already data egress, not a step before it.** `page.fill`
+  dispatches bubbling `input` and `change` events that the page's own scripts
+  observe (`packages/extension/src/pagetools.ts:164`, `:181`). By the time an
+  "always ask before Submit" policy could fire, the value has already been
+  transmitted. The attack is: hostile page text tells the agent to place data
+  it holds into a field; remembered `fill` writes it; the page's listener sends
+  it; no later approval ever fires.
+- **The labels the agent reasons about are attacker-controlled** — ARIA
+  attributes, placeholders, names, text (`pagetools.ts:65`) — and the element
+  handle proves only that the same object is still connected, not that its
+  meaning, handlers, or form destination are unchanged (`pagetools.ts:92`).
+
+So: **remember attachment and passive observation, not mutation.**
+
+- **Remembered:** permission to attach the chosen agent with the read-only
+  tools — `page.info`, `page.readText`, `page.readSelection`, metadata-only
+  `page.listElements`, `page.scroll`.
+- **Always re-asks, with no remembered policy able to satisfy it:** every
+  generic fill, click, submit and navigation; anything uploading, downloading,
+  touching the clipboard, credentials, accounts, authorization, money, or
+  anything externally visible; any transfer of the agent's memory or local data
+  into a page; and any action whose provenance or impact class is unknown.
+- **Scope:** exact HTTPS top-level origin, the selected agent device key, the
+  tab, the top frame, the active document epoch, and a policy version. No
+  wildcard subdomains, no remembered iframe authority.
+- **Activation:** a user gesture per tab. A remembered policy must never cause
+  the agent to start or resume a run merely because the user visited a site.
+- **Lifetime:** session storage; expires at browser-session end or eight hours,
+  whichever is first, with a 15-minute idle and one-hour hard expiry per
+  attachment, none of them rolling.
+- **Visible and revocable:** the origins-holding-your-agent list, atomic
+  revocation, a kill-all, and bounded local audit metadata — timestamp,
+  verified origin, agent, action class, decision. Never prompts, arguments,
+  results, page text, query strings, or tokens.
+
+**A separate finding that changes the API, not just the policy.** Gated page
+calls and the runtime's OWN tool-permission requests currently pass through the
+same untyped boolean decider: `ApprovalPrompt` carries a summary and an
+optional call and no provenance at all
+(`packages/client/src/session.ts:59`), and both `tool.call` and
+`approval.request` route into it (`session.ts:253`, `:346`), including ACP's
+own-tool permission request (`packages/daemon/src/runtimes/acp.ts:328`). So a
+remembered policy implemented as "a smarter askApproval" could match an
+approval that was never about the page at all. Any remembered policy therefore
+requires an extension-trusted authority domain on every approval —
+`generic_page_tool`, `site_declared_tool`, `runtime_own_tool`, `navigation`,
+`data_egress` — and a runtime-own-tool approval must never be satisfiable by an
+origin's page policy.
+
+**Scopes that are real, and scopes that are theatre.** Tab, top frame, and
+document epoch are required. Exact origin is necessary but insufficient on
+origins hosting mutually distrusting content. Absolute and idle time limit how
+long a compromise stays useful. Count and rate do not protect against the first
+destructive action. Route and path are SPA-controlled and are context, not
+authority. A remembered "next five actions" is theatre unless the sequence is
+exact, immutable, single-use, and aborts on any change.
 
 ### 4. Site tools win where they overlap
 
@@ -180,19 +225,34 @@ one-click-hijack machine, and that would be worse than shipping nothing.
 **Not decided here.** Whether the harness should offer a recorded/replayable
 flow; whether cross-tab attachments share one session; naming for the widget.
 
-## What must be true before this ships
+## Ship order
 
-1. A widget session survives same-origin navigation, proven by an e2e or
-   extension-smoke check that navigates and continues the same conversation.
-2. Cross-origin navigation detaches, proven by a check that the grant does not
-   follow.
-3. Remembered approval is per-origin and per-action-class, expires, and is
-   revocable from extension chrome, with an adversarial check that a page
-   cannot cause or forge one.
-4. Page text is delivered to the runtime as data, with the injection boundary
-   stated where a maintainer will see it.
-5. The origins-holding-your-agent list exists and its revoke action really
-   closes live sessions.
+The review's ordering, adopted. Per-call approval for every mutation stays on
+throughout; remembered mutation sits behind a flag that is not available, not
+behind a weaker fallback.
 
-Items 3 and 5 are the ones that make item 1 safe. Shipping 1 and 2 without them
-is not an option.
+1. **Navigation survival and truthful page tools** — the parts with no consent
+   implications. Widget sessions orphan and reclaim across same-origin
+   navigation; cross-origin detaches; a click that did not happen says so.
+2. **Separate the authority domains.** Every approval carries an
+   extension-trusted domain tag. Nothing can be remembered until an approval
+   can say what kind of authority it is asking for.
+3. **Runtime containment (ADR-019 Gate C).** The agent's own filesystem, shell,
+   mail, browser, credential and network tools are absent by default for an
+   attachment, and a runtime that cannot enforce that is refused.
+4. **Fix the read boundary.** Truthful visible-text extraction, no ordinary
+   form-value disclosure, document-bound handles, conservative revalidation.
+5. **The navigation state machine** — top-frame identity, frame and document
+   ids, final committed origin, epochs, redirects, SPA notifications, and
+   cancellation at navigation start.
+6. **Trusted policy UI, storage, atomic revocation, kill-all, audit view.**
+7. **Adversarial browser tests** — hidden injection, input-event exfiltration,
+   changed click handlers, same-origin iframe reclaim, redirects, pushState,
+   meta-refresh, opaque documents, revocation races, worker eviction,
+   cross-tool local-data exfiltration.
+8. **Independent review of the release candidate.** Only then enable remembered
+   READ-ONLY consent.
+
+Remembered generic writes stay out of scope until there is a materially
+stronger semantic authorization design than "the user said clicks are fine
+here".
