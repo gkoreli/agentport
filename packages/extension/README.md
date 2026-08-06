@@ -191,7 +191,9 @@ keeps its ref and never notices.
   wrapping, or delegating signing to a NIP-46 bunker, changes `src/storage.ts`
   and nothing else.
 - **No revocation UI.** The popup lists agents and live sessions; it cannot
-  unpair one. `CertStore.remove` on the relay still has no caller.
+  unpair one. Revocation is edge-side since ADR-016 made the relay stateless:
+  it belongs to the daemon's identity file and the wallet's own store, not to
+  the relay.
 - **MV3 idle eviction.** A 20s heartbeat plus a 1-minute `chrome.alarms` wake
   keep the worker and socket alive while sessions exist. Chrome 116+ also
   counts WebSocket traffic as activity. A long silent session can still be

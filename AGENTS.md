@@ -306,7 +306,11 @@ Not built yet, in rough priority order:
 4. ~~WebMCP interop.~~ **Done.** Both connect.js and the extension harvest
    `document.modelContext` registrations (with the deprecated
    `navigator.modelContext` fallback) into `SiteTool`s at attachment time.
-5. **Revocation UI.** `CertStore.remove` exists; nothing calls it.
+5. **Revocation.** No way to list what holds your agent, or to cut it off.
+   (The old note here pointed at `CertStore.remove` on the relay; that type is
+   gone from source — only stale `dist/` remains — because ADR-016 made the
+   relay stateless. Ownership lives at the edges now, so revocation is a daemon
+   + CLI + wallet job, not a relay one.)
 6. **Reconnect + session resume.** Sockets are assumed stable; they aren't.
 
 ## Transport, and why not Tailscale

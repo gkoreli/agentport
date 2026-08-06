@@ -366,8 +366,13 @@ export class AcpRuntime implements AgentRuntime {
           );
 
     if (signal.aborted) return { outcome: { outcome: 'cancelled' } };
-    const kinds = allow ? ['allow_once', 'allow_always'] : ['reject_once', 'reject_always'];
-    const chosen = options.find((option: PermissionOption) => kinds.includes(option.kind));
+    // The user's answer covers this call alone. The runtime chooses the
+    // option list and its order, so a durable option must never be selected
+    // on the user's behalf — picking allow_always because it was listed
+    // first would turn one "Approve" into standing approval for every later
+    // call in the attachment.
+    const wanted = allow ? 'allow_once' : 'reject_once';
+    const chosen = options.find((option: PermissionOption) => option.kind === wanted);
     if (!chosen) return { outcome: { outcome: 'cancelled' } };
     return { outcome: { outcome: 'selected', optionId: chosen.optionId } };
   }
