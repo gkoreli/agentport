@@ -59,6 +59,7 @@ packages/daemon/     VPS-side agent host + AgentRuntime interface.
 packages/client/     wallet, session, navigator.agent provider. Isomorphic.
 site/                the deployed demo: landing + two surfaces + CF Worker/DO.
 examples/inkwell/    the original local-only demo, kept as the minimal example.
+CHANGELOG.md         what changed per version, and why it mattered.
 scripts/e2e.ts       the real test — relay + daemon + wallet over real sockets.
 scripts/acp-smoke.ts real-agent proof; run where the ACP agent is authed.
 scripts/remote-check.ts  pair + prompt against the deployed relay.
