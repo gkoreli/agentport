@@ -906,11 +906,36 @@ console.log('\n12b. a dropped socket reconnects itself');
   const blipOffer = await blipUser.claimPairing(await blipPairing.promise);
   await blipUser.approvePairing(blipOffer);
 
+  // The handlers registered at open time, wrapped so that what runs AFTER the
+  // blip can be identified as these exact closures and not a rebuilt lookalike.
+  //
+  // This is the assumption the extension's service worker now rests on. It used
+  // to run a second redial loop that rebuilt its whole tool table on reconnect;
+  // that loop is gone, because an in-place rekey keeps the handlers the session
+  // was constructed with. If a rekey ever silently dropped or replaced them,
+  // every attachment would still report itself open, still stream text, and
+  // answer 'unknown tool' to the first thing the agent actually tried to do.
+  const ranAfterBlip: string[] = [];
+  let recording = false;
+  const registeredTools = inkwellTools().map((tool) => ({
+    ...tool,
+    handler: (args: Record<string, unknown>) => {
+      if (recording) ranAfterBlip.push(tool.name);
+      return tool.handler(args);
+    },
+  }));
+
   const session = await blipUser.openSession({
     agent: agentKeys.publicKey,
     surface: { name: 'Blippy Site' },
-    tools: inkwellTools(),
+    tools: registeredTools,
     decide: () => true,
+  });
+  // Registered before the drop; a reconnect that replaced the session object
+  // would leave this listening to something nothing writes to any more.
+  const toolEventsAfterBlip: string[] = [];
+  session.on('tool', (event) => {
+    if (recording) toolEventsAfterBlip.push(event.name);
   });
   await session.prompt('Remember the word cinnabar.');
   const firstVerify = session.info.verify;
@@ -942,8 +967,24 @@ console.log('\n12b. a dropped socket reconnects itself');
   check('and it is still sealed', /^(?:\w+-){5}\w+$/.test(session.info.verify ?? ''), session.info.verify);
 
   // The real test: the SAME handle still drives the agent.
+  recording = true;
   const afterBlip = await session.prompt('Append one more line.');
   check('the same handle still prompts the agent', afterBlip.includes('Done.'), afterBlip.slice(0, 80));
+  // ...and it drives it through the tools it was opened with. Reaching 'Done.'
+  // proves SOME handler answered; these prove it was the one the caller
+  // registered, which is what lets a holder of this session (the extension's
+  // worker, the panel) keep its own table untouched across a reconnect.
+  check(
+    'the handlers registered before the drop are the ones that ran after it',
+    ranAfterBlip.includes('inkwell.document.read') &&
+      ranAfterBlip.includes('inkwell.document.replaceSelection'),
+    ranAfterBlip,
+  );
+  check(
+    'listeners attached before the drop still receive tool events after it',
+    toolEventsAfterBlip.includes('inkwell.document.read'),
+    toolEventsAfterBlip,
+  );
   const blipMemory = await session.history();
   check(
     'the conversation from before the blip is intact',

@@ -96,8 +96,6 @@ function observe(promise: PromiseLike<unknown> | undefined, message: string, con
 // --- relay connection ------------------------------------------------------
 
 let walletPromise: Promise<AgentWallet> | undefined;
-let redialTimer: ReturnType<typeof setTimeout> | undefined;
-let redialMs = 1000;
 
 async function getWallet(): Promise<AgentWallet> {
   if (walletPromise) return walletPromise;
@@ -105,11 +103,27 @@ async function getWallet(): Promise<AgentWallet> {
     const secret = await userSecretKey();
     if (!secret) throw new Error('no identity yet — open the AgentPort popup and create one');
     const wallet = new AgentWallet({ relayUrl: await relayUrl(), userSecretKey: secret });
-    // A dropped socket is not a goodbye for the sessions it carried: the relay
-    // holds them for a grace period. Redial with backoff and re-attach them.
+    // Reconnection belongs to the wallet, and only to the wallet. A dropped
+    // socket is not a goodbye for the sessions it carried, so the wallet
+    // redials with backoff and re-resumes each live session IN PLACE — the
+    // same AgentSession object, rekeyed. That is what makes a second loop here
+    // unnecessary rather than merely redundant: `entry.session` keeps pointing
+    // at the live attachment, the tool handlers bound to it at connect time
+    // are still the ones it will call, and every listener `wireSession`
+    // registered still fires. Nothing in this table needs rebuilding.
+    //
+    // A redial loop here would also race the wallet's for the same session id,
+    // and the relay refuses the loser with `already_attached`.
+    //
+    // So 'closed' does not mean "retry": the wallet emits it only when there
+    // was nothing to preserve, or when it has exhausted its attempts and
+    // already told each session it was dropped. Both are terminal for this
+    // wallet object, so let go of it and let the next caller dial a fresh one.
     wallet.on('closed', () => {
       if (walletPromise) walletPromise = undefined;
-      scheduleRedial();
+      log.warn('relay wallet closed; the next request will dial a fresh one', {
+        data: { sessions: sessions.size },
+      });
     });
     await wallet.connect();
     return wallet;
@@ -120,77 +134,18 @@ async function getWallet(): Promise<AgentWallet> {
   return walletPromise;
 }
 
-function scheduleRedial(): void {
-  if (redialTimer || sessions.size === 0) return;
-  const delay = redialMs;
-  redialMs = Math.min(redialMs * 2, 30_000);
-  redialTimer = setTimeout(() => {
-    redialTimer = undefined;
-    observe(reconnect(), 'relay reconnect failed');
-  }, delay);
-}
-
-/** Redial the relay and re-attach every session the worker still holds. */
-async function reconnect(): Promise<void> {
-  if (sessions.size === 0) return;
-  let wallet: AgentWallet;
-  try {
-    wallet = await getWallet();
-  } catch (err) {
-    log.warn('relay redial failed; retrying with backoff', { err, data: { delayMs: redialMs } });
-    scheduleRedial();
-    return;
-  }
-  redialMs = 1000;
-  for (const entry of [...sessions.values()]) {
-    if (!sessions.has(entry.ref)) continue; // dropped while we awaited
-    try {
-      await resumeEntry(wallet, entry);
-    } catch (err) {
-      const reason = err instanceof ResumeError ? err.reason : '';
-      if (reason === 'not_resumable' || reason === 'grant_expired') dropSession(entry, `resume_failed:${reason}`);
-      log.warn('session resume after redial failed', {
-        sessionId: entry.session.id,
-        err,
-        data: { reason: reason || 'transient' },
-      });
-      // Transient failures keep the entry; the next redial or the page's own
-      // resume retries with the same token.
-    }
-  }
-}
-
-/** Re-attach one worker-held session over a fresh socket, in place: the page
- *  keeps its ref and never notices the relay blinked. */
-async function resumeEntry(wallet: AgentWallet, entry: SessionEntry): Promise<void> {
-  if (!entry.token || !entry.agent) throw new ResumeError('not_resumable');
-  const definitions = entry.session.grant.tools;
-  const tools: SiteTool[] = definitions.map((definition) => ({
-    ...definition,
-    handler: (args) => dispatchToolCall(entry.ref, definition.name, args),
-  }));
-  const { session } = await wallet.resumeSession({
-    id: entry.session.id,
-    agent: entry.agent,
-    token: entry.token,
-    tools,
-    decide: (prompt) => askApproval(entry.origin, entry.who, prompt),
-  });
-  const old = entry.session;
-  entry.session = session;
-  entry.who.name = session.info.agentName;
-  wireSession(entry);
-  // Prompts that were mid-flight when the socket died are answered by nobody;
-  // finish the old object so they reject instead of hanging. The swap above
-  // makes the 'closed' this emits a no-op in wireSession, and the old socket
-  // is gone, so no frame leaves.
-  old.close('socket_resumed');
-}
-
-/** Chrome stops an idle MV3 worker after 30s. Socket traffic resets that timer
- *  (Chrome 116+), but a session that is merely *open* and quiet would not — so
- *  touch storage while any session exists, and let an alarm re-wake the worker
- *  so a killed socket gets redialed even after an eviction. */
+/**
+ * Chrome stops an idle MV3 worker after 30s. Socket traffic resets that timer
+ * (Chrome 116+), but a session that is merely *open* and quiet would not — so
+ * touch storage while any session exists, which keeps alive the worker, its
+ * socket, and the wallet's own redial timers along with them.
+ *
+ * Waking the worker is all this can do. An eviction takes the session table
+ * with it — it is in memory deliberately, because the transcript is the
+ * user's — so a woken worker has no attachment left to redial FOR. Recovering
+ * from an eviction is `resumeFromStore`, driven by the next document that
+ * connects carrying a matching resume record.
+ */
 function keepAlive(): void {
   observe(chrome.storage.local.get('agentport.keepalive'), 'service-worker keepalive storage touch failed');
 }
@@ -202,7 +157,6 @@ observe(chrome.alarms?.create('agentport.keepalive', { periodInMinutes: 1 }), 'f
 chrome.alarms?.onAlarm.addListener((alarm) => {
   if (alarm.name !== 'agentport.keepalive') return;
   keepAlive();
-  if (sessions.size > 0 && !walletPromise) observe(reconnect(), 'alarm-triggered relay reconnect failed');
 });
 
 // --- session registry ------------------------------------------------------
@@ -228,10 +182,10 @@ interface SessionEntry {
    */
   reclaimKey: string | null;
   session: AgentSession;
-  /** The relay's resume token — how this session survives a socket drop. */
+  /** The relay's resume token, for the durable record only: a socket drop is
+   *  the wallet's to recover, and it holds this token itself. What survives the
+   *  WORKER is `saveResume`, which is why the token is still kept here. */
   token: string | undefined;
-  /** The agent behind the session — resume routes by it (stateless relay). */
-  agent: string | undefined;
   /** The real agent name, for extension chrome only. Mutable because a resume
    *  learns it after the decide callback was already handed out. */
   who: { name: string };
@@ -736,7 +690,6 @@ async function openSession(
     }),
     session,
     token: wallet.resumeTokenFor(session.id),
-    agent: wallet.agentKeyFor(session.id),
     who,
     toolNames: new Set(request.tools.map((tool) => tool.name)),
     pending: new Map(),
@@ -828,7 +781,6 @@ async function resumeFromStore(
       reclaimKey: key,
       session,
       token: record.token,
-      agent: record.agent,
       who,
       toolNames: new Set(request.tools.map((tool) => tool.name)),
       pending: new Map(),
