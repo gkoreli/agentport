@@ -7,6 +7,7 @@ import {
   decodeFrame,
   isSessionFrame,
   mayOriginate,
+  hashGrant,
   pairingCode,
   randomBytes,
   toHex,
@@ -612,7 +613,11 @@ export class RelayCore {
         // Semantic expiry only — the field's shape is decodeFrame's problem.
         // The relay cannot authenticate a browser origin; the signed origin
         // rides along for the daemon to compare with frame.surface.origin.
-        delegation.expiresAt > this.#now(),
+        delegation.expiresAt > this.#now() &&
+        // Structural, not authoritative: both grant and delegation are in
+        // this clear lifecycle frame, so the relay can refuse an approval
+        // replayed under a different grant early. The daemon re-checks.
+        delegation.grantHash === hashGrant(frame.grant),
     );
     if (!directlyOwned && !delegated) {
       return conn.peer.send({ t: 'session.denied', s: frame.s, reason: 'not_your_agent' });

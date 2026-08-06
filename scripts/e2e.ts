@@ -15,13 +15,14 @@ import { AgentDaemon } from '../packages/daemon/src/daemon.js';
 import { McpBridge } from '../packages/daemon/src/mcp-bridge.js';
 import { AcpRuntime } from '../packages/daemon/src/runtimes/acp.js';
 import { DemoWriterRuntime, type AgentRuntime, type TurnContext } from '../packages/daemon/src/runtime.js';
-import { AgentWallet, type SiteTool } from '../packages/client/src/index.js';
+import { AgentWallet, buildGrant, type SiteTool } from '../packages/client/src/index.js';
 import {
   Deferred,
   PROTOCOL_VERSION,
   authChallengeMessage,
   canonicalJson,
   generateKeyPair,
+  hashGrant,
   sign,
   signCert,
   signDelegation,
@@ -932,10 +933,14 @@ console.log('\n13. delegated sessions');
   const delegateKeys = generateKeyPair();
   const delegatedWallet = new AgentWallet({ relayUrl, userSecretKey: delegateKeys.secretKey, socketFactory });
   await delegatedWallet.connect();
+  // The grant is built once and approved once: the wallet signs its hash, so
+  // this exact object must be the one that reaches session.open.
+  const delegatedGrant = buildGrant({ surface: { name: 'Delegated Inkwell' }, tools: inkwellTools() });
   const delegation = signDelegation(user.secretKey, {
     delegate: delegateKeys.publicKey,
     agent: agentKeys.publicKey,
     origin: delegatedOrigin,
+    grantHash: hashGrant(delegatedGrant),
     expiresAt: Date.now() + 8 * 60 * 60 * 1000,
   });
   const pagePayload = { agent: agentKeys.publicKey, displayName: 'Personal agent' as const, delegation };
@@ -947,7 +952,7 @@ console.log('\n13. delegated sessions');
   const pageApprovals: string[] = [];
   const delegated = await delegatedWallet.openSession({
     agent: agentKeys.publicKey,
-    delegation,
+    approved: { delegation, grant: delegatedGrant },
     surface: { name: 'Delegated Inkwell', origin: delegatedOrigin },
     tools: inkwellTools(),
     decide: async (prompt) => {
@@ -967,16 +972,21 @@ console.log('\n13. delegated sessions');
   const expiredKeys = generateKeyPair();
   const expiredWallet = new AgentWallet({ relayUrl, userSecretKey: expiredKeys.secretKey, socketFactory });
   await expiredWallet.connect();
+  const emptyGrant = buildGrant({ surface: { name: 'Expired' }, tools: [] });
   let relayExpired = '';
   await expiredWallet
     .openSession({
       agent: agentKeys.publicKey,
-      delegation: signDelegation(user.secretKey, {
-        delegate: expiredKeys.publicKey,
-        agent: agentKeys.publicKey,
-        origin: 'https://expired.test',
-        expiresAt: Date.now() - 60_000,
-      }),
+      approved: {
+        grant: emptyGrant,
+        delegation: signDelegation(user.secretKey, {
+          delegate: expiredKeys.publicKey,
+          agent: agentKeys.publicKey,
+          origin: 'https://expired.test',
+          grantHash: hashGrant(emptyGrant),
+          expiresAt: Date.now() - 60_000,
+        }),
+      },
       surface: { name: 'Expired', origin: 'https://expired.test' },
       tools: [],
     })
@@ -988,16 +998,21 @@ console.log('\n13. delegated sessions');
   const wrongKeys = generateKeyPair();
   const wrongWallet = new AgentWallet({ relayUrl, userSecretKey: wrongKeys.secretKey, socketFactory });
   await wrongWallet.connect();
+  const wrongGrant = buildGrant({ surface: { name: 'Wrong delegate' }, tools: [] });
   let wrongDelegate = '';
   await wrongWallet
     .openSession({
       agent: agentKeys.publicKey,
-      delegation: signDelegation(user.secretKey, {
-        delegate: generateKeyPair().publicKey,
-        agent: agentKeys.publicKey,
-        origin: 'https://wrong.test',
-        expiresAt: Date.now() + 60_000,
-      }),
+      approved: {
+        grant: wrongGrant,
+        delegation: signDelegation(user.secretKey, {
+          delegate: generateKeyPair().publicKey,
+          agent: agentKeys.publicKey,
+          origin: 'https://wrong.test',
+          grantHash: hashGrant(wrongGrant),
+          expiresAt: Date.now() + 60_000,
+        }),
+      },
       surface: { name: 'Wrong delegate', origin: 'https://wrong.test' },
       tools: [],
     })
@@ -1032,7 +1047,7 @@ console.log('\n13. delegated sessions');
   await delegatedWallet
     .openSession({
       agent: otherAgentKeys.publicKey,
-      delegation,
+      approved: { delegation, grant: delegatedGrant },
       surface: { name: 'Agent replay', origin: delegatedOrigin },
       tools: [],
     })
@@ -1045,7 +1060,7 @@ console.log('\n13. delegated sessions');
   await delegatedWallet
     .openSession({
       agent: agentKeys.publicKey,
-      delegation,
+      approved: { delegation, grant: delegatedGrant },
       surface: { name: 'Origin replay', origin: 'https://other-origin.test' },
       tools: [],
     })
@@ -1053,6 +1068,40 @@ console.log('\n13. delegated sessions');
       wrongOrigin = err.message;
     });
   check('the daemon refuses a delegation presented from a mismatched origin', wrongOrigin.includes('bad_delegation'), wrongOrigin);
+
+  // The attack the signed grantHash exists to stop: the page holds a live
+  // delegation the user approved for a small toolset, and opens the session
+  // with a larger one. The user answered a question about grant A; without
+  // the binding the signature would authorise grant B.
+  let swappedGrant = '';
+  const upgradedGrant = buildGrant({
+    surface: { name: 'Grant swap' },
+    tools: [
+      ...inkwellTools(),
+      {
+        name: 'inkwell.document.wipe',
+        description: 'Erase the document. Never approved by the user.',
+        inputSchema: { type: 'object', properties: {} },
+        handler: async () => ({ ok: true }),
+      },
+    ],
+  });
+  await delegatedWallet
+    .openSession({
+      agent: agentKeys.publicKey,
+      // Authority for delegatedGrant, presented with a strictly larger grant.
+      approved: { delegation, grant: upgradedGrant },
+      surface: { name: 'Grant swap', origin: delegatedOrigin },
+      tools: [],
+    })
+    .catch((err: Error) => {
+      swappedGrant = err.message;
+    });
+  check(
+    'a page cannot open with a grant the user never approved',
+    swappedGrant.includes('not_your_agent'),
+    swappedGrant,
+  );
 
   // A deliberately dishonest relay clock treats an already-expired statement
   // as live and forwards it over real sockets. The daemon's independent real-
@@ -1077,16 +1126,21 @@ console.log('\n13. delegated sessions');
   const edgeKeys = generateKeyPair();
   const edgeWallet = new AgentWallet({ relayUrl: lyingUrl, userSecretKey: edgeKeys.secretKey, socketFactory });
   await edgeWallet.connect();
+  const edgeGrant = buildGrant({ surface: { name: 'Hostile relay bypass' }, tools: [] });
   let daemonExpired = '';
   await edgeWallet
     .openSession({
       agent: agentKeys.publicKey,
-      delegation: signDelegation(user.secretKey, {
-        delegate: edgeKeys.publicKey,
-        agent: agentKeys.publicKey,
-        origin: 'https://edge.test',
-        expiresAt: Date.now() - 60_000,
-      }),
+      approved: {
+        grant: edgeGrant,
+        delegation: signDelegation(user.secretKey, {
+          delegate: edgeKeys.publicKey,
+          agent: agentKeys.publicKey,
+          origin: 'https://edge.test',
+          grantHash: hashGrant(edgeGrant),
+          expiresAt: Date.now() - 60_000,
+        }),
+      },
       surface: { name: 'Hostile relay bypass', origin: 'https://edge.test' },
       tools: [],
     })
@@ -1094,6 +1148,112 @@ console.log('\n13. delegated sessions');
       daemonExpired = err.message;
     });
   check('the daemon independently refuses an expired delegation', daemonExpired.includes('bad_delegation'), daemonExpired);
+
+  // Invariant 6 for the grant: the relay's own hash check is a convenience,
+  // not the boundary. A relay that forwards a grant other than the one the
+  // user signed must gain nothing — the daemon recomputes the hash itself.
+  // The substitution is re-encoded canonically so the frame is rejected for
+  // the delegation mismatch and not merely for its spelling.
+  const { WebSocketServer: SwapServer } = await import('ws');
+  const swapProxy = new SwapServer({ port: 0, host: '127.0.0.1' });
+  const substituted = buildGrant({
+    surface: { name: 'Substituted' },
+    tools: [
+      {
+        name: 'inkwell.document.wipe',
+        description: 'Erase the document. The user signed no such grant.',
+        inputSchema: { type: 'object', properties: {} },
+        handler: async () => ({ ok: true }),
+      },
+    ],
+  });
+  swapProxy.on('connection', (inbound) => {
+    const upstream = new NodeWebSocket(relayUrl);
+    const queued: string[] = [];
+    upstream.on('open', () => {
+      for (const m of queued.splice(0)) upstream.send(m);
+    });
+    inbound.on('message', (data) => {
+      const message = data.toString();
+      if (upstream.readyState === NodeWebSocket.OPEN) upstream.send(message);
+      else queued.push(message);
+    });
+    upstream.on('message', (data) => {
+      const message = data.toString();
+      const parsed = JSON.parse(message) as Record<string, unknown>;
+      if (parsed['t'] === 'session.open') {
+        inbound.send(canonicalJson({ ...parsed, grant: substituted }));
+        return;
+      }
+      inbound.send(message);
+    });
+    const drop = () => {
+      if (upstream.readyState === NodeWebSocket.OPEN) upstream.close();
+    };
+    inbound.on('close', drop);
+    inbound.on('error', drop);
+    upstream.on('close', () => inbound.close());
+    upstream.on('error', () => inbound.close());
+  });
+  await new Promise<void>((resolve) => swapProxy.once('listening', () => resolve()));
+  const swapPort = (swapProxy.address() as { port: number }).port;
+
+  const swapAgentKeys = generateKeyPair();
+  const swapCert = signCert(user.secretKey, {
+    user: user.publicKey,
+    agent: swapAgentKeys.publicKey,
+    name: 'Swap target',
+    runtime: 'demo-writer',
+    location: 'Personal VPS',
+    issuedAt: Date.now(),
+  });
+  const swapDaemon = new AgentDaemon({
+    relayUrl: `ws://127.0.0.1:${swapPort}`,
+    identity: {
+      secretKey: swapAgentKeys.secretKey,
+      publicKey: swapAgentKeys.publicKey,
+      name: 'Swap target',
+      runtime: 'demo-writer',
+      location: 'Personal VPS',
+      cert: swapCert,
+    },
+    createRuntime: () => new DemoWriterRuntime(),
+  });
+  await swapDaemon.start();
+
+  const swapPageKeys = generateKeyPair();
+  const swapWallet = new AgentWallet({ relayUrl, userSecretKey: swapPageKeys.secretKey, socketFactory });
+  await swapWallet.connect();
+  const honestGrant = buildGrant({ surface: { name: 'Honest' }, tools: inkwellTools() });
+  let relaySwapped = '';
+  await swapWallet
+    .openSession({
+      agent: swapAgentKeys.publicKey,
+      approved: {
+        grant: honestGrant,
+        delegation: signDelegation(user.secretKey, {
+          delegate: swapPageKeys.publicKey,
+          agent: swapAgentKeys.publicKey,
+          origin: 'https://honest.test',
+          grantHash: hashGrant(honestGrant),
+          expiresAt: Date.now() + 60_000,
+        }),
+      },
+      surface: { name: 'Honest', origin: 'https://honest.test' },
+      tools: inkwellTools(),
+    })
+    .catch((err: Error) => {
+      relaySwapped = err.message;
+    });
+  check(
+    'the daemon refuses a grant the relay substituted for the signed one',
+    relaySwapped.includes('bad_delegation'),
+    relaySwapped,
+  );
+
+  swapWallet.close();
+  await swapDaemon.stop();
+  await new Promise<void>((resolve) => swapProxy.close(() => resolve()));
 
   delegated.close();
   delegatedWallet.close();

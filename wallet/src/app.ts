@@ -2,7 +2,7 @@ declare const __AGENTPORT_VERSION__: string | undefined;
 
 import { component, computed, each, html, signal, when } from '@nisli/core';
 import { AgentWallet, type PairOffer } from '@agentport/client';
-import { signDelegation, type AgentCert } from '@agentport/protocol';
+import { hashGrant, signDelegation, type AgentCert } from '@agentport/protocol';
 import { WALLET_CHANNEL, startWalletHandshake, type BoundWalletRequest } from './handshake.js';
 import { ensureIdentity, loadCerts, saveCert } from './storage.js';
 
@@ -134,6 +134,9 @@ const WalletApp = component('agentport-wallet-app', () => {
         // This is the browser-authenticated MessageEvent.origin captured by
         // the source-bound handshake, never a page-provided payload field.
         origin: bound.origin,
+        // Signs the exact grant rendered above; session.open with any other
+        // grant is refused by the daemon, so approval cannot be upgraded.
+        grantHash: hashGrant(bound.request.grant),
         expiresAt: Date.now() + DELEGATION_TTL_MS,
       });
       bound.reply({
@@ -160,7 +163,7 @@ const WalletApp = component('agentport-wallet-app', () => {
     const agent = offer.value?.agent;
     return agent ? `${agent.runtime}${agent.location ? ` · ${agent.location}` : ''}` : '';
   });
-  const requestedTools = computed(() => request.value?.request.tools ?? []);
+  const requestedTools = computed(() => request.value?.request.grant.tools ?? []);
 
   const agentRows = each(
     agents,

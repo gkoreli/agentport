@@ -1,16 +1,19 @@
-import type { SessionDelegation, SurfaceDescriptor, ToolDefinition } from '@agentport/protocol';
+import { CapabilityGrant, type SessionDelegation, type SurfaceDescriptor } from '@agentport/protocol';
 
 export const WALLET_CHANNEL = 'agentport/wallet/1';
 
 const MAX_MESSAGE_BYTES = 256 * 1024;
-const MAX_TOOLS = 64;
 
 export interface WalletConnectRequest {
   id: string;
   delegate: string;
   surface: Pick<SurfaceDescriptor, 'name' | 'route' | 'context'>;
-  tools: ToolDefinition[];
-  alwaysAsk: string[];
+  /**
+   * The exact grant the page will present in `session.open`. The wallet
+   * renders this object, hashes this object, and signs that hash into the
+   * delegation — so what the user approves is what the daemon enforces.
+   */
+  grant: CapabilityGrant;
 }
 
 export interface WalletConnectResult {
@@ -64,18 +67,6 @@ function isPublicKey(value: unknown): value is string {
   return typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
 }
 
-function readTool(value: unknown): ToolDefinition | null {
-  if (!isRecord(value) || typeof value['name'] !== 'string' || typeof value['description'] !== 'string') return null;
-  if (!isRecord(value['inputSchema'])) return null;
-  if (value['name'].length === 0 || value['name'].length > 128 || value['description'].length > 4096) return null;
-  return {
-    name: value['name'],
-    description: value['description'],
-    inputSchema: value['inputSchema'],
-    ...(value['requiresApproval'] === true ? { requiresApproval: true } : {}),
-  };
-}
-
 /** Rebuild hostile page data before the wallet UI renders or signs anything. */
 export function readWalletRequest(value: unknown): WalletConnectRequest | null {
   try {
@@ -93,19 +84,16 @@ export function readWalletRequest(value: unknown): WalletConnectRequest | null {
   if (rawSurface['route'] !== undefined && typeof rawSurface['route'] !== 'string') return null;
   if (rawSurface['context'] !== undefined && !isRecord(rawSurface['context'])) return null;
 
-  if (!Array.isArray(value['tools']) || value['tools'].length > MAX_TOOLS) return null;
-  const tools: ToolDefinition[] = [];
-  const toolNames = new Set<string>();
-  for (const candidate of value['tools']) {
-    const tool = readTool(candidate);
-    if (!tool || toolNames.has(tool.name)) return null;
-    toolNames.add(tool.name);
-    tools.push(tool);
+  // The wire schema is the validator: exact object, bounded, rebuilt fresh.
+  // Anything the schema would reject at session.open is rejected here too,
+  // so the wallet can never approve a grant the daemon could not accept.
+  let grant: CapabilityGrant;
+  try {
+    grant = CapabilityGrant(value['grant'], 'grant');
+  } catch {
+    return null;
   }
-
-  if (!Array.isArray(value['alwaysAsk']) || value['alwaysAsk'].some((name) => typeof name !== 'string')) return null;
-  const alwaysAsk = [...new Set(value['alwaysAsk'] as string[])];
-  if (alwaysAsk.length > MAX_TOOLS || alwaysAsk.some((name) => name.length === 0 || name.length > 128)) return null;
+  if (grant.expiresAt <= Date.now()) return null;
 
   return {
     id: value['id'],
@@ -115,8 +103,7 @@ export function readWalletRequest(value: unknown): WalletConnectRequest | null {
       ...(typeof rawSurface['route'] === 'string' ? { route: rawSurface['route'] } : {}),
       ...(isRecord(rawSurface['context']) ? { context: rawSurface['context'] } : {}),
     },
-    tools,
-    alwaysAsk,
+    grant,
   };
 }
 

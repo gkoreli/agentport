@@ -133,6 +133,13 @@ export const SessionDelegation = obj({
   agent: pubkey,
   /** Browser-verified origin this authority may attach from. */
   origin: str(1, MAX_ORIGIN_CHARS),
+  /**
+   * SHA-256 of the canonical CapabilityGrant the user approved (`hashGrant`).
+   * `session.open` must present a grant with exactly this hash: the daemon
+   * enforces it authoritatively and the relay checks it structurally, so an
+   * approval can never be replayed under a different toolset.
+   */
+  grantHash: hex(32),
   /** Unix ms. */
   expiresAt: timestamp,
   /** Signature by the target agent's owner over the canonical delegation body. */

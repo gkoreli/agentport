@@ -8,7 +8,8 @@
  */
 
 import { ed25519 } from '@noble/curves/ed25519';
-import type { AgentCert, Hex, SessionDelegation } from './messages.js';
+import { sha256 } from '@noble/hashes/sha256';
+import type { AgentCert, CapabilityGrant, Hex, SessionDelegation } from './messages.js';
 
 export interface KeyPair {
   publicKey: Hex;
@@ -105,11 +106,23 @@ export function verifyCert(cert: AgentCert): boolean {
   return verify(cert.user, certBody(body), sig);
 }
 
+/**
+ * The delegation must commit to the exact grant the user approved, or a page
+ * holding the delegate key could open the session with a larger grant than
+ * the one the consent screen showed. Canonical JSON gives each grant exactly
+ * one encoding, so hash equality is grant equality; the prefix keeps this
+ * digest domain-separated from every other signed body.
+ */
+export function hashGrant(grant: CapabilityGrant): Hex {
+  return toHex(sha256(encoder.encode(`agentport-grant:${canonicalJson(grant)}`)));
+}
+
 export function delegationBody(delegation: Omit<SessionDelegation, 'sig'>): string {
   return `agentport-session-delegation:${canonicalJson({
     delegate: delegation.delegate,
     agent: delegation.agent,
     origin: delegation.origin,
+    grantHash: delegation.grantHash,
     expiresAt: delegation.expiresAt,
   })}`;
 }

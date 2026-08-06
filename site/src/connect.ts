@@ -14,12 +14,13 @@
 import {
   AgentWallet,
   ResumeError,
+  buildGrant,
   type AgentConnectRequest,
   type AgentProvider,
   type AgentSession,
   type AgentSessionHandle,
 } from '@agentport/client';
-import { generateKeyPair, randomId, toErr } from '@agentport/protocol';
+import { generateKeyPair, hashGrant, randomId, toErr, type CapabilityGrant } from '@agentport/protocol';
 import { openConnectModal } from './modal.js';
 import { createWebMcpHarvester } from './webmcp.js';
 import { siteLogger } from './observe.js';
@@ -161,7 +162,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 async function requestHostedDelegation(
   request: AgentConnectRequest,
-  tools: AgentConnectRequest['tools'],
+  grant: CapabilityGrant,
   delegate: ReturnType<typeof generateKeyPair>,
   preopened?: Window | null,
 ): Promise<WalletConnectResult> {
@@ -189,8 +190,7 @@ async function requestHostedDelegation(
         ...(request.route ? { route: request.route } : {}),
         ...(request.context ? { context: request.context } : {}),
       },
-      tools: tools.map(({ handler: _handler, ...definition }) => definition),
-      alwaysAsk: request.alwaysAsk ?? [],
+      grant,
     },
   };
 
@@ -236,6 +236,9 @@ async function requestHostedDelegation(
         result.delegation.delegate !== delegate.publicKey ||
         result.delegation.agent !== result.agent ||
         result.delegation.origin !== location.origin ||
+        // The wallet must have signed the grant we sent — a mismatch here
+        // would otherwise only surface as an opaque daemon denial later.
+        result.delegation.grantHash !== hashGrant(grant) ||
         typeof result.delegation.sig !== 'string' ||
         !/^[0-9a-f]{128}$/.test(result.delegation.sig) ||
         typeof result.delegation.expiresAt !== 'number' ||
@@ -290,17 +293,23 @@ async function connectWithHostedWallet(
   preopened?: Window | null,
 ): Promise<AgentSession> {
   const delegate = generateKeyPair();
-  const result = await requestHostedDelegation(request, tools, delegate, preopened);
+  // Built once, before approval: the wallet signs this grant's hash into the
+  // delegation, so session.open must carry this exact object.
+  const grant = buildGrant({
+    surface: { name: request.name },
+    tools,
+    alwaysAsk: request.alwaysAsk,
+    ttlMs: request.ttlMs,
+  });
+  const result = await requestHostedDelegation(request, grant, delegate, preopened);
   const wallet = new AgentWallet({ relayUrl: RELAY, userSecretKey: delegate.secretKey });
   try {
     await wallet.connect();
     const session = await wallet.openSession({
       agent: result.agent,
-      delegation: result.delegation,
+      approved: { delegation: result.delegation, grant },
       surface: { name: request.name, route: request.route, context: request.context },
       tools,
-      alwaysAsk: request.alwaysAsk,
-      ttlMs: request.ttlMs,
       decide: request.decide,
     });
     rememberLiveSession(wallet, session, request.name);

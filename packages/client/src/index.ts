@@ -1,4 +1,4 @@
-export { AgentWallet, ResumeError, type WalletOptions, type SessionRequest, type PairOffer } from './wallet.js';
+export { AgentWallet, ResumeError, buildGrant, type WalletOptions, type SessionRequest, type PairOffer } from './wallet.js';
 export {
   AgentSession,
   type SiteTool,

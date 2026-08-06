@@ -24,6 +24,7 @@ import {
   encodeFrame,
   fingerprintWords,
   generateSealKeyPair,
+  hashGrant,
   openSealed,
   openProofBinding,
   randomBytes,
@@ -617,8 +618,10 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     // Invariant 5 at the edge: with a stateless relay, the daemon re-checks
     // the complete proof presented by the opener. A delegation must be signed
     // by this agent's owner, name this agent and the relay-stamped client key,
-    // match the forwarded surface origin, and still be live. A lying relay
-    // therefore cannot turn a bad delegation into access.
+    // match the forwarded surface origin, commit to exactly the grant this
+    // frame presents, and still be live. A lying relay therefore cannot turn
+    // a bad delegation into access, and a page holding the delegate key
+    // cannot swap in a grant the user never approved.
     const cert = this.#options.identity.cert;
     if (frame.delegation) {
       const delegation = frame.delegation;
@@ -629,6 +632,7 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
         delegation.agent !== this.#options.identity.publicKey ||
         typeof delegation.origin !== 'string' ||
         delegation.origin !== frame.surface.origin ||
+        delegation.grantHash !== hashGrant(frame.grant) ||
         typeof delegation.expiresAt !== 'number' ||
         !Number.isFinite(delegation.expiresAt) ||
         delegation.expiresAt <= Date.now()

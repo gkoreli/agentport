@@ -97,8 +97,13 @@ const DEFAULT_HANDSHAKE_TIMEOUT_MS = 20_000;
 
 export interface SessionRequest {
   agent: Hex;
-  /** User-signed authority for this wallet's page identity. */
-  delegation?: SessionDelegation;
+  /**
+   * Hosted-wallet approval artifact: the user-signed delegation and the exact
+   * grant whose hash it signs. When present, that frozen grant is sent verbatim
+   * (`alwaysAsk`/`ttlMs` here are ignored) — rebuilding it would change
+   * `expiresAt`, break the hash, and turn the approval into a dead signature.
+   */
+  approved?: { delegation: SessionDelegation; grant: CapabilityGrant };
   surface: Omit<SurfaceDescriptor, 'origin'> & { origin?: string };
   tools: SiteTool[];
   /** Tool names that must be approved on every single invocation. */
@@ -126,8 +131,12 @@ type WalletEvents = {
  * HERE, where the site developer can act on the message — not on the far side
  * of the socket, where the same mistake shows up as a rejected frame and a
  * timed-out open. Throws a WireViolation naming the exact field.
+ *
+ * Exported because the hosted-wallet flow must build the grant BEFORE asking
+ * for approval: the wallet signs its hash, so the same object — not an
+ * equivalent one minted later — must reach `session.open`.
  */
-function buildGrant(request: Omit<SessionRequest, 'agent'>): CapabilityGrant {
+export function buildGrant(request: Omit<SessionRequest, 'agent'>): CapabilityGrant {
   return CapabilityGrant(
     {
       tools: request.tools.map(({ handler: _handler, ...definition }) => definition),
@@ -557,14 +566,14 @@ export class AgentWallet extends Emitter<WalletEvents> {
   async openSession(request: SessionRequest): Promise<AgentSession> {
     const id = randomId('sess_');
     const surface = buildSurface(request);
-    const grant = buildGrant(request);
+    const grant = request.approved?.grant ?? buildGrant(request);
 
     const sealPair = generateSealKeyPair();
     this.#sendRaw({
       t: 'session.open',
       s: id,
       agent: request.agent,
-      ...(request.delegation ? { delegation: request.delegation } : {}),
+      ...(request.approved ? { delegation: request.approved.delegation } : {}),
       surface,
       grant,
       epk: sealPair.publicKey,
