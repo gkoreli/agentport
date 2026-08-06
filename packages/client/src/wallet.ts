@@ -90,6 +90,15 @@ const RECONNECT_MAX_ATTEMPTS = 12;
  * Keyed by the refusal, valued by the success replies whose requests it can be
  * answering — so a denial always settles something rather than being dropped
  * on the floor while its caller waits.
+ *
+ * Note what this is: a hand-maintained set, exactly the kind of thing that
+ * produced the bug it exists to prevent. A future frame that refuses
+ * something and is not listed here drops silently again, and the caller hangs
+ * again. It cannot be made total — the thing it is total OVER is "frames that
+ * mean refusal", which is a judgement, not a type. So this closes one class,
+ * and the general answer is the other one: every machine-speed round trip
+ * gets a deadline, which turns silence into a visible failure even for the
+ * cases nobody enumerated.
  */
 const DENIAL_ANSWERS: Record<string, readonly string[] | undefined> = {
   'session.denied': ['session.opened', 'session.resumed'],
