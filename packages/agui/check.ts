@@ -73,6 +73,26 @@ assert.ok(sent.some((frame) =>
   'id' in frame && frame.id === firstPrompt,
 ));
 await session.handle({ t: 'thought', s: session.id, promptId: firstPrompt, text: 'Checking the note' });
+// Two snapshots of the same plan: both must carry the SAME messageId with
+// replace:true, so a renderer updates one activity instead of stacking two.
+await session.handle({
+  t: 'plan',
+  s: session.id,
+  promptId: firstPrompt,
+  steps: [
+    { text: 'Read the note', status: 'active', priority: 'high' },
+    { text: 'Save it', status: 'pending' },
+  ],
+});
+await session.handle({
+  t: 'plan',
+  s: session.id,
+  promptId: firstPrompt,
+  steps: [
+    { text: 'Read the note', status: 'done', priority: 'high' },
+    { text: 'Save it', status: 'active' },
+  ],
+});
 await session.handle({ t: 'delta', s: session.id, promptId: firstPrompt, text: 'Saved ' });
 await session.handle({ t: 'delta', s: session.id, promptId: firstPrompt, text: 'it.' });
 await session.handle({
@@ -121,6 +141,8 @@ assert.deepEqual(
     'REASONING_START',
     'REASONING_MESSAGE_START',
     'REASONING_MESSAGE_CONTENT',
+    'ACTIVITY_SNAPSHOT',
+    'ACTIVITY_SNAPSHOT',
     'TEXT_MESSAGE_START',
     'TEXT_MESSAGE_CONTENT',
     'TEXT_MESSAGE_CONTENT',
@@ -191,5 +213,23 @@ assert.ok(!streamEvents.some((event) => event.type === 'CUSTOM' && event.name ==
 assert.ok(subscribedEvents.some((event) => event.type === 'RUN_STARTED'));
 assert.ok(subscribedEvents.some((event) => event.type === 'RUN_ERROR'));
 assert.ok(subscribedEvents.some((event) => event.type === EventType.TOOL_CALL_RESULT));
+
+// A plan snapshot is one replaceable activity per prompt, not a stream of
+// messages: same messageId both times, replace:true, and the second snapshot
+// carries the advanced statuses.
+const plans = streamEvents.filter(
+  (event): event is Extract<AguiEvent, { type: EventType.ACTIVITY_SNAPSHOT }> =>
+    event.type === EventType.ACTIVITY_SNAPSHOT,
+);
+assert.equal(plans.length, 2);
+assert.equal(plans[0]?.activityType, 'plan');
+assert.equal(plans[0]?.messageId, plans[1]?.messageId);
+assert.ok(plans.every((event) => event.replace === true));
+assert.deepEqual(plans[1]?.content, {
+  steps: [
+    { text: 'Read the note', status: 'done', priority: 'high' },
+    { text: 'Save it', status: 'active' },
+  ],
+});
 
 console.log(`@agentport/agui check passed (${streamEvents.length} streamed events, all valid against @ag-ui/core)`);

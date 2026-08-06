@@ -28,7 +28,7 @@ import { component, computed, each, html, onCleanup, signal, when } from '@nisli
 import AgentPortConnect from './connect.js';
 import { aguiStream, type AguiAdapter, type AguiEvent } from '@agentport/agui';
 import type { AgentSessionHandle, ApprovalPrompt, SessionEvents, SiteTool } from '@agentport/client';
-import { toErr, type HistoryEntry } from '@agentport/protocol';
+import { toErr, type HistoryEntry, type PlanStep } from '@agentport/protocol';
 import { Chat, createChatStore, type ChatController } from '../../src/nisli-ui/ui/chat/index.js';
 import { siteLogger } from './observe.js';
 
@@ -80,6 +80,10 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
   const live = signal(false);
   const busy = signal(false);
   const notice = signal('');
+  // The agent's current plan, replaced wholesale by each snapshot. Not part of
+  // the transcript: a plan is what the agent intends *now*, and replaying every
+  // revision would read as repetition rather than as the conversation.
+  const plan = signal<PlanStep[]>([]);
 
   let session: AgentSessionHandle | null = null;
   let adapter: AguiAdapter | null = null;
@@ -157,6 +161,14 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
           });
           return;
         }
+        case 'ACTIVITY_SNAPSHOT':
+          // AG-UI's standard activity event; `replace` is what makes a plan a
+          // live checklist rather than an append-only log.
+          if (event.activityType === 'plan') {
+            const steps = (event.content as { steps?: PlanStep[] }).steps;
+            plan.value = Array.isArray(steps) ? steps : [];
+          }
+          return;
         case 'RUN_FINISHED':
           chat.apply({ type: 'run.end' });
           currentRunId = null;
@@ -192,6 +204,7 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
             session = null;
             adapter = null;
             currentRunId = null;
+            plan.value = [];
             chat.reset();
           }
           return;
@@ -250,6 +263,7 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
   const attach = (next: AgentSessionHandle): void => {
     detachEvents();
     chat.reset();
+    plan.value = [];
     toolSeq = 0;
     currentRunId = null;
     busy.value = false;
@@ -268,6 +282,7 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
   /** Replay the agent's own history through the reducer, one settled entry each. */
   const seed = (history: HistoryEntry[]) => {
     chat.reset();
+    plan.value = [];
     for (const entry of history) {
       switch (entry.role) {
         case 'user':
@@ -424,6 +439,28 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
       ${when(
         computed(() => notice.value !== ''),
         () => html`<div class="ap-notice">${notice}</div>`,
+      )}
+      ${when(
+        computed(() => plan.value.length > 0),
+        () => html`<section class="ap-plan" aria-label="Agent plan">
+          <div class="ap-plan-label">Plan</div>
+          <ol>
+            ${each(
+              plan,
+              (step, index) => `${index}:${step.text}`,
+              (step) => {
+                const status = computed(() => step.value.status);
+                const mark = computed(() =>
+                  step.value.status === 'done' ? '✓' : step.value.status === 'active' ? '▸' : '○',
+                );
+                return html`<li class="ap-plan-step" data-status=${status}>
+                  <span class="ap-plan-mark" aria-hidden="true">${mark}</span>
+                  <span>${computed(() => step.value.text)}</span>
+                </li>`;
+              },
+            )}
+          </ol>
+        </section>`,
       )}
       ${each(
         pendingApprovals,

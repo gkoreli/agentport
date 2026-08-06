@@ -242,7 +242,12 @@ means touching them and nothing else:
   chose it. Change a limit here, not at a call site.
 - `packages/protocol/src/messages.ts` — one schema per frame, `FRAME_SCHEMAS`
   as the registry, and the exported types **inferred** from the schemas. There
-  is no second hand-written interface to drift from.
+  is no second hand-written interface to drift from. A frame type is registered
+  in four places, and all four are now type-linked to the `SessionFrame` union:
+  the schema registry, the union, the per-direction sealable sets, and
+  `SESSION_FRAME_TYPES` (a total record — it used to be a hand-written set, and
+  a frame missing from it compiled fine and was then silently dropped at the
+  wallet's router).
 
 The wire form is **AgentPort canonical JSON v1** = `canonicalJson()`: keys
 sorted by UTF-16 code unit, no whitespace, ECMAScript number and string
@@ -284,9 +289,9 @@ has fixtures.
 ## State of things
 
 Working: pairing, cert issuance and verification, directory + presence,
-capability grants with TTL, prompt streaming, tool-call round-trip, approval
-round-trip, cancellation, session teardown, and the full demo UI. 72 e2e checks
-and 411 wire-validation cases pass.
+capability grants with TTL, prompt streaming, plan reporting, tool-call
+round-trip, approval round-trip, cancellation, session teardown, and the full
+demo UI. 79 e2e checks and 459 wire-validation cases pass.
 
 Not built yet, in rough priority order:
 

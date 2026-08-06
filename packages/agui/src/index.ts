@@ -1,5 +1,6 @@
 import {
   EventType,
+  type ActivitySnapshotEvent,
   type BaseEvent,
   type ReasoningEndEvent,
   type ReasoningMessageContentEvent,
@@ -34,6 +35,7 @@ import type { AgentSessionHandle, SessionEvents } from '@agentport/client';
  */
 export { EventType } from '@ag-ui/core';
 export type {
+  ActivitySnapshotEvent,
   ReasoningEndEvent,
   ReasoningMessageContentEvent,
   ReasoningMessageEndEvent,
@@ -86,6 +88,7 @@ export type AguiEvent =
   | ReasoningMessageContentEvent
   | ReasoningMessageEndEvent
   | ReasoningEndEvent
+  | ActivitySnapshotEvent
   | AgentPortApprovalEvent
   | AgentPortClosedEvent;
 
@@ -146,6 +149,7 @@ class Translator {
     this.#off = [
       session.on('delta', (event: SessionEvents['delta']) => this.#onDelta(event)),
       session.on('thought', (event: SessionEvents['thought']) => this.#onThought(event)),
+      session.on('plan', (event: SessionEvents['plan']) => this.#onPlan(event)),
       session.on('done', (event: SessionEvents['done']) => this.#onDone(event)),
       session.on('tool', (event: SessionEvents['tool']) => this.#onTool(event)),
       session.on('approval', (event: SessionEvents['approval']) =>
@@ -229,6 +233,22 @@ class Translator {
       this.#emit({ type: EventType.REASONING_MESSAGE_START, messageId, role: 'reasoning' });
     }
     this.#emit({ type: EventType.REASONING_MESSAGE_CONTENT, messageId, delta: event.text });
+  }
+
+  /**
+   * A plan is an AG-UI activity, not a message: ACTIVITY_SNAPSHOT with
+   * `replace: true` says exactly what our wire says — this is the whole plan
+   * now, discard the previous one — so a standard renderer shows the agent's
+   * progress with no AgentPort-specific code.
+   */
+  #onPlan(event: SessionEvents['plan']): void {
+    this.#emit({
+      type: EventType.ACTIVITY_SNAPSHOT,
+      messageId: this.#planId(event.promptId),
+      activityType: 'plan',
+      content: { steps: event.steps },
+      replace: true,
+    });
   }
 
   #onDone(event: SessionEvents['done']): void {
@@ -351,6 +371,12 @@ class Translator {
 
   #reasoningId(promptId: string): string {
     return `${promptId}:reasoning`;
+  }
+
+  /** Stable per prompt, so each snapshot replaces the previous plan rather
+   *  than stacking a new activity beside it. */
+  #planId(promptId: string): string {
+    return `${promptId}:plan`;
   }
 
   #id(kind: 'run' | 'tool', counter: number): string {

@@ -1,0 +1,831 @@
+{
+  "type": "plan",
+  "cases": [
+    {
+      "name": "minimal valid (empty plan clears the checklist)",
+      "expect": "ok",
+      "frame": {
+        "t": "plan",
+        "s": "s1",
+        "promptId": "p1",
+        "steps": []
+      }
+    },
+    {
+      "name": "a real plan, all three statuses and priorities",
+      "expect": "ok",
+      "frame": {
+        "t": "plan",
+        "s": "s1",
+        "promptId": "p1",
+        "steps": [
+          {
+            "text": "Read the current draft",
+            "status": "done",
+            "priority": "high"
+          },
+          {
+            "text": "Find the weakest paragraph",
+            "status": "active",
+            "priority": "medium"
+          },
+          {
+            "text": "Rewrite it and append",
+            "status": "pending",
+            "priority": "low"
+          }
+        ]
+      }
+    },
+    {
+      "name": "priority is optional",
+      "expect": "ok",
+      "frame": {
+        "t": "plan",
+        "s": "s1",
+        "promptId": "p1",
+        "steps": [
+          {
+            "text": "Read the draft",
+            "status": "pending"
+          }
+        ]
+      }
+    },
+    {
+      "name": "s at 64-char limit",
+      "expect": "ok",
+      "frame": {
+        "t": "plan",
+        "s": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.b:c",
+        "promptId": "p1",
+        "steps": [
+          {
+            "text": "Go",
+            "status": "active"
+          }
+        ]
+      }
+    },
+    {
+      "name": "steps at MAX_PLAN_STEPS",
+      "expect": "ok",
+      "frame": {
+        "t": "plan",
+        "s": "s1",
+        "promptId": "p1",
+        "steps": [
+          {
+            "text": "Step 0",
+            "status": "pending"
+          },
+          {
+            "text": "Step 1",
+            "status": "pending"
+          },
+          {
+            "text": "Step 2",
+            "status": "pending"
+          },
+          {
+            "text": "Step 3",
+            "status": "pending"
+          },
+          {
+            "text": "Step 4",
+            "status": "pending"
+          },
+          {
+            "text": "Step 5",
+            "status": "pending"
+          },
+          {
+            "text": "Step 6",
+            "status": "pending"
+          },
+          {
+            "text": "Step 7",
+            "status": "pending"
+          },
+          {
+            "text": "Step 8",
+            "status": "pending"
+          },
+          {
+            "text": "Step 9",
+            "status": "pending"
+          },
+          {
+            "text": "Step 10",
+            "status": "pending"
+          },
+          {
+            "text": "Step 11",
+            "status": "pending"
+          },
+          {
+            "text": "Step 12",
+            "status": "pending"
+          },
+          {
+            "text": "Step 13",
+            "status": "pending"
+          },
+          {
+            "text": "Step 14",
+            "status": "pending"
+          },
+          {
+            "text": "Step 15",
+            "status": "pending"
+          },
+          {
+            "text": "Step 16",
+            "status": "pending"
+          },
+          {
+            "text": "Step 17",
+            "status": "pending"
+          },
+          {
+            "text": "Step 18",
+            "status": "pending"
+          },
+          {
+            "text": "Step 19",
+            "status": "pending"
+          },
+          {
+            "text": "Step 20",
+            "status": "pending"
+          },
+          {
+            "text": "Step 21",
+            "status": "pending"
+          },
+          {
+            "text": "Step 22",
+            "status": "pending"
+          },
+          {
+            "text": "Step 23",
+            "status": "pending"
+          },
+          {
+            "text": "Step 24",
+            "status": "pending"
+          },
+          {
+            "text": "Step 25",
+            "status": "pending"
+          },
+          {
+            "text": "Step 26",
+            "status": "pending"
+          },
+          {
+            "text": "Step 27",
+            "status": "pending"
+          },
+          {
+            "text": "Step 28",
+            "status": "pending"
+          },
+          {
+            "text": "Step 29",
+            "status": "pending"
+          },
+          {
+            "text": "Step 30",
+            "status": "pending"
+          },
+          {
+            "text": "Step 31",
+            "status": "pending"
+          },
+          {
+            "text": "Step 32",
+            "status": "pending"
+          },
+          {
+            "text": "Step 33",
+            "status": "pending"
+          },
+          {
+            "text": "Step 34",
+            "status": "pending"
+          },
+          {
+            "text": "Step 35",
+            "status": "pending"
+          },
+          {
+            "text": "Step 36",
+            "status": "pending"
+          },
+          {
+            "text": "Step 37",
+            "status": "pending"
+          },
+          {
+            "text": "Step 38",
+            "status": "pending"
+          },
+          {
+            "text": "Step 39",
+            "status": "pending"
+          },
+          {
+            "text": "Step 40",
+            "status": "pending"
+          },
+          {
+            "text": "Step 41",
+            "status": "pending"
+          },
+          {
+            "text": "Step 42",
+            "status": "pending"
+          },
+          {
+            "text": "Step 43",
+            "status": "pending"
+          },
+          {
+            "text": "Step 44",
+            "status": "pending"
+          },
+          {
+            "text": "Step 45",
+            "status": "pending"
+          },
+          {
+            "text": "Step 46",
+            "status": "pending"
+          },
+          {
+            "text": "Step 47",
+            "status": "pending"
+          },
+          {
+            "text": "Step 48",
+            "status": "pending"
+          },
+          {
+            "text": "Step 49",
+            "status": "pending"
+          },
+          {
+            "text": "Step 50",
+            "status": "pending"
+          },
+          {
+            "text": "Step 51",
+            "status": "pending"
+          },
+          {
+            "text": "Step 52",
+            "status": "pending"
+          },
+          {
+            "text": "Step 53",
+            "status": "pending"
+          },
+          {
+            "text": "Step 54",
+            "status": "pending"
+          },
+          {
+            "text": "Step 55",
+            "status": "pending"
+          },
+          {
+            "text": "Step 56",
+            "status": "pending"
+          },
+          {
+            "text": "Step 57",
+            "status": "pending"
+          },
+          {
+            "text": "Step 58",
+            "status": "pending"
+          },
+          {
+            "text": "Step 59",
+            "status": "pending"
+          },
+          {
+            "text": "Step 60",
+            "status": "pending"
+          },
+          {
+            "text": "Step 61",
+            "status": "pending"
+          },
+          {
+            "text": "Step 62",
+            "status": "pending"
+          },
+          {
+            "text": "Step 63",
+            "status": "pending"
+          }
+        ]
+      }
+    },
+    {
+      "name": "step text at MAX_PLAN_STEP_CHARS",
+      "expect": "ok",
+      "frame": {
+        "t": "plan",
+        "s": "s1",
+        "promptId": "p1",
+        "steps": [
+          {
+            "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "status": "pending"
+          }
+        ]
+      }
+    },
+    {
+      "name": "one step past MAX_PLAN_STEPS",
+      "expect": "too_many",
+      "frame": {
+        "t": "plan",
+        "s": "s1",
+        "promptId": "p1",
+        "steps": [
+          {
+            "text": "Step 0",
+            "status": "pending"
+          },
+          {
+            "text": "Step 1",
+            "status": "pending"
+          },
+          {
+            "text": "Step 2",
+            "status": "pending"
+          },
+          {
+            "text": "Step 3",
+            "status": "pending"
+          },
+          {
+            "text": "Step 4",
+            "status": "pending"
+          },
+          {
+            "text": "Step 5",
+            "status": "pending"
+          },
+          {
+            "text": "Step 6",
+            "status": "pending"
+          },
+          {
+            "text": "Step 7",
+            "status": "pending"
+          },
+          {
+            "text": "Step 8",
+            "status": "pending"
+          },
+          {
+            "text": "Step 9",
+            "status": "pending"
+          },
+          {
+            "text": "Step 10",
+            "status": "pending"
+          },
+          {
+            "text": "Step 11",
+            "status": "pending"
+          },
+          {
+            "text": "Step 12",
+            "status": "pending"
+          },
+          {
+            "text": "Step 13",
+            "status": "pending"
+          },
+          {
+            "text": "Step 14",
+            "status": "pending"
+          },
+          {
+            "text": "Step 15",
+            "status": "pending"
+          },
+          {
+            "text": "Step 16",
+            "status": "pending"
+          },
+          {
+            "text": "Step 17",
+            "status": "pending"
+          },
+          {
+            "text": "Step 18",
+            "status": "pending"
+          },
+          {
+            "text": "Step 19",
+            "status": "pending"
+          },
+          {
+            "text": "Step 20",
+            "status": "pending"
+          },
+          {
+            "text": "Step 21",
+            "status": "pending"
+          },
+          {
+            "text": "Step 22",
+            "status": "pending"
+          },
+          {
+            "text": "Step 23",
+            "status": "pending"
+          },
+          {
+            "text": "Step 24",
+            "status": "pending"
+          },
+          {
+            "text": "Step 25",
+            "status": "pending"
+          },
+          {
+            "text": "Step 26",
+            "status": "pending"
+          },
+          {
+            "text": "Step 27",
+            "status": "pending"
+          },
+          {
+            "text": "Step 28",
+            "status": "pending"
+          },
+          {
+            "text": "Step 29",
+            "status": "pending"
+          },
+          {
+            "text": "Step 30",
+            "status": "pending"
+          },
+          {
+            "text": "Step 31",
+            "status": "pending"
+          },
+          {
+            "text": "Step 32",
+            "status": "pending"
+          },
+          {
+            "text": "Step 33",
+            "status": "pending"
+          },
+          {
+            "text": "Step 34",
+            "status": "pending"
+          },
+          {
+            "text": "Step 35",
+            "status": "pending"
+          },
+          {
+            "text": "Step 36",
+            "status": "pending"
+          },
+          {
+            "text": "Step 37",
+            "status": "pending"
+          },
+          {
+            "text": "Step 38",
+            "status": "pending"
+          },
+          {
+            "text": "Step 39",
+            "status": "pending"
+          },
+          {
+            "text": "Step 40",
+            "status": "pending"
+          },
+          {
+            "text": "Step 41",
+            "status": "pending"
+          },
+          {
+            "text": "Step 42",
+            "status": "pending"
+          },
+          {
+            "text": "Step 43",
+            "status": "pending"
+          },
+          {
+            "text": "Step 44",
+            "status": "pending"
+          },
+          {
+            "text": "Step 45",
+            "status": "pending"
+          },
+          {
+            "text": "Step 46",
+            "status": "pending"
+          },
+          {
+            "text": "Step 47",
+            "status": "pending"
+          },
+          {
+            "text": "Step 48",
+            "status": "pending"
+          },
+          {
+            "text": "Step 49",
+            "status": "pending"
+          },
+          {
+            "text": "Step 50",
+            "status": "pending"
+          },
+          {
+            "text": "Step 51",
+            "status": "pending"
+          },
+          {
+            "text": "Step 52",
+            "status": "pending"
+          },
+          {
+            "text": "Step 53",
+            "status": "pending"
+          },
+          {
+            "text": "Step 54",
+            "status": "pending"
+          },
+          {
+            "text": "Step 55",
+            "status": "pending"
+          },
+          {
+            "text": "Step 56",
+            "status": "pending"
+          },
+          {
+            "text": "Step 57",
+            "status": "pending"
+          },
+          {
+            "text": "Step 58",
+            "status": "pending"
+          },
+          {
+            "text": "Step 59",
+            "status": "pending"
+          },
+          {
+            "text": "Step 60",
+            "status": "pending"
+          },
+          {
+            "text": "Step 61",
+            "status": "pending"
+          },
+          {
+            "text": "Step 62",
+            "status": "pending"
+          },
+          {
+            "text": "Step 63",
+            "status": "pending"
+          },
+          {
+            "text": "Step 64",
+            "status": "pending"
+          }
+        ]
+      }
+    },
+    {
+      "name": "step text one char past the cap",
+      "expect": "too_long",
+      "frame": {
+        "t": "plan",
+        "s": "s1",
+        "promptId": "p1",
+        "steps": [
+          {
+            "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "status": "pending"
+          }
+        ]
+      }
+    },
+    {
+      "name": "empty step text",
+      "expect": "too_short",
+      "frame": {
+        "t": "plan",
+        "s": "s1",
+        "promptId": "p1",
+        "steps": [
+          {
+            "text": "",
+            "status": "pending"
+          }
+        ]
+      }
+    },
+    {
+      "name": "missing promptId",
+      "expect": "missing_key",
+      "frame": {
+        "t": "plan",
+        "s": "s1",
+        "steps": [
+          {
+            "text": "Go",
+            "status": "pending"
+          }
+        ]
+      }
+    },
+    {
+      "name": "missing steps",
+      "expect": "missing_key",
+      "frame": {
+        "t": "plan",
+        "s": "s1",
+        "promptId": "p1"
+      }
+    },
+    {
+      "name": "step missing status",
+      "expect": "missing_key",
+      "frame": {
+        "t": "plan",
+        "s": "s1",
+        "promptId": "p1",
+        "steps": [
+          {
+            "text": "Go"
+          }
+        ]
+      }
+    },
+    {
+      "name": "status outside enum (ACP's own spelling is not ours)",
+      "expect": "bad_format",
+      "frame": {
+        "t": "plan",
+        "s": "s1",
+        "promptId": "p1",
+        "steps": [
+          {
+            "text": "Go",
+            "status": "in_progress"
+          }
+        ]
+      }
+    },
+    {
+      "name": "priority outside enum",
+      "expect": "bad_format",
+      "frame": {
+        "t": "plan",
+        "s": "s1",
+        "promptId": "p1",
+        "steps": [
+          {
+            "text": "Go",
+            "status": "pending",
+            "priority": "urgent"
+          }
+        ]
+      }
+    },
+    {
+      "name": "steps is not an array",
+      "expect": "wrong_type",
+      "frame": {
+        "t": "plan",
+        "s": "s1",
+        "promptId": "p1",
+        "steps": {
+          "0": {
+            "text": "Go",
+            "status": "pending"
+          }
+        }
+      }
+    },
+    {
+      "name": "step is not an object",
+      "expect": "wrong_type",
+      "frame": {
+        "t": "plan",
+        "s": "s1",
+        "promptId": "p1",
+        "steps": [
+          "Go"
+        ]
+      }
+    },
+    {
+      "name": "step text is not a string",
+      "expect": "wrong_type",
+      "frame": {
+        "t": "plan",
+        "s": "s1",
+        "promptId": "p1",
+        "steps": [
+          {
+            "text": 7,
+            "status": "pending"
+          }
+        ]
+      }
+    },
+    {
+      "name": "s over the id limit",
+      "expect": "too_long",
+      "frame": {
+        "t": "plan",
+        "s": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "promptId": "p1",
+        "steps": []
+      }
+    },
+    {
+      "name": "s with forbidden character",
+      "expect": "bad_format",
+      "frame": {
+        "t": "plan",
+        "s": "s 1",
+        "promptId": "p1",
+        "steps": []
+      }
+    },
+    {
+      "name": "unknown extra key on the frame",
+      "expect": "unexpected_key",
+      "frame": {
+        "t": "plan",
+        "s": "s1",
+        "promptId": "p1",
+        "steps": [],
+        "title": "my plan"
+      }
+    },
+    {
+      "name": "unknown extra key on a step",
+      "expect": "unexpected_key",
+      "frame": {
+        "t": "plan",
+        "s": "s1",
+        "promptId": "p1",
+        "steps": [
+          {
+            "text": "Go",
+            "status": "pending",
+            "id": "1"
+          }
+        ]
+      }
+    },
+    {
+      "name": "raw: whitespace is non-canonical",
+      "expect": "non_canonical",
+      "raw": "{\"t\":\"plan\", \"s\":\"s1\",\"promptId\":\"p1\",\"steps\":[]}"
+    },
+    {
+      "name": "raw: keys out of canonical order",
+      "expect": "non_canonical",
+      "raw": "{\"t\":\"plan\",\"s\":\"s1\",\"promptId\":\"p1\",\"steps\":[]}"
+    },
+    {
+      "name": "raw: step keys out of canonical order",
+      "expect": "non_canonical",
+      "raw": "{\"promptId\":\"p1\",\"s\":\"s1\",\"steps\":[{\"text\":\"Go\",\"status\":\"pending\"}],\"t\":\"plan\"}"
+    },
+    {
+      "name": "raw: __proto__ smuggle",
+      "expect": "unexpected_key",
+      "raw": "{\"__proto__\":{},\"promptId\":\"p1\",\"s\":\"s1\",\"steps\":[],\"t\":\"plan\"}"
+    }
+  ]
+}

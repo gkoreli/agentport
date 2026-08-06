@@ -1,4 +1,10 @@
-import type { CapabilityGrant, HistoryEntry, SurfaceDescriptor, ToolDefinition } from '@agentport/protocol';
+import type {
+  CapabilityGrant,
+  HistoryEntry,
+  PlanStep,
+  SurfaceDescriptor,
+  ToolDefinition,
+} from '@agentport/protocol';
 
 /**
  * Everything a runtime is handed for one turn.
@@ -16,6 +22,14 @@ export interface TurnContext {
   say(text: string): void;
   /** Streamed to the user as status/reasoning, rendered separately. */
   think(text: string): void;
+  /**
+   * Report the agent's plan for this turn, as a whole.
+   *
+   * A snapshot, not a delta: each call replaces the previous plan, because
+   * runtimes rewrite plans as they discover work. Runtimes that report no
+   * plan simply never call this.
+   */
+  plan(steps: PlanStep[]): void;
   /** Invoke one of the site's tools. Rejects if the site refuses or errors. */
   callTool(name: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<unknown>;
   /** Ask the user to approve something. Resolves false if declined. */
@@ -41,7 +55,9 @@ export interface AgentRuntime {
    */
   replayHistory?(): Promise<HistoryEntry[] | null>;
   /** Called once per session before the first prompt. */
-  openSession?(context: Omit<TurnContext, 'say' | 'think' | 'callTool' | 'requestApproval' | 'signal'>): Promise<void> | void;
+  openSession?(
+    context: Omit<TurnContext, 'say' | 'think' | 'plan' | 'callTool' | 'requestApproval' | 'signal'>,
+  ): Promise<void> | void;
   closeSession?(): Promise<void> | void;
   prompt(text: string, context: TurnContext): Promise<void>;
 }
@@ -76,6 +92,21 @@ export class DemoWriterRuntime implements AgentRuntime {
       return;
     }
 
+    // The plan is reported as a whole and re-reported as it advances, which is
+    // what a real runtime does — this demo exists to exercise that path.
+    const steps: PlanStep[] = [
+      { text: 'Read the current document', status: 'active' },
+      { text: 'Ask before writing', status: 'pending' },
+      { text: 'Write the change', status: 'pending' },
+    ];
+    const advance = (index: number): void => {
+      for (const [at, step] of steps.entries()) {
+        step.status = at < index ? 'done' : at === index ? 'active' : 'pending';
+      }
+      ctx.plan(steps.map((step) => ({ ...step })));
+    };
+    advance(0);
+
     ctx.think('reading the current document');
     const doc = (await ctx.callTool('inkwell.document.read', {})) as { text?: string };
     const body = doc?.text ?? '';
@@ -92,6 +123,7 @@ export class DemoWriterRuntime implements AgentRuntime {
       return;
     }
 
+    advance(1);
     const approved = await ctx.requestApproval('Write your instruction into the document', {
       name: writer.name,
       arguments: writer.args(text),
@@ -102,7 +134,9 @@ export class DemoWriterRuntime implements AgentRuntime {
       return;
     }
 
+    advance(2);
     await ctx.callTool(writer.name, writer.args(text));
+    advance(steps.length);
     ctx.say('Done. The document now ends with your instruction.');
   }
 }

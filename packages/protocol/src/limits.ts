@@ -142,6 +142,22 @@ export const MAX_JSON_LEAF_CHARS = MAX_TEXT_CHARS;
  */
 export const MAX_HISTORY_ENTRIES = 4096;
 
+/**
+ * Steps in one plan snapshot. A plan is a checklist a person reads while the
+ * agent works, so the bound is set by what a panel can honestly render rather
+ * than by what a runtime might emit: past a few dozen steps the list stops
+ * being a progress indicator. Each snapshot replaces the last, so this caps
+ * one frame, not the plan's lifetime.
+ */
+export const MAX_PLAN_STEPS = 64;
+
+/**
+ * One plan step's text. Steps are short imperative lines ("Read the draft"),
+ * not prose; the same cap as a tool description leaves room for a wordy
+ * runtime without letting a step become a transcript.
+ */
+export const MAX_PLAN_STEP_CHARS = MAX_DESCRIPTION_CHARS;
+
 /** Directory listing size; a wallet with more agents than this is malformed. */
 export const MAX_AGENTS_LISTED = 256;
 

@@ -310,6 +310,23 @@ export class AcpRuntime implements AgentRuntime {
       case 'agent_thought_chunk':
         if (update.content.type === 'text') turn.think(update.content.text);
         return;
+      case 'plan':
+        // ACP reports the whole plan on every change, which is exactly our
+        // snapshot semantics. Statuses are renamed rather than passed through:
+        // ACP's `in_progress` describes a task, ours describes what the user
+        // is watching happen, and the wire vocabulary should not be a second
+        // spelling of someone else's enum.
+        turn.plan(
+          update.entries.map((entry) => ({
+            text: entry.content,
+            status:
+              entry.status === 'in_progress' ? ('active' as const)
+              : entry.status === 'completed' ? ('done' as const)
+              : ('pending' as const),
+            ...(entry.priority ? { priority: entry.priority } : {}),
+          })),
+        );
+        return;
       case 'tool_call':
         this.#toolTitles.set(update.toolCallId, update.title);
         turn.think(`→ ${update.title}`);

@@ -93,6 +93,19 @@ a { color: var(--accent); }
 .ap-approval-actions button { padding: 6px 12px; font-size: 12px; }
 .ap-approval-actions .deny { color: var(--text); background: transparent; border: 1px solid var(--line); }
 
+/* The agent's live plan. One checklist that updates in place, above the
+   transcript — a plan is what the agent intends now, not something that
+   scrolls away. */
+.ap-plan { border: 1px solid var(--line); border-radius: 10px; background: #12161d; padding: 10px 12px; margin-bottom: 10px; display: grid; gap: 6px; }
+.ap-plan-label { color: var(--muted); font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; }
+.ap-plan ol { margin: 0; padding: 0; list-style: none; display: grid; gap: 4px; }
+.ap-plan-step { display: grid; grid-template-columns: 14px 1fr; gap: 7px; align-items: baseline; font-size: 12px; line-height: 1.45; color: var(--muted); }
+.ap-plan-mark { font-size: 11px; text-align: center; }
+.ap-plan-step[data-status="active"] { color: var(--text); }
+.ap-plan-step[data-status="active"] .ap-plan-mark { color: var(--accent); }
+.ap-plan-step[data-status="done"] .ap-plan-mark { color: #6ee7a8; }
+.ap-plan-step[data-status="done"] span:last-child { text-decoration: line-through; opacity: .7; }
+
 /* ---- protocol-neutral chat set (src/nisli-ui/ui/chat) ---- */
 [data-slot="chat"] { display: flex; flex: 1; min-height: 0; flex-direction: column; gap: 10px; }
 [data-slot="message-scroller"] { position: relative; display: flex; flex: 1; min-height: 0; overflow: hidden; }

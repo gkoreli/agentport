@@ -6,6 +6,7 @@ import {
   MAX_FRAME_CHARS,
   MAX_HISTORY_ENTRIES,
   MAX_MISSED_COUNT,
+  MAX_PLAN_STEPS,
   MAX_REASON_CHARS,
   MAX_SEALED_PLAINTEXT_BYTES,
   MAX_TEXT_CHARS,
@@ -778,6 +779,18 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
       think: (text) => {
         record('thought', text);
         this.#streamText(session, 'thought', frame.id, text);
+      },
+      plan: (steps) => {
+        // Not recorded in the transcript: a plan is the *current* intention,
+        // replaced whenever it changes, and a replay of every revision would
+        // read as repetition rather than as the conversation. The runtime's
+        // own store keeps whatever it keeps.
+        this.#sendSession(session, {
+          t: 'plan',
+          s: session.id,
+          promptId: frame.id,
+          steps: steps.slice(0, MAX_PLAN_STEPS),
+        });
       },
       callTool: async (name, args, signal) => {
         try {

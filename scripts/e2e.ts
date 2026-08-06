@@ -27,6 +27,7 @@ import {
   signDelegation,
   type Hex,
   type LogEntry,
+  type PlanStep,
 } from '../packages/protocol/src/index.js';
 import {
   decrypt,
@@ -280,12 +281,32 @@ check('grant carries exactly the site tools', session.grant.tools.length === 2);
 const toolEvents: string[] = [];
 session.on('tool', (event) => toolEvents.push(`${event.name}:${event.ok}`));
 
+// Plans are snapshots: each one replaces the last, so the wire must carry the
+// whole checklist every time and the statuses must actually advance.
+const plans: PlanStep[][] = [];
+session.on('plan', (event) => plans.push(event.steps));
+
 console.log('\n4. prompt -> tool loop');
 const reply = await session.prompt('Then the wind rose.');
 check('agent read the document', toolEvents.includes('inkwell.document.read:true'), toolEvents);
 check('write was approved', approvals.length > 0, approvals);
 check('document was mutated in the page', doc.text.endsWith('Then the wind rose.'), doc.text);
 check('agent streamed a reply', reply.includes('Done.'), reply);
+
+// The plan crossed the sealed channel as its own frame type: the runtime
+// reported it, the daemon framed it, the wallet decoded it. Without the
+// AGENT_SEALABLE entry openSealed would have refused it outright.
+check('the agent reported a plan', plans.length > 0, plans.length);
+const firstPlan = plans[0] ?? [];
+const lastPlan = plans[plans.length - 1] ?? [];
+check('every snapshot carries the whole plan', plans.every((steps) => steps.length === firstPlan.length), plans.map((s) => s.length));
+check('the plan starts with work to do', firstPlan.some((step) => step.status === 'active'), firstPlan);
+check('the plan finishes done', lastPlan.length > 0 && lastPlan.every((step) => step.status === 'done'), lastPlan);
+check(
+  'plan steps keep their identity across snapshots',
+  firstPlan.map((step) => step.text).join('|') === lastPlan.map((step) => step.text).join('|'),
+  { first: firstPlan.map((s) => s.text), last: lastPlan.map((s) => s.text) },
+);
 
 console.log('\n5. refusal path');
 doc.text = 'Untouched.';

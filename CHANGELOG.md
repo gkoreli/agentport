@@ -10,6 +10,55 @@ they moved.
 
 ## Unreleased
 
+### The agent's plan is a thing you can watch
+
+ACP agents already report a structured plan — `session/update` with
+`sessionUpdate: "plan"`, carrying entries with content, priority and status,
+re-sent as a whole whenever it changes. The daemon dropped every one of them:
+`#sessionUpdate` had no `plan` case, so they fell through `default: return`.
+The user watching the panel saw prose and status lines but never the plan,
+which on a multi-step flow is the only honest answer to "what is it doing and
+how far along is it". This was free progress reporting we were receiving and
+discarding.
+
+It now crosses the wire as its own sealed content frame and renders as a live
+checklist above the transcript.
+
+- **Snapshot, not delta.** `plan` carries the whole checklist every time and
+  replaces the previous one. Runtimes rewrite plans as they discover work, and
+  a partial update whose base had been dropped would render a plan that never
+  existed.
+- **Statuses are renamed, not passed through.** ACP's `in_progress` describes a
+  task; our `active` describes what the user is watching happen. The wire
+  vocabulary should not become a second spelling of someone else's enum.
+- **No relay deploy.** The relay only ever sees `enc`, so a new *sealed* frame
+  type is invisible to it — the first wire change here that does not need
+  lockstep. Lifecycle frames still do.
+- **The transcript does not record it.** A plan is the current intention; a
+  replay of every revision would read as repetition rather than as the
+  conversation. On resume the panel starts with no plan rather than a stale one.
+- **`@ag-ui/core`'s own event.** The adapter emits `ACTIVITY_SNAPSHOT` with
+  `activityType: 'plan'` and `replace: true` — a standard AG-UI renderer shows
+  agent progress with zero AgentPort-specific code, which is the ADR-017 claim
+  actually being paid off rather than asserted.
+- `DemoWriterRuntime` reports and advances a plan, so the path is exercised
+  without an LLM — the repo's dogfooding rule: an abstraction nobody calls is
+  decoration.
+
+Found while building it: `messages.ts` had a **fourth** place a frame type must
+be registered — a hand-written `SESSION_FRAME_TYPES` set with no type link to
+the `SessionFrame` union. Adding a frame and forgetting it compiled cleanly and
+then silently dropped the frame at the wallet's router. It is now a total record
+over `SessionFrame['t']`, so an omission is a type error, like `FRAME_SCHEMAS`.
+
+Evidence: `npm run e2e` (79 checks; four new ones prove a plan crosses the
+sealed channel, that every snapshot carries the whole checklist, and that the
+statuses actually advance), `npm run wire:check` (459 cases across 41 frame
+types, including hostile plan fixtures), `npm run agui:check` (both snapshots
+parsed by `@ag-ui/core`'s own schemas, same `messageId`, `replace: true`), and
+`npm run ui:smoke` (the real panel renders a plan and a second snapshot
+replaces it in place — seven checks that fail if the handler is removed).
+
 ### One "Approve" no longer selects allow_always
 
 `AcpRuntime`'s permission answer searched the runtime's option list for

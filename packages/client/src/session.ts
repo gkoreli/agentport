@@ -18,6 +18,7 @@ import {
   type Frame,
   type HistoryEntry,
   type Logger,
+  type PlanStep,
   type SessionFrame,
   type SurfaceDescriptor,
   type ToolDefinition,
@@ -66,6 +67,8 @@ export type ApprovalDecider = (prompt: ApprovalPrompt) => boolean | Promise<bool
 export type SessionEvents = {
   delta: { promptId: string; text: string };
   thought: { promptId: string; text: string };
+  /** The agent's current plan for a prompt. Each event replaces the last. */
+  plan: { promptId: string; steps: PlanStep[] };
   done: { promptId: string; stopReason: string; error?: string };
   tool: { name: string; arguments: Record<string, unknown>; ok: boolean; result?: unknown; error?: string };
   approval: ApprovalPrompt & { granted: boolean };
@@ -236,6 +239,11 @@ export class AgentSession extends Emitter<SessionEvents> implements AgentSession
       }
       case 'thought':
         this.emit('thought', { promptId: frame.promptId, text: frame.text });
+        return;
+      case 'plan':
+        // A snapshot replaces the previous plan; the session keeps no copy,
+        // because the only consumer that needs one is the view rendering it.
+        this.emit('plan', { promptId: frame.promptId, steps: frame.steps });
         return;
       case 'done': {
         const turn = this.#transcripts.get(frame.promptId);

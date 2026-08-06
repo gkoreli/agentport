@@ -217,6 +217,34 @@ check(
   FakeRelay.frames,
 );
 
+console.log('\n5b. the agent plan renders as a live checklist');
+// A plan is not a transcript entry: it is the agent's CURRENT intention, so a
+// second snapshot must replace the first in place rather than stack beside it.
+const planFrame = (steps: { text: string; status: string; priority?: string }[]) =>
+  FakeRelay.latest!.sealedReply({ t: 'plan', s: 'sess_test', promptId: 'p_ui', steps } as never);
+
+planFrame([
+  { text: 'Read the opening paragraph', status: 'active', priority: 'high' },
+  { text: 'Tighten it', status: 'pending' },
+]);
+await new Promise((resolve) => setTimeout(resolve, 50));
+flush();
+const planSteps = () => clickMount.querySelectorAll('.ap-plan-step');
+check('the plan renders in the panel', planSteps().length === 2, rendered().slice(-200));
+check('the plan shows its step text', rendered().includes('Read the opening paragraph'), rendered().slice(-200));
+check('the active step is marked active', planSteps()[0]?.getAttribute('data-status') === 'active');
+check('the later step is still pending', planSteps()[1]?.getAttribute('data-status') === 'pending');
+
+planFrame([
+  { text: 'Read the opening paragraph', status: 'done', priority: 'high' },
+  { text: 'Tighten it', status: 'active' },
+]);
+await new Promise((resolve) => setTimeout(resolve, 50));
+flush();
+check('a second snapshot replaces rather than appends', planSteps().length === 2, planSteps().length);
+check('the finished step advanced to done', planSteps()[0]?.getAttribute('data-status') === 'done');
+check('the next step became active', planSteps()[1]?.getAttribute('data-status') === 'active');
+
 console.log('\n6. protocol-neutral chat');
 const { createChatStore } = await import('../src/nisli-ui/lib/chat.js');
 const { Chat } = await import('../src/nisli-ui/ui/chat/chat.js');

@@ -50,6 +50,8 @@ import {
   MAX_MISSED_COUNT,
   MAX_NAME_CHARS,
   MAX_ORIGIN_CHARS,
+  MAX_PLAN_STEPS,
+  MAX_PLAN_STEP_CHARS,
   MAX_REASON_CHARS,
   MAX_ROUTE_CHARS,
   MAX_TEXT_CHARS,
@@ -568,6 +570,35 @@ export const Thought = obj({
 });
 export type Thought = Infer<typeof Thought>;
 
+/**
+ * One step of the agent's plan for this prompt.
+ *
+ * `status` is the whole point: a plan the user watches change is progress
+ * reporting the agent already produces and we previously discarded.
+ */
+export const PlanStep = obj({
+  text: str(1, MAX_PLAN_STEP_CHARS),
+  status: en('pending', 'active', 'done'),
+  /** The runtime's own ranking, when it offers one. Display only. */
+  priority: opt(en('high', 'medium', 'low')),
+});
+export type PlanStep = Infer<typeof PlanStep>;
+
+/**
+ * The agent's current plan, as a whole.
+ *
+ * Snapshot semantics, not a delta: each frame REPLACES the previous plan for
+ * its prompt. Plans are rewritten as the agent discovers work, and a partial
+ * update whose base was dropped would render a plan that never existed.
+ */
+export const Plan = obj({
+  t: lit('plan'),
+  s: idField,
+  promptId: idField,
+  steps: arr(PlanStep, MAX_PLAN_STEPS),
+});
+export type Plan = Infer<typeof Plan>;
+
 export const Done = obj({
   t: lit('done'),
   s: idField,
@@ -670,6 +701,7 @@ export type SessionFrame =
   | PromptCancel
   | Delta
   | Thought
+  | Plan
   | Done
   | ToolCall
   | ToolResult
@@ -721,6 +753,7 @@ export const FRAME_SCHEMAS: { readonly [K in FrameType]: Schema<Frame> } = {
   'prompt.cancel': PromptCancel,
   'delta': Delta,
   'thought': Thought,
+  'plan': Plan,
   'done': Done,
   'tool.call': ToolCall,
   'tool.result': ToolResult,
@@ -728,28 +761,39 @@ export const FRAME_SCHEMAS: { readonly [K in FrameType]: Schema<Frame> } = {
   'approval.response': ApprovalResponse,
 };
 
-/** Frames the relay forwards rather than handles (the session vocabulary). */
-const SESSION_FRAME_TYPES = new Set<string>([
-  'session.open',
-  'session.opened',
-  'session.resume',
-  'session.resumed',
-  'session.detach',
-  'enc',
-  'session.denied',
-  'history.request',
-  'history',
-  'session.close',
-  'prompt',
-  'prompt.cancel',
-  'delta',
-  'thought',
-  'done',
-  'tool.call',
-  'tool.result',
-  'approval.request',
-  'approval.response',
-]);
+/**
+ * Frames the relay forwards rather than handles (the session vocabulary).
+ *
+ * Written as a total record over `SessionFrame['t']` for the same reason
+ * FRAME_SCHEMAS is: a hand-maintained list silently drifts. Adding a session
+ * frame and forgetting this set used to compile and then fail at runtime by
+ * dropping the frame on the floor at the wallet's router — a missing entry is
+ * now a type error instead.
+ */
+const SESSION_FRAME_MEMBERS = {
+  'session.open': true,
+  'session.opened': true,
+  'session.resume': true,
+  'session.resumed': true,
+  'session.detach': true,
+  'enc': true,
+  'session.denied': true,
+  'history.request': true,
+  'history': true,
+  'session.close': true,
+  'prompt': true,
+  'prompt.cancel': true,
+  'delta': true,
+  'thought': true,
+  'plan': true,
+  'done': true,
+  'tool.call': true,
+  'tool.result': true,
+  'approval.request': true,
+  'approval.response': true,
+} as const satisfies Record<SessionFrame['t'], true>;
+
+const SESSION_FRAME_TYPES = new Set<string>(Object.keys(SESSION_FRAME_MEMBERS));
 
 export function isSessionFrame(frame: Frame): frame is SessionFrame {
   return SESSION_FRAME_TYPES.has(frame.t);
@@ -799,6 +843,7 @@ export const CLIENT_SEALABLE = new Set<string>([
 export const AGENT_SEALABLE = new Set<string>([
   'delta',
   'thought',
+  'plan',
   'done',
   'tool.call',
   'approval.request',
