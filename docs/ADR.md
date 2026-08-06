@@ -623,6 +623,32 @@ TOFU: its ephemeral page identity first arrives through the relay. The
 six-word, 48-bit short authentication string only detects a MITM when the user
 actually compares both consent surfaces. It is not identity pinning.
 
+**Who is shown the fingerprint words follows who holds the ephemeral secret**,
+and the answer differs by tier — so this is stated once rather than left to be
+rediscovered. Words are only meaningful to a party that is actually an endpoint
+of the key exchange:
+
+- **Drop-in (connect.js, no extension).** The page mints the ephemeral keypair
+  and IS the client endpoint, so the page is one of the two consent surfaces
+  and MUST render `session.info.verify`. This is the entire MITM check that
+  tier has.
+- **Extension-mediated.** The extension is the endpoint and the page is not.
+  The page is told the session reattached — its in-flight prompt died and it
+  must re-read history — but never receives the words, which would verify
+  nothing for it and would supply the text needed to paint convincing fake
+  chrome. Same reasoning that already redacts the agent's real name toward a
+  page.
+
+The rule is therefore "words go to whoever holds the epk", never "pages do not
+get words". Unifying these two tiers in either direction silently breaks one of
+them: giving them to a mediated page hands a site free spoofing material, and
+withholding them from a drop-in page deletes that tier's only MITM check.
+
+A rekey changes the words. Any surface that shows them must show the CURRENT
+ones — a resume or reconnect mints fresh ephemeral keys, and a stale string
+left on screen is worse than none, because it invites a comparison that cannot
+succeed.
+
 ### What the relay can observe
 
 Content frames expose only `{t: "enc", s, n, c}` plus WebSocket/TLS metadata.
