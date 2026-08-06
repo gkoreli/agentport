@@ -16,7 +16,7 @@
  */
 
 import type { SiteTool } from '@agentport/client';
-import { createLogger, type ToolDefinition } from '@agentport/protocol';
+import { createLogger, type HistoryEntry, type ToolDefinition } from '@agentport/protocol';
 import type { ChatUpdate } from '../../../src/nisli-ui/ui/chat/index.js';
 import {
   ENVELOPE,
@@ -40,6 +40,9 @@ import { AGENTPORT_VERSION } from './version.js';
 
 const CHANNEL = mintId('ch_');
 const TOOL_CALL_TIMEOUT_MS = 30_000;
+/** The agent's own store answers this; a runtime that never answers must not
+ *  leave the reattached widget waiting on a promise nobody settles. */
+const WIDGET_HISTORY_TIMEOUT_MS = 20_000;
 const PAIR_CODE = /^[A-Z2-9]{4}-[A-Z2-9]{4}$/;
 const log = createLogger('extension.content');
 
@@ -92,10 +95,23 @@ function tell(message: ContentToWorker): void {
   }
 }
 
-function request<T>(build: (rid: string) => ContentToWorker): Promise<T> {
+function request<T>(build: (rid: string) => ContentToWorker, timeoutMs?: number): Promise<T> {
   const rid = mintId('q_');
   return new Promise<T>((resolve, reject) => {
-    waiters.set(rid, { resolve: resolve as (value: unknown) => void, reject });
+    const timer = timeoutMs === undefined ? undefined : setTimeout(() => {
+      if (!waiters.delete(rid)) return;
+      reject(new Error('the wallet did not answer in time'));
+    }, timeoutMs);
+    waiters.set(rid, {
+      resolve: (value: unknown) => {
+        clearTimeout(timer);
+        (resolve as (value: unknown) => void)(value);
+      },
+      reject: (err: Error) => {
+        clearTimeout(timer);
+        reject(err);
+      },
+    });
     tell(build(rid));
   });
 }
@@ -385,6 +401,15 @@ async function runToolCall(call: Extract<WorkerToContent, { t: 'tool.call' }>): 
 //
 // Either way the grant goes through the same consent screen and the same
 // per-call approvals as a site-declared grant.
+//
+// A widget attachment outlives a same-origin navigation: the next document
+// asks the worker to hand it back (`reclaimWidget`, at document_start) and
+// rehydrates the transcript from the agent's own store. Only the generic
+// toolset can do that — a grant harvested from a document's own WebMCP
+// registrations belongs to THAT document, so the worker refuses to park it.
+// Leaving the origin is not a navigation the attachment follows at all: the
+// worker closes it when this tab's next top-level document announces a
+// different origin.
 // ---------------------------------------------------------------------------
 
 interface OverlayBridge {
@@ -403,8 +428,19 @@ let widgetRef: string | undefined;
 let widgetPromptId: string | undefined;
 let widgetAttaching = false;
 let widgetToolSeq = 0;
+/** Set as soon as the agent says anything to THIS document. A history replay
+ *  must never overwrite a transcript the user is already reading. */
+let widgetLiveSinceBind = false;
 const widgetTextMessages = new Set<string>();
 const widgetReasoningMessages = new Set<string>();
+
+interface WidgetAttachment {
+  ref: string;
+  info: { agentName: string };
+  /** Turns the agent is still working on, so a document that arrives mid-turn
+   *  renders a running turn instead of an idle composer. */
+  activePrompts?: string[];
+}
 
 function displayJson(value: unknown): string {
   try {
@@ -547,6 +583,33 @@ function overlay(): OverlayBridge {
   return overlayInstance;
 }
 
+/** What the widget asks for, on a fresh attach and on a reclaim alike. The
+ *  `source` is how the worker knows whether this grant can outlive the
+ *  document that declared it. */
+function widgetConnectRequest(tools: ToolDefinition[], source: 'webmcp' | 'page-dom'): PageConnectRequest {
+  return {
+    name: document.title || location.hostname,
+    route: location.pathname,
+    context: { url: location.href, title: document.title, source },
+    tools,
+    alwaysAsk: [],
+  };
+}
+
+function bindWidget(ref: string, routes: Map<string, ToolRoute>): void {
+  records.set(ref, { ref, owner: 'widget', routes });
+  widgetRef = ref;
+  widgetAttaching = false;
+  widgetLiveSinceBind = false;
+}
+
+function showWidgetAttached(ui: OverlayBridge, agentName: string): void {
+  ui.setState('attached', agentName);
+  // A turn was already running when this document arrived; render it as such
+  // so the composer offers Stop instead of pretending the agent is idle.
+  if (widgetPromptId) ui.apply({ type: 'run.start' });
+}
+
 async function attachWidget(): Promise<void> {
   const ui = overlay();
   if (widgetRef || widgetAttaching) return;
@@ -560,17 +623,11 @@ async function attachWidget(): Promise<void> {
     : local.map(({ handler: _handler, ...definition }) => definition);
 
   try {
-    const value = await request<{ ref: string; info: { agentName: string } }>((rid) => ({
+    const value = await request<WidgetAttachment>((rid) => ({
       t: 'connect',
       rid,
       from: 'widget',
-      request: {
-        name: document.title || location.hostname,
-        route: location.pathname,
-        context: { url: location.href, title: document.title, source: usingWebMcp ? 'webmcp' : 'page-dom' },
-        tools: definitions,
-        alwaysAsk: [],
-      },
+      request: widgetConnectRequest(definitions, usingWebMcp ? 'webmcp' : 'page-dom'),
     }));
 
     if (!widgetSurfaceAlive) {
@@ -583,13 +640,11 @@ async function attachWidget(): Promise<void> {
     if (usingWebMcp) for (const tool of webmcpTools) routes.set(tool.name, 'page');
     else for (const tool of local) routes.set(tool.name, tool.handler);
 
-    records.set(value.ref, { ref: value.ref, owner: 'widget', routes });
-    widgetRef = value.ref;
-    widgetAttaching = false;
-    ui.setState('attached', value.info.agentName);
+    bindWidget(value.ref, routes);
+    showWidgetAttached(ui, value.info.agentName);
     ui.notice(
       usingWebMcp
-        ? `Attached with ${webmcpTools.length} tool(s) this site published via WebMCP.`
+        ? `Attached with ${webmcpTools.length} tool(s) this site published via WebMCP. This grant ends when you leave this page.`
         : `Attached with the generic page toolset. Reads are free; anything that changes the page asks first.`,
     );
   } catch (err) {
@@ -598,6 +653,105 @@ async function attachWidget(): Promise<void> {
     ui.setState('idle');
     ui.notice(err instanceof Error ? err.message : String(err));
   }
+}
+
+function documentReady(): Promise<void> {
+  if (document.readyState !== 'loading') return Promise.resolve();
+  return new Promise<void>((resolve) => {
+    document.addEventListener('DOMContentLoaded', () => resolve(), { once: true });
+  });
+}
+
+/**
+ * Ask the worker whether this tab already has an attachment on this origin.
+ *
+ * Runs at document_start on every top-level page, before the overlay exists,
+ * for two reasons: a tool call the agent issued just before the navigation is
+ * parked in the worker waiting for a document to bind, and opening this port
+ * is also how the worker learns which origin the tab is on now — which is what
+ * makes a cross-origin navigation detach immediately instead of after the
+ * orphan grace.
+ */
+async function reclaimWidget(): Promise<void> {
+  if (widgetRef || widgetAttaching) return;
+  widgetAttaching = true;
+  const local = genericPageTools();
+  let value: WidgetAttachment | null;
+  try {
+    value = await request<WidgetAttachment | null>((rid) => ({
+      t: 'resume',
+      rid,
+      from: 'widget',
+      request: widgetConnectRequest(local.map(({ handler: _handler, ...definition }) => definition), 'page-dom'),
+    }));
+  } catch (err) {
+    widgetAttaching = false;
+    log.warn('could not ask the wallet whether this tab has an attachment to reclaim', {
+      err,
+      data: { origin: location.origin },
+    });
+    return;
+  }
+  if (!value) {
+    widgetAttaching = false;
+    return;
+  }
+
+  // Route bindings first: the parked tool call is answered from here, and it
+  // must not wait for the DOM or the overlay iframe.
+  bindWidget(value.ref, new Map(local.map((tool) => [tool.name, tool.handler])));
+  const active = value.activePrompts?.[0];
+  if (typeof active === 'string') widgetPromptId = active;
+
+  await documentReady();
+  if (widgetRef !== value.ref) return; // detached or closed while we waited
+  const ui = overlay();
+  ui.show();
+  showWidgetAttached(ui, value.info.agentName);
+  ui.notice('Reattached after navigation — same agent, same session.');
+  await rehydrateWidget(ui, value.ref, value.info.agentName);
+}
+
+/** The transcript lives in the agent's own store, never here: this document
+ *  kept nothing across the navigation, so it asks the agent for it. */
+async function rehydrateWidget(ui: OverlayBridge, ref: string, agentName: string): Promise<void> {
+  let entries: HistoryEntry[];
+  try {
+    entries = await request<HistoryEntry[]>((rid) => ({ t: 'history', rid, ref }), WIDGET_HISTORY_TIMEOUT_MS);
+  } catch (err) {
+    log.warn('could not restore the conversation from the agent', { err, data: { origin: location.origin } });
+    ui.notice(`Could not restore the earlier conversation: ${err instanceof Error ? err.message : String(err)}`);
+    return;
+  }
+  if (widgetRef !== ref || !Array.isArray(entries) || entries.length === 0) return;
+  if (widgetLiveSinceBind) {
+    // The agent spoke while this was in flight. Replaying now would delete the
+    // words the user is reading, so say where the rest is instead.
+    ui.notice(`${entries.length} earlier message(s) remain in your agent's own history.`);
+    return;
+  }
+  ui.reset();
+  for (const entry of entries) {
+    const id = `history-${widgetToolSeq++}`;
+    if (entry.role === 'user') {
+      ui.addUserMessage(entry.text);
+    } else if (entry.role === 'agent') {
+      ui.apply({ type: 'message.start', id, role: 'assistant' });
+      ui.apply({ type: 'message.delta', id, content: { type: 'text', text: entry.text } });
+      ui.apply({ type: 'message.end', id });
+    } else if (entry.role === 'thought') {
+      ui.apply({ type: 'reasoning.start', id });
+      ui.apply({ type: 'reasoning.delta', id, content: { type: 'text', text: entry.text } });
+      ui.apply({ type: 'reasoning.end', id });
+    } else {
+      // Tool and approval rows arrive as flat text.
+      ui.apply({ type: 'tool.start', id, name: entry.text });
+      ui.apply({ type: 'tool.end', id, status: 'complete' });
+    }
+  }
+  // `chat.reset` also clears the phase and the notices, so restate both.
+  showWidgetAttached(ui, agentName);
+  ui.notice(`Reattached after navigation — ${entries.length} message(s) restored from your agent.`);
 }
 
 function sendFromWidget(text: string): boolean {
@@ -640,6 +794,7 @@ function onWidgetEvent(event: string, payload: unknown): void {
   const ui = overlayInstance;
   if (!ui) return;
   if (!isRecord(payload)) return;
+  widgetLiveSinceBind = true;
   const promptId = typeof payload['promptId'] === 'string' ? payload['promptId'] : undefined;
   if (event === 'delta' && promptId) {
     if (!widgetTextMessages.has(promptId)) {
@@ -715,8 +870,19 @@ handlePairingLink();
 
 // Only the top frame gets a widget: a floating panel per iframe would be noise,
 // and an iframe is not where a user expects to grant page-wide capabilities.
-if (window.top === window && location.pathname !== '/pair') {
-  const start = () => overlay().show();
-  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, { once: true });
-  else start();
+if (window.top === window) {
+  // Opening the port IS the announcement: the worker reads this document's
+  // origin and tab from the browser's own stamp on it, and closes any
+  // attachment the tab left behind on another origin. Subframes stay silent —
+  // a cross-origin iframe must not be able to detach the tab's session.
+  workerPort();
+  if (location.pathname !== '/pair') {
+    // Before anything is rendered, because a tool call the agent issued just
+    // before the navigation is already parked in the worker waiting for a
+    // document to bind. Failures inside are logged and surfaced there.
+    void reclaimWidget();
+    const start = () => overlay().show();
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, { once: true });
+    else start();
+  }
 }

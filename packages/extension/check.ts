@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { mintId, readPageOutbound } from './src/bridge.js';
+import { leftBehindByNavigation, mayReclaim, reclaimKeyFor } from './src/lifecycle.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -20,6 +21,87 @@ assert.equal(
 assert.equal(readPageOutbound({ t: 'prompt.cancel', ref: 's_test', promptId: 'predictable' }), undefined);
 
 console.log('extension boundary check passed');
+
+// --- session lifecycle -----------------------------------------------------
+//
+// One lifecycle for both surfaces, keyed by an identity built only from what
+// the browser stamped on the connecting port. These assertions are the consent
+// boundary: a reclaim that crossed an origin, or that keyed on a page-supplied
+// string, would pass none of them.
+
+const widgetOn = (origin: string, title: string, tabId: number | undefined, source: unknown) =>
+  reclaimKeyFor({ from: 'widget', origin, name: title, tabId, toolSource: source });
+
+// The widget's surface name is `document.title` and changes on nearly every
+// navigation; the key must not move with it.
+assert.equal(
+  widgetOn('https://shop.example', 'Cart — 2 items', 7, 'page-dom'),
+  widgetOn('https://shop.example', 'Checkout | Shop', 7, 'page-dom'),
+);
+// ...but it must move with the origin and with the tab.
+assert.notEqual(
+  widgetOn('https://shop.example', 'Cart', 7, 'page-dom'),
+  widgetOn('https://evil.example', 'Cart', 7, 'page-dom'),
+);
+assert.notEqual(
+  widgetOn('https://shop.example', 'Cart', 7, 'page-dom'),
+  widgetOn('https://shop.example', 'Cart', 8, 'page-dom'),
+);
+// A grant harvested from a document's own WebMCP registrations belongs to that
+// document: it must never be parked for the next one.
+assert.equal(widgetOn('https://shop.example', 'Cart', 7, 'webmcp'), null);
+assert.equal(widgetOn('https://shop.example', 'Cart', 7, undefined), null);
+// No tab to key on, and origins no human could have consented to.
+assert.equal(widgetOn('https://shop.example', 'Cart', undefined, 'page-dom'), null);
+for (const origin of ['null', 'unknown://', 'https://shop.example/cart', 'chrome-extension://abc', '']) {
+  assert.equal(widgetOn(origin, 'Cart', 7, 'page-dom'), null, `reclaimable on degraded origin ${origin}`);
+  assert.equal(
+    reclaimKeyFor({ from: 'page', origin, name: 'Inkwell', tabId: 7, toolSource: undefined }),
+    null,
+    `reclaimable on degraded origin ${origin}`,
+  );
+}
+// Two page surfaces on one origin stay distinct.
+const pageKey = (origin: string, name: string) =>
+  reclaimKeyFor({ from: 'page', origin, name, tabId: 7, toolSource: undefined });
+assert.notEqual(pageKey('https://inkwell.example', 'Editor'), pageKey('https://inkwell.example', 'Inbox'));
+assert.equal(pageKey('https://inkwell.example', 'Editor'), pageKey('https://inkwell.example', 'Editor'));
+
+const key = widgetOn('https://shop.example', 'Cart', 7, 'page-dom');
+assert.ok(key);
+const live = { reclaimKey: key, origin: 'https://shop.example', closed: false, expiresAt: 2_000 };
+assert.equal(mayReclaim(live, { key, origin: 'https://shop.example', now: 1_000 }), true);
+// The key already embeds the origin; the origin is still checked on its own,
+// so a mismatched pair can never be reclaimed.
+assert.equal(mayReclaim(live, { key, origin: 'https://evil.example', now: 1_000 }), false);
+assert.equal(mayReclaim({ ...live, origin: 'https://evil.example' }, { key, origin: 'https://shop.example', now: 1_000 }), false);
+assert.equal(mayReclaim(live, { key: null, origin: 'https://shop.example', now: 1_000 }), false);
+assert.equal(mayReclaim({ ...live, reclaimKey: null }, { key, origin: 'https://shop.example', now: 1_000 }), false);
+// Reclaim never revives a closed session nor extends a lapsed grant.
+assert.equal(mayReclaim({ ...live, closed: true }, { key, origin: 'https://shop.example', now: 1_000 }), false);
+assert.equal(mayReclaim(live, { key, origin: 'https://shop.example', now: 2_000 }), false);
+
+// Leaving the origin detaches; staying on it does not. Only a top-level
+// document may evict, and only top-level entries are evicted — a cross-origin
+// subframe must not be able to detach the tab's session.
+const top = (origin: string, tabId: number) => ({ origin, tabId, frameId: 0 });
+assert.equal(leftBehindByNavigation(top('https://shop.example', 7), top('https://evil.example', 7)), true);
+assert.equal(leftBehindByNavigation(top('https://shop.example', 7), top('https://shop.example', 7)), false);
+assert.equal(leftBehindByNavigation(top('https://shop.example', 7), top('https://evil.example', 8)), false);
+assert.equal(
+  leftBehindByNavigation(top('https://shop.example', 7), { origin: 'https://ads.example', tabId: 7, frameId: 3 }),
+  false,
+);
+assert.equal(
+  leftBehindByNavigation({ origin: 'https://ads.example', tabId: 7, frameId: 3 }, top('https://shop.example', 7)),
+  false,
+);
+assert.equal(
+  leftBehindByNavigation(top('https://shop.example', 7), { origin: 'https://evil.example', tabId: undefined, frameId: 0 }),
+  false,
+);
+
+console.log('extension session lifecycle check passed');
 
 const rootPackage = JSON.parse(await readFile(join(here, '../../package.json'), 'utf8')) as { version: string };
 const inpage = await readFile(join(here, 'dist/inpage.js'), 'utf8');
