@@ -365,6 +365,20 @@ export class AgentWallet extends Emitter<WalletEvents> {
     return frame.agents;
   }
 
+  /**
+   * "This website may no longer use my agent" (ADR-022).
+   *
+   * Sendable only from the key the agent's cert names as its owner — the
+   * relay refuses it from anyone else, and the daemon checks again. Returns
+   * how many live attachments ended; the guarantee is the tombstone the
+   * daemon recorded, not that number.
+   */
+  async revoke(agent: Hex, origin: string): Promise<number> {
+    this.#sendRaw({ t: 'revoke', agent, origin });
+    const frame = await this.#await('revoked');
+    return frame.sessions;
+  }
+
   // --- pairing -------------------------------------------------------------
 
   /** Step 1: look up a code the user typed or opened. Nothing is signed yet. */

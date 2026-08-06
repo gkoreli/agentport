@@ -8,7 +8,8 @@
     ".": "./src/index.ts",
     "./cli": "./src/cli.ts",
     "./connect-cli": "./src/connect-cli.ts",
-    "./pairing-control": "./src/pairing-control.ts"
+    "./pairing-control": "./src/pairing-control.ts",
+    "./revocations": "./src/revocations.ts"
   },
   "bin": {
     "agentport-daemon": "./src/cli.ts"

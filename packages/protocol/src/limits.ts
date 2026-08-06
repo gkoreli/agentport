@@ -158,6 +158,33 @@ export const MAX_PLAN_STEPS = 64;
  */
 export const MAX_PLAN_STEP_CHARS = MAX_DESCRIPTION_CHARS;
 
+/**
+ * How long a SessionDelegation may live, from `issuedAt` to `expiresAt`
+ * (ADR-022 R3). Two jobs, both load-bearing.
+ *
+ * It bounds the blast radius of a stolen delegation — an approval must not be
+ * able to outlive the browser session that made it, and nothing else stops a
+ * wallet signing one that expires in a decade.
+ *
+ * And it is what makes the daemon's revocation store bounded *by
+ * construction*: a per-origin tombstone can be dropped once
+ * `revokedAt + MAX_DELEGATION_LIFETIME_MS` is past, because after that no
+ * delegation issued before the revocation can still be live. No cap, no
+ * eviction policy, no decision about what to do when the store fills.
+ *
+ * 24h leaves room above the 8h the hosted wallet issues today without making
+ * the tombstone window long enough to matter.
+ */
+export const MAX_DELEGATION_LIFETIME_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Ceiling on the closed-session count a `revoked` ack reports. The number is
+ * feedback for the user ("ended 2 attachments"), never an authority, so the
+ * daemon clamps rather than failing — but an unbounded integer on the wire is
+ * a schema hole regardless of what the value means.
+ */
+export const MAX_SESSIONS_REPORTED = 4096;
+
 /** Directory listing size; a wallet with more agents than this is malformed. */
 export const MAX_AGENTS_LISTED = 256;
 

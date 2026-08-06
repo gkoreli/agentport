@@ -123,6 +123,7 @@ export function delegationBody(delegation: Omit<SessionDelegation, 'sig'>): stri
     agent: delegation.agent,
     origin: delegation.origin,
     grantHash: delegation.grantHash,
+    issuedAt: delegation.issuedAt,
     expiresAt: delegation.expiresAt,
   })}`;
 }

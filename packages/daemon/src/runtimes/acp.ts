@@ -268,8 +268,16 @@ export class AcpRuntime implements AgentRuntime {
   async closeSession(): Promise<void> {
     const child = this.#child;
     this.#child = undefined;
-    this.#acpConnection?.close(new Error('AgentPort session closed'));
-    if (this.#bridgeSessionId) await this.#options.bridge.unregister(this.#bridgeSessionId);
+    // Withdrawing the bridge is the one step that MUST happen: it is a live
+    // loopback endpoint holding a bearer token for the session's tools, and
+    // ADR-019 Gate C requires it to be gone on close. It used to sit after a
+    // connection close that can throw, which would have left the registration
+    // — and its token — routable for the rest of the process's life.
+    try {
+      this.#acpConnection?.close(new Error('AgentPort session closed'));
+    } finally {
+      if (this.#bridgeSessionId) await this.#options.bridge.unregister(this.#bridgeSessionId);
+    }
     if (child) await terminateProcessTree(child);
     this.#bridgeSessionId = undefined;
     this.#acpConnection = undefined;

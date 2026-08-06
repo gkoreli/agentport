@@ -48,9 +48,25 @@ if (command === 'connect') {
   // Internal systemd entry point. Kept out of user-facing help.
   defaults();
   await import('@agentport/daemon/cli');
+} else if (command === 'status') {
+  process.exit((await import('./revoke.js')).status());
+} else if (command === 'revoke') {
+  const origin = process.argv[3];
+  if (!origin) {
+    console.error('  usage: agentport revoke <origin>   e.g. agentport revoke https://example.com');
+    process.exit(1);
+  }
+  process.exit((await import('./revoke.js')).revoke(origin));
+} else if (command === 'unpair') {
+  process.exit(await (await import('./revoke.js')).unpair());
 } else if (command === '--version' || command === '-v') {
   console.log(CLI_VERSION);
 } else {
-  console.log(`AgentPort ${CLI_VERSION}\n\n  npx @gkoreli/agentport\n\nStarts your agent, or pairs the always-on agent already running on this machine.`);
+  console.log(`AgentPort ${CLI_VERSION}
+
+  npx @gkoreli/agentport            start your agent, or pair the one already running
+  npx @gkoreli/agentport status     who owns this agent, and what you have cut off
+  npx @gkoreli/agentport revoke URL stop an origin using this agent
+  npx @gkoreli/agentport unpair     this agent belongs to nobody until you pair it again`);
   process.exit(command === 'help' || command === '--help' ? 0 : 1);
 }

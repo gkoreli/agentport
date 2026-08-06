@@ -908,3 +908,49 @@ page calls and the runtime's OWN tool-permission requests share one untyped
 boolean decider with no provenance field, so a remembered page policy could
 satisfy an approval that was never about the page. Approvals need an
 extension-trusted authority domain before anything can be remembered at all.
+
+---
+
+## ADR-022: Revocation — taking it back — accepted (shipped 2026-08-06)
+
+Full record: [`ADR-022-revocation.md`](ADR-022-revocation.md).
+
+The north star's fourth requirement is that ownership be provable *and
+revocable*. The first half was built; the second was a named blocking gap in
+ADR-018 and an open problem in ADR-014. Three documents asked for it in three
+different shapes — Gate B §5 at the agent level, the consent review at the
+origin level, the prior-art synthesis first in the build order — and the word
+"revoke" was doing four jobs with four blast radii.
+
+The decision: **the revocation object is the `SessionDelegation`, addressed by
+its origin**, because that is the only protocol object carrying website-scoped
+authority. A revocation is a **tombstone, not a denylist** — `{origin, at}`
+refuses every delegation that origin holds which was issued at or before `at`,
+and admits one issued after. Withdrawing is complete; approving again needs no
+un-revoke verb; and because a delegation's lifetime is now bounded
+(`MAX_DELEGATION_LIFETIME_MS`, with `issuedAt` mandatory and signed), a
+tombstone can be dropped once nothing it could refuse is still alive. The
+store is finite by construction rather than by a cap.
+
+Two things that landed the same day changed what it had to mean. Automatic
+client redial (`c522087`) means a closed socket is something the client heals
+from, so revocation makes a session **unresumable at the daemon**, and the
+acceptance check drives the reconnect path rather than the socket. And the
+grant-binding fix means the delegation now commits to the grant, so retaining
+it on the session is what lets a resume — which presents only a bearer token —
+be re-judged against an origin the user has since cut off.
+
+Two defects were closed on the way, both found by mapping the design onto real
+code. Absent ownership was **permission**, not refusal: `cert && client !==
+cert.user` meant an unbound daemon accepted whoever the relay stamped, so
+`unpair` would have opened the daemon rather than closed it. And a
+`pair.bound` was accepted unconditionally, so anything that could make the
+daemon begin pairing — its own control file, reachable by the uncontained
+agent runtime — could replace a live owner's cert with its own. Reverting that
+guard makes the e2e check report "the thief owns it now".
+
+What it does not do: no remembered-consent policy store, no audit view, no
+per-action-class revocation (all the extension's lane); no multi-relay fan-out
+(a cert names no relay); and no containment of the local CLI seam, which stays
+reachable by anything running as the user until Gate C. Nothing reachable
+there grants — every verb only narrows what the agent accepts.

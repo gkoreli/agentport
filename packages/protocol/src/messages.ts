@@ -40,6 +40,7 @@ import {
   ID_PATTERN,
   MAX_AGENTS_LISTED,
   MAX_CIPHERTEXT_BYTES,
+  MAX_DELEGATION_LIFETIME_MS,
   MAX_DESCRIPTION_CHARS,
   MAX_ERROR_CHARS,
   MAX_GRANT_CHARS,
@@ -54,6 +55,7 @@ import {
   MAX_PLAN_STEP_CHARS,
   MAX_REASON_CHARS,
   MAX_ROUTE_CHARS,
+  MAX_SESSIONS_REPORTED,
   MAX_TEXT_CHARS,
   MAX_TOOLS_PER_GRANT,
   TIMESTAMP_MAX,
@@ -140,12 +142,30 @@ export const SessionDelegation = obj({
    * approval can never be replayed under a different toolset.
    */
   grantHash: hex(32),
+  /**
+   * Unix ms when the user signed this. Mandatory, and the thing revocation
+   * compares against: a per-origin tombstone refuses every delegation issued
+   * at or before the moment of revocation, and admits ones issued after it,
+   * so approving again works without an un-revoke verb (ADR-022 R2).
+   */
+  issuedAt: timestamp,
   /** Unix ms. */
   expiresAt: timestamp,
   /** Signature by the target agent's owner over the canonical delegation body. */
   sig: sigHex,
 });
 export type SessionDelegation = Infer<typeof SessionDelegation>;
+
+/**
+ * A delegation's lifetime is bounded (ADR-022 R3), which is both what stops
+ * an approval outliving the browser session that made it and what keeps the
+ * daemon's revocation store finite. Checked wherever a delegation is judged —
+ * relay and daemon both — since neither may trust the other to have done it.
+ */
+export function delegationLifetimeOk(delegation: SessionDelegation): boolean {
+  const lifetime = delegation.expiresAt - delegation.issuedAt;
+  return lifetime > 0 && lifetime <= MAX_DELEGATION_LIFETIME_MS;
+}
 
 export const AgentSummary = obj({
   agent: pubkey,
@@ -396,6 +416,42 @@ export const AgentsPresence = obj({
   online: bool(),
 });
 export type AgentsPresence = Infer<typeof AgentsPresence>;
+
+/**
+ * "This website may no longer use my agent" (ADR-022).
+ *
+ * Routed to the named agent, and only from a connection presenting the key
+ * that agent's cert names as its owner — never from a delegated page key. A
+ * page must not be able to withdraw authority: not its own (it already has
+ * `session.close`) and emphatically not another origin's.
+ *
+ * The relay holds nothing; it forwards this and correlates the answer for the
+ * lifetime of the exchange. What it learns — that this user revoked this
+ * origin on this agent — it already learns from any `session.open` for the
+ * same origin, whose `surface.origin` is cleartext by design (ADR-003).
+ */
+export const Revoke = obj({
+  t: lit('revoke'),
+  agent: pubkey,
+  /** Every delegation this origin holds, issued before now, stops working. */
+  origin: str(1, MAX_ORIGIN_CHARS),
+  /**
+   * Stamped by the relay from the authenticated socket; ignored if a client
+   * sends it. The daemon re-checks it against its own cert, so a lying relay
+   * cannot turn someone else's request into a revocation (invariant 6).
+   */
+  client: opt(pubkey),
+});
+export type Revoke = Infer<typeof Revoke>;
+
+export const Revoked = obj({
+  t: lit('revoked'),
+  agent: pubkey,
+  origin: str(1, MAX_ORIGIN_CHARS),
+  /** Live attachments the agent ended. Feedback for the user, not authority. */
+  sessions: int(0, MAX_SESSIONS_REPORTED),
+});
+export type Revoked = Infer<typeof Revoked>;
 
 // ---------------------------------------------------------------------------
 // Session frames (relayed)
@@ -691,7 +747,9 @@ export type ControlFrame =
   | ConnectDenied
   | AgentsList
   | Agents
-  | AgentsPresence;
+  | AgentsPresence
+  | Revoke
+  | Revoked;
 
 export type SessionFrame =
   | SessionOpen
@@ -746,6 +804,8 @@ export const FRAME_SCHEMAS: { readonly [K in FrameType]: Schema<Frame> } = {
   'agents.list': AgentsList,
   'agents': Agents,
   'agents.presence': AgentsPresence,
+  'revoke': Revoke,
+  'revoked': Revoked,
   'session.open': SessionOpen,
   'session.opened': SessionOpened,
   'session.resume': SessionResume,

@@ -20,7 +20,15 @@ import {
   type AgentSession,
   type AgentSessionHandle,
 } from '@agentport/client';
-import { generateKeyPair, hashGrant, randomId, toErr, type CapabilityGrant } from '@agentport/protocol';
+import {
+  delegationLifetimeOk,
+  generateKeyPair,
+  hashGrant,
+  randomId,
+  toErr,
+  type CapabilityGrant,
+  type SessionDelegation,
+} from '@agentport/protocol';
 import { openConnectModal } from './modal.js';
 import { createWebMcpHarvester } from './webmcp.js';
 import { siteLogger } from './observe.js';
@@ -239,6 +247,10 @@ async function requestHostedDelegation(
         // The wallet must have signed the grant we sent — a mismatch here
         // would otherwise only surface as an opaque daemon denial later.
         result.delegation.grantHash !== hashGrant(grant) ||
+        // Checked here so a wallet that mints an over-long or backdated
+        // authority fails visibly on this page instead of as an opaque
+        // daemon denial three hops later.
+        !delegationLifetimeOk(result.delegation as SessionDelegation) ||
         typeof result.delegation.sig !== 'string' ||
         !/^[0-9a-f]{128}$/.test(result.delegation.sig) ||
         typeof result.delegation.expiresAt !== 'number' ||

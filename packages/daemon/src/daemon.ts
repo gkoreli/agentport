@@ -9,6 +9,7 @@ import {
   MAX_PLAN_STEPS,
   MAX_REASON_CHARS,
   MAX_SEALED_PLAINTEXT_BYTES,
+  MAX_SESSIONS_REPORTED,
   MAX_TEXT_CHARS,
   PROTOCOL_VERSION,
   SEALED_TYPES,
@@ -22,6 +23,7 @@ import {
   decodeFrame,
   deriveSealChannel,
   encodeFrame,
+  delegationLifetimeOk,
   fingerprintWords,
   generateSealKeyPair,
   hashGrant,
@@ -37,6 +39,7 @@ import {
   toErr,
   toHex,
   verifyEpk,
+  verifyCert,
   verifyDelegation,
   type AgentCert,
   type CapabilityGrant,
@@ -47,18 +50,26 @@ import {
   type LogSink,
   type SessionFrame,
   type SealChannel,
+  type SessionDelegation,
   type SurfaceDescriptor,
   type ToolDefinition,
 } from '@agentport/protocol';
 import type { AgentIdentity } from './identity.js';
+import { isRevoked, memoryRevocations, type Revocation, type RevocationStore } from './revocations.js';
 import type { AgentRuntime, TurnContext } from './runtime.js';
 
 interface SessionState {
   id: string;
   /** Came from a drop-in widget, so approvals belong here, not in the page. */
   viaConnect: boolean;
-  /** A hosted wallet authorised this page identity for the attachment. */
-  delegated: boolean;
+  /**
+   * The hosted wallet's authority for this page identity, RETAINED rather
+   * than collapsed to a boolean: resume must be able to re-judge it against
+   * the revocation tombstones, and a resume presents only a bearer token, so
+   * the delegation is the only thing left tying the attachment to an origin
+   * the user may since have cut off (ADR-022 R4).
+   */
+  delegation?: SessionDelegation;
   surface: SurfaceDescriptor;
   grant: CapabilityGrant;
   tools: ToolDefinition[];
@@ -107,6 +118,18 @@ export interface DaemonOptions {
   /** Called once the user has signed a cert for this agent. */
   onBound?: (cert: AgentCert) => void;
   /**
+   * The user unpaired: persist the identity WITHOUT its cert. The mirror of
+   * `onBound`, and the reason the daemon still never learns where its own
+   * identity file lives.
+   */
+  onUnbound?: () => void;
+  /**
+   * Durable "this origin may no longer use my agent" tombstones (ADR-022).
+   * In-memory by default so an embedder or a test needs no filesystem; the
+   * CLI passes `fileRevocations` beside the identity.
+   */
+  revocations?: RevocationStore;
+  /**
    * A drop-in widget somewhere is asking this agent for a session. This is the
    * consent moment for the connect.js flow, and it happens *here* — where the
    * key is — rather than in a browser the site controls.
@@ -133,6 +156,10 @@ export interface DaemonOptions {
 type DaemonEvents = {
   ready: { bound: boolean };
   bound: AgentCert;
+  /** The user withdrew an origin's authority; `sessions` were ended. */
+  revoked: { origin: string; sessions: number };
+  /** The agent is no longer owned by anyone and accepts nothing. */
+  unbound: undefined;
   session: string;
   closed: undefined;
 };
@@ -149,11 +176,13 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
   #stopped = false;
   #retryMs = 1000;
   #heartbeat: ReturnType<typeof setInterval> | undefined;
+  #revocations: RevocationStore;
 
   constructor(options: DaemonOptions) {
     super();
     this.#options = options;
     this.#log = createLogger('daemon', { sink: options.sink });
+    this.#revocations = options.revocations ?? memoryRevocations();
   }
 
   get identity(): AgentIdentity {
@@ -280,6 +309,92 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     this.#send({ t: 'pair.begin' });
   }
 
+  /**
+   * What is attached right now, for `agentport status` and the wallet's
+   * "origins holding your agent" view. Deliberately a projection, not the
+   * live state: a caller gets no handle on a session, and no transcript.
+   */
+  attachments(): Attachment[] {
+    return [...this.#sessions.values()].map((session) => ({
+      id: session.id,
+      origin: session.surface.origin,
+      surface: session.surface.name,
+      tools: session.grant.tools.length,
+      grantExpiresAt: session.grant.expiresAt,
+      delegated: session.delegation !== undefined,
+      detachedAt: session.detachedAt,
+    }));
+  }
+
+  /** Tombstones in force. Same projection reasoning as `attachments()`. */
+  revocations(): readonly Revocation[] {
+    return this.#revocations.list();
+  }
+
+  /**
+   * Close every attachment a tombstone already covers.
+   *
+   * `agentport revoke` writes the tombstone durably and does not talk to this
+   * process — the store re-reads the file, so open and resume are refused
+   * immediately. But a session that is already live is not judged again until
+   * it resumes, and ADR-022 R11 requires it to end. The daemon's existing
+   * control poll calls this; it is idempotent, so a repeat costs nothing.
+   */
+  async enforceRevocations(): Promise<number> {
+    const revocations = this.#revocations.list();
+    if (revocations.length === 0) return 0;
+    const doomed = [...this.#sessions.values()].filter(
+      (session) => session.delegation && isRevoked(revocations, session.delegation),
+    );
+    for (const session of doomed) await this.#closeSession(session, 'revoked');
+    if (doomed.length > 0) this.#log.info('closed revoked attachments', { data: { sessions: doomed.length } });
+    return doomed.length;
+  }
+
+  /**
+   * "This website may no longer use my agent" (ADR-022 R1/R2).
+   *
+   * Records the tombstone FIRST, then tears down. The order is the whole
+   * point: between closing a session and writing the record there is a window
+   * in which the page — which redials automatically — could resume or reopen
+   * on the delegation it still holds. Recording first closes it.
+   *
+   * Returns how many live attachments ended. That number is feedback, never
+   * authority: the guarantee is the tombstone, not the count.
+   */
+  async revoke(origin: string): Promise<number> {
+    const at = Date.now();
+    this.#revocations.add({ origin, at });
+
+    const doomed = [...this.#sessions.values()].filter((session) => session.surface.origin === origin);
+    for (const session of doomed) await this.#closeSession(session, 'revoked');
+
+    this.#log.info('origin revoked', { data: { sessions: doomed.length } });
+    this.emit('revoked', { origin, sessions: doomed.length });
+    return doomed.length;
+  }
+
+  /**
+   * The terminal verb (ADR-022 R6): this agent is no longer owned by anyone.
+   *
+   * Drops the cert, ends every attachment, and redials so the relay stops
+   * announcing the agent and admits nobody toward it. Safe only because an
+   * absent cert now means refuse-everything (R5) — on the old code path,
+   * unpairing would have OPENED the daemon rather than closing it.
+   */
+  async unpair(): Promise<void> {
+    delete this.#options.identity.cert;
+    this.#options.onUnbound?.();
+
+    for (const session of [...this.#sessions.values()]) await this.#closeSession(session, 'revoked');
+
+    this.#log.info('agent unpaired');
+    this.emit('unbound', undefined);
+    // Re-identify without the cert. The socket close triggers the ordinary
+    // redial path, which presents whatever identity we now hold.
+    this.#socket?.close();
+  }
+
   async stop(): Promise<void> {
     this.#stopped = true;
     clearInterval(this.#heartbeat);
@@ -388,11 +503,34 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
         return;
       }
 
-      case 'pair.bound':
+      case 'pair.bound': {
+        // An ownership claim is checked here, not taken on the relay's word.
+        //
+        // Already-bound is the load-bearing half. Anything that can reach the
+        // daemon's pairing control — including the agent runtime, whose own
+        // filesystem tools run in a directory beside it — can make the daemon
+        // mint a pairing code, read it, and complete the pairing with ITS
+        // user key. Without this guard that silently replaces the owner's
+        // cert with the attacker's, and the real owner is locked out of their
+        // own agent. Rebinding must be something the user chose: unpair
+        // first, deliberately (ADR-022 R12).
+        const current = this.#options.identity.cert;
+        if (current) {
+          this.#log.warn('pairing refused: this agent already has an owner');
+          return;
+        }
+        if (frame.cert.agent !== this.#options.identity.publicKey || !verifyCert(frame.cert)) {
+          this.#log.warn('pairing refused: cert does not bind this agent');
+          return;
+        }
         this.#options.identity.cert = frame.cert;
         this.#options.onBound?.(frame.cert);
         this.emit('bound', frame.cert);
         return;
+      }
+
+      case 'revoke':
+        return this.#onRevoke(frame);
 
       case 'session.open':
         return this.#onSessionOpen(frame);
@@ -534,6 +672,30 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
    * be distinguishable from a session that never existed — and a constant-time
    * compare so timing does not answer what the message will not.
    */
+  /**
+   * A revoke arriving over the wire. The relay already checked that the asker
+   * owns this agent; the daemon checks it again against its own cert, because
+   * invariant 6 says a lying relay must gain nothing — and here the prize
+   * would be ending a stranger's attachments.
+   *
+   * A refusal is silent. There is nothing for a non-owner to learn from an
+   * error, and the relay has already refused this on its own side.
+   */
+  async #onRevoke(frame: Extract<Frame, { t: 'revoke' }>): Promise<void> {
+    const cert = this.#options.identity.cert;
+    if (!cert || !frame.client || frame.client !== cert.user || frame.agent !== cert.agent) {
+      this.#log.warn('revoke refused: not from the owner');
+      return;
+    }
+    const sessions = await this.revoke(frame.origin);
+    this.#send({
+      t: 'revoked',
+      agent: cert.agent,
+      origin: frame.origin,
+      sessions: Math.min(sessions, MAX_SESSIONS_REPORTED),
+    });
+  }
+
   #onSessionResume(frame: Extract<Frame, { t: 'session.resume' }>): void {
     const session = this.#sessions.get(frame.s);
     if (!session) {
@@ -558,6 +720,17 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     }
     if (session.grant.expiresAt <= Date.now()) {
       this.#send({ t: 'session.denied', s: frame.s, reason: 'grant_expired' });
+      return;
+    }
+    // Revocation closes and forgets a session, so the lookup above normally
+    // fails first. This closes the race the review names: a resume already in
+    // flight when the tombstone lands must not slip through the window
+    // between recording it and finishing teardown (ADR-022 R4). It is also
+    // the only check a bearer token cannot walk past — resume proves
+    // possession of a token, never identity, and the hosted flow resumes from
+    // a fresh key by construction.
+    if (session.delegation && isRevoked(this.#revocations.list(), session.delegation)) {
+      this.#send({ t: 'session.denied', s: frame.s, reason: 'revoked' });
       return;
     }
     if (
@@ -586,7 +759,7 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     this.#send({
       t: 'session.resumed',
       s: frame.s,
-      agentName: session.delegated ? 'Personal agent' : this.#options.identity.name,
+      agentName: session.delegation ? 'Personal agent' : this.#options.identity.name,
       runtime: this.#options.identity.runtime,
       surface: session.surface,
       grant: session.grant,
@@ -633,14 +806,25 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
         typeof delegation.origin !== 'string' ||
         delegation.origin !== frame.surface.origin ||
         delegation.grantHash !== hashGrant(frame.grant) ||
-        typeof delegation.expiresAt !== 'number' ||
-        !Number.isFinite(delegation.expiresAt) ||
+        !delegationLifetimeOk(delegation) ||
         delegation.expiresAt <= Date.now()
       ) {
         this.#send({ t: 'session.denied', s: frame.s, reason: 'bad_delegation' });
         return;
       }
-    } else if (!frame.viaConnect && cert && frame.client !== cert.user) {
+      // The user cut this origin off. The signature is still good and the
+      // page still holds it — which is exactly the case revocation exists
+      // for (ADR-022 R2).
+      if (isRevoked(this.#revocations.list(), delegation)) {
+        this.#send({ t: 'session.denied', s: frame.s, reason: 'revoked' });
+        return;
+      }
+    } else if (!frame.viaConnect && frame.client !== cert?.user) {
+      // Fail closed on ABSENT ownership as well as wrong ownership (ADR-019
+      // Gate B §5, ADR-022 R5). This used to read `cert && frame.client !==
+      // cert.user`, so an unbound daemon accepted whoever the relay stamped
+      // and the property survived only because the relay refused too. It also
+      // made unpair() an opening rather than a closing.
       this.#send({ t: 'session.denied', s: frame.s, reason: 'not_your_agent' });
       return;
     }
@@ -699,7 +883,7 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     const session: SessionState = {
       id: frame.s,
       viaConnect: Boolean(frame.viaConnect),
-      delegated: Boolean(frame.delegation),
+      ...(frame.delegation ? { delegation: frame.delegation } : {}),
       surface: frame.surface,
       grant: frame.grant,
       tools: frame.grant.tools,
@@ -1027,4 +1211,16 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
       this.#log.info('session closed', { sessionId: session.id, data: { reason } });
     }
   }
+}
+
+/** One live attachment, projected for `agentport status` and the wallet. */
+export interface Attachment {
+  id: string;
+  origin: string;
+  surface: string;
+  tools: number;
+  grantExpiresAt: number;
+  delegated: boolean;
+  /** Unix ms since the client's socket went away, or undefined if attached. */
+  detachedAt?: number;
 }

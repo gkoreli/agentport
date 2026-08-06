@@ -2,12 +2,17 @@ declare const __AGENTPORT_VERSION__: string | undefined;
 
 import { component, computed, each, html, signal, when } from '@nisli/core';
 import { AgentWallet, type PairOffer } from '@agentport/client';
-import { hashGrant, signDelegation, type AgentCert } from '@agentport/protocol';
+import { MAX_DELEGATION_LIFETIME_MS, hashGrant, signDelegation, type AgentCert } from '@agentport/protocol';
 import { WALLET_CHANNEL, startWalletHandshake, type BoundWalletRequest } from './handshake.js';
 import { ensureIdentity, loadCerts, saveCert } from './storage.js';
 
 const VERSION = typeof __AGENTPORT_VERSION__ === 'string' ? __AGENTPORT_VERSION__ : 'dev';
-const DELEGATION_TTL_MS = 8 * 60 * 60 * 1000;
+/**
+ * A working day, and it must stay at or under the protocol's own ceiling —
+ * a delegation the daemon judges over-long is refused outright, so these two
+ * constants in two packages have to agree.
+ */
+const DELEGATION_TTL_MS = Math.min(8 * 60 * 60 * 1000, MAX_DELEGATION_LIFETIME_MS);
 const PRODUCTION_RELAY = 'wss://agentport.gogakoreli.workers.dev/relay';
 
 type View = 'loading' | 'pair' | 'pick' | 'consent' | 'done';
@@ -128,6 +133,7 @@ const WalletApp = component('agentport-wallet-app', () => {
     if (!bound || !agent || busy.value) return;
     busy.value = true;
     try {
+      const issued = Date.now();
       const delegation = signDelegation(identity.secretKey, {
         delegate: bound.request.delegate,
         agent: agent.cert.agent,
@@ -137,7 +143,8 @@ const WalletApp = component('agentport-wallet-app', () => {
         // Signs the exact grant rendered above; session.open with any other
         // grant is refused by the daemon, so approval cannot be upgraded.
         grantHash: hashGrant(bound.request.grant),
-        expiresAt: Date.now() + DELEGATION_TTL_MS,
+        issuedAt: issued,
+        expiresAt: issued + DELEGATION_TTL_MS,
       });
       bound.reply({
         e: WALLET_CHANNEL,

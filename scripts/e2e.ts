@@ -12,6 +12,7 @@ import { Client as McpClient } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { Relay } from '../packages/relay/src/relay.js';
 import { AgentDaemon } from '../packages/daemon/src/daemon.js';
+import { memoryRevocations } from '../packages/daemon/src/revocations.js';
 import { McpBridge } from '../packages/daemon/src/mcp-bridge.js';
 import { AcpRuntime } from '../packages/daemon/src/runtimes/acp.js';
 import { DemoWriterRuntime, type AgentRuntime, type TurnContext } from '../packages/daemon/src/runtime.js';
@@ -941,6 +942,7 @@ console.log('\n13. delegated sessions');
     agent: agentKeys.publicKey,
     origin: delegatedOrigin,
     grantHash: hashGrant(delegatedGrant),
+    issuedAt: Date.now(),
     expiresAt: Date.now() + 8 * 60 * 60 * 1000,
   });
   const pagePayload = { agent: agentKeys.publicKey, displayName: 'Personal agent' as const, delegation };
@@ -984,6 +986,10 @@ console.log('\n13. delegated sessions');
           agent: agentKeys.publicKey,
           origin: 'https://expired.test',
           grantHash: hashGrant(emptyGrant),
+          // Well-formed but expired: issued two minutes ago for a
+          // one-minute life, so it is the EXPIRY being judged and not the
+          // lifetime bound.
+          issuedAt: Date.now() - 120_000,
           expiresAt: Date.now() - 60_000,
         }),
       },
@@ -1010,6 +1016,7 @@ console.log('\n13. delegated sessions');
           agent: agentKeys.publicKey,
           origin: 'https://wrong.test',
           grantHash: hashGrant(wrongGrant),
+          issuedAt: Date.now(),
           expiresAt: Date.now() + 60_000,
         }),
       },
@@ -1138,6 +1145,10 @@ console.log('\n13. delegated sessions');
           agent: agentKeys.publicKey,
           origin: 'https://edge.test',
           grantHash: hashGrant(edgeGrant),
+          // Well-formed but expired: issued two minutes ago for a
+          // one-minute life, so it is the EXPIRY being judged and not the
+          // lifetime bound.
+          issuedAt: Date.now() - 120_000,
           expiresAt: Date.now() - 60_000,
         }),
       },
@@ -1236,6 +1247,7 @@ console.log('\n13. delegated sessions');
           agent: swapAgentKeys.publicKey,
           origin: 'https://honest.test',
           grantHash: hashGrant(honestGrant),
+          issuedAt: Date.now(),
           expiresAt: Date.now() + 60_000,
         }),
       },
@@ -1369,6 +1381,244 @@ console.log('\n14. detached tool calls fail without heuristic ownership transfer
   await detachDaemon.stop();
   check('concurrent client and daemon close tears down each runtime once', runtimeCloses === 2, runtimeCloses);
   await isolated.close();
+}
+
+// --- 15. taking it back ------------------------------------------------------
+// ADR-022. The property is not "revoke closed the socket" — since the client
+// redials and re-resumes by itself, a closed socket is something it HEALS
+// from. The property is that the authority is dead: at the daemon, through
+// the reconnect path, and against a delegation the page still holds.
+console.log('\n15. revocation (ADR-022)');
+{
+  const r15 = new Relay({ port: 0, log: () => {} });
+  await r15.listening();
+  const url15 = `ws://127.0.0.1:${r15.port}`;
+
+  const owner = generateKeyPair();
+  const agent15 = generateKeyPair();
+  const cert15 = signCert(owner.secretKey, {
+    user: owner.publicKey,
+    agent: agent15.publicKey,
+    name: 'Revocable Agent',
+    runtime: 'demo-writer',
+    location: 'Personal VPS',
+    issuedAt: Date.now(),
+  });
+  const revocations = memoryRevocations();
+  const daemon15 = new AgentDaemon({
+    relayUrl: url15,
+    identity: {
+      secretKey: agent15.secretKey,
+      publicKey: agent15.publicKey,
+      name: 'Revocable Agent',
+      runtime: 'demo-writer',
+      location: 'Personal VPS',
+      cert: cert15,
+    },
+    revocations,
+    createRuntime: () => new DemoWriterRuntime(),
+  });
+  await daemon15.start();
+
+  const cutOff = 'https://cut-off.test';
+  const kept = 'https://kept.test';
+
+  const attach = async (origin: string, name: string) => {
+    const page = generateKeyPair();
+    const pageWallet = new AgentWallet({ relayUrl: url15, userSecretKey: page.secretKey, socketFactory });
+    await pageWallet.connect();
+    const grant = buildGrant({ surface: { name }, tools: inkwellTools() });
+    const issued = Date.now();
+    const session15 = await pageWallet.openSession({
+      agent: agent15.publicKey,
+      approved: {
+        grant,
+        delegation: signDelegation(owner.secretKey, {
+          delegate: page.publicKey,
+          agent: agent15.publicKey,
+          origin,
+          grantHash: hashGrant(grant),
+          issuedAt: issued,
+          expiresAt: issued + 60 * 60 * 1000,
+        }),
+      },
+      surface: { name, origin },
+      tools: inkwellTools(),
+      decide: async () => true,
+    });
+    return { page, pageWallet, grant, session: session15 };
+  };
+
+  const doomed = await attach(cutOff, 'Cut Off');
+  const survivor = await attach(kept, 'Kept');
+  const closedReasons: string[] = [];
+  doomed.session.on('closed', ({ reason }) => closedReasons.push(reason));
+
+  // The owner's own wallet does the revoking, over the wire, from a browser.
+  const ownerWallet = new AgentWallet({ relayUrl: url15, userSecretKey: owner.secretKey, socketFactory });
+  await ownerWallet.connect();
+  const ended = await ownerWallet.revoke(agent15.publicKey, cutOff);
+  check('the owner revokes an origin over the wire', ended === 1, ended);
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  check('the revoked attachment closes with a stable reason', closedReasons.includes('revoked'), closedReasons);
+  check('another origin keeps its attachment', daemon15.attachments().some((a) => a.origin === kept), daemon15.attachments());
+
+  // The heart of it: the page still holds a signed, unexpired delegation.
+  let reopened = '';
+  await doomed.pageWallet
+    .openSession({
+      agent: agent15.publicKey,
+      approved: {
+        grant: doomed.grant,
+        delegation: signDelegation(owner.secretKey, {
+          delegate: doomed.page.publicKey,
+          agent: agent15.publicKey,
+          origin: cutOff,
+          grantHash: hashGrant(doomed.grant),
+          issuedAt: Date.now() - 1000,
+          expiresAt: Date.now() + 60 * 60 * 1000,
+        }),
+      },
+      surface: { name: 'Cut Off', origin: cutOff },
+      tools: inkwellTools(),
+    })
+    .catch((err: Error) => {
+      reopened = err.message;
+    });
+  check('a live delegation for a revoked origin cannot reopen', reopened.includes('revoked'), reopened);
+
+  // …and the tombstone is not a denylist: approving again works at once.
+  const reapproved = await attach(cutOff, 'Cut Off Again');
+  check('approving the same origin again works immediately', reapproved.session.info.agentName.length > 0);
+
+  // The reconnect path, which is the one that would silently undo all of
+  // this: with automatic redial, a closed socket is something the client
+  // heals from. Two distinct routes have to be dead.
+  //
+  // Route one — `agentport revoke` writes the tombstone and does not talk to
+  // the daemon at all. The session is still live and still resumable by
+  // token; only the tombstone stands in the way. This is also the race the
+  // review names: a resume already in flight when a revoke lands.
+  const raced = await attach('https://raced.test', 'Raced');
+  const racedId = raced.session.id;
+  const racedToken = raced.pageWallet.resumeTokenFor(racedId)!;
+  raced.pageWallet.disconnect();
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  revocations.add({ origin: 'https://raced.test', at: Date.now() });
+  const racer = new AgentWallet({ relayUrl: url15, userSecretKey: generateKeyPair().secretKey, socketFactory });
+  await racer.connect();
+  let racedResume = '';
+  await racer
+    .resumeSession({ id: racedId, agent: agent15.publicKey, token: racedToken, tools: inkwellTools() })
+    .catch((err: Error) => {
+      racedResume = err.message;
+    });
+  check(
+    'a tombstone alone makes a live session unresumable, before any teardown',
+    racedResume.includes('revoked'),
+    racedResume,
+  );
+
+  // Route two — a full revoke, then the automatic redial. The client holds a
+  // valid token for a session that no longer exists.
+  const revivable = await attach('https://revivable.test', 'Revivable');
+  const revivableId = revivable.session.id;
+  const token = revivable.pageWallet.resumeTokenFor(revivableId);
+  await daemon15.revoke('https://revivable.test');
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const rejoin = new AgentWallet({ relayUrl: url15, userSecretKey: generateKeyPair().secretKey, socketFactory });
+  await rejoin.connect();
+  let resumed = '';
+  await rejoin
+    .resumeSession({ id: revivableId, agent: agent15.publicKey, token: token!, tools: inkwellTools() })
+    .catch((err: Error) => {
+      resumed = err.message;
+    });
+  check('a revoked session cannot come back through resume', resumed.length > 0, resumed);
+
+  // Only the owner may revoke. A delegated page key holds real authority for
+  // its own session and must still be refused here.
+  let pageRevoke = '';
+  await reapproved.pageWallet.revoke(agent15.publicKey, kept).catch((err: Error) => {
+    pageRevoke = err.message;
+  });
+  check('a delegated page key cannot revoke anything', pageRevoke.length > 0, pageRevoke);
+  check('the origin it tried to cut off is still attached', daemon15.attachments().some((a) => a.origin === kept));
+
+  // Unpair: the agent belongs to nobody, and absent ownership is refusal.
+  let unbound = false;
+  daemon15.on('unbound', () => {
+    unbound = true;
+  });
+  await daemon15.unpair();
+  check('unpair drops the cert', daemon15.identity.cert === undefined && unbound);
+  check('unpair ends every attachment', daemon15.attachments().length === 0, daemon15.attachments());
+
+  // Re-binding must be a deliberate act. A hijacker who can make the daemon
+  // pair — the agent runtime can, its own tools run beside the control file —
+  // must not be able to replace a live owner's cert.
+  const rebound = new AgentDaemon({
+    relayUrl: url15,
+    identity: {
+      secretKey: agent15.secretKey,
+      publicKey: agent15.publicKey,
+      name: 'Revocable Agent',
+      runtime: 'demo-writer',
+      location: 'Personal VPS',
+      cert: cert15,
+    },
+    createRuntime: () => new DemoWriterRuntime(),
+  });
+  const thief = generateKeyPair();
+  let offered = '';
+  rebound.on('bound', () => {
+    offered = 'bound';
+  });
+  await rebound.start();
+  const thiefWallet = new AgentWallet({ relayUrl: url15, userSecretKey: thief.secretKey, socketFactory });
+  await thiefWallet.connect();
+
+  // The hijack, run to completion rather than merely started: the code is
+  // minted, claimed, and a cert signed by the thief's own key is completed
+  // through the relay, which cannot know the agent already has an owner.
+  const stolen = new Deferred<string>();
+  rebound.on('ready', () => {});
+  const reboundWithCode = new AgentDaemon({
+    relayUrl: url15,
+    identity: {
+      secretKey: agent15.secretKey,
+      publicKey: agent15.publicKey,
+      name: 'Revocable Agent',
+      runtime: 'demo-writer',
+      location: 'Personal VPS',
+      cert: cert15,
+    },
+    onPairingCode: (code) => stolen.resolve(code),
+    createRuntime: () => new DemoWriterRuntime(),
+  });
+  await rebound.stop();
+  await reboundWithCode.start();
+  reboundWithCode.beginPairing();
+  const code = await stolen.promise;
+  const offer = await thiefWallet.claimPairing(code);
+  await thiefWallet.approvePairing(offer);
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  check(
+    'a completed pairing cannot replace a live owner',
+    reboundWithCode.identity.cert?.user === owner.publicKey,
+    reboundWithCode.identity.cert?.user === thief.publicKey ? 'the thief owns it now' : offered,
+  );
+
+  doomed.pageWallet.close();
+  survivor.pageWallet.close();
+  reapproved.pageWallet.close();
+  revivable.pageWallet.close();
+  rejoin.close();
+  ownerWallet.close();
+  thiefWallet.close();
+  await reboundWithCode.stop();
+  await daemon15.stop();
+  await r15.close();
 }
 
 // --- teardown ---------------------------------------------------------------

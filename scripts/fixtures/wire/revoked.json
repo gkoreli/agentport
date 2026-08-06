@@ -1,0 +1,95 @@
+{
+  "type": "revoked",
+  "cases": [
+    {
+      "name": "minimal valid — nothing was attached, so nothing was closed",
+      "expect": "ok",
+      "frame": {
+        "t": "revoked",
+        "agent": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "origin": "https://inkwell.example",
+        "sessions": 0
+      }
+    },
+    {
+      "name": "maximal valid — the reported count at its ceiling",
+      "expect": "ok",
+      "frame": {
+        "t": "revoked",
+        "agent": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "origin": "https://inkwell.example",
+        "sessions": 4096
+      }
+    },
+    {
+      "name": "missing sessions",
+      "expect": "missing_key",
+      "frame": {
+        "t": "revoked",
+        "agent": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "origin": "https://inkwell.example"
+      }
+    },
+    {
+      "name": "sessions one over the ceiling",
+      "expect": "out_of_range",
+      "frame": {
+        "t": "revoked",
+        "agent": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "origin": "https://inkwell.example",
+        "sessions": 4097
+      }
+    },
+    {
+      "name": "sessions is negative",
+      "expect": "out_of_range",
+      "frame": {
+        "t": "revoked",
+        "agent": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "origin": "https://inkwell.example",
+        "sessions": -1
+      }
+    },
+    {
+      "name": "sessions is fractional",
+      "expect": "wrong_type",
+      "frame": {
+        "t": "revoked",
+        "agent": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "origin": "https://inkwell.example",
+        "sessions": 1.5
+      }
+    },
+    {
+      "name": "unknown extra key",
+      "expect": "unexpected_key",
+      "frame": {
+        "t": "revoked",
+        "agent": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "origin": "https://inkwell.example",
+        "sessions": 1,
+        "closedAt": 1754400000000
+      }
+    },
+    {
+      "name": "agent at 62 chars",
+      "expect": "bad_format",
+      "frame": {
+        "t": "revoked",
+        "agent": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "origin": "https://inkwell.example",
+        "sessions": 1
+      }
+    },
+    {
+      "name": "raw: whitespace breaks canonical form",
+      "expect": "non_canonical",
+      "raw": "{\"agent\": \"a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1\", \"origin\": \"https://inkwell.example\", \"sessions\": 1, \"t\": \"revoked\"}"
+    },
+    {
+      "name": "raw: -0 does not round-trip and is non-canonical",
+      "expect": "non_canonical",
+      "raw": "{\"agent\":\"a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1\",\"origin\":\"https://inkwell.example\",\"sessions\":-0,\"t\":\"revoked\"}"
+    }
+  ]
+}

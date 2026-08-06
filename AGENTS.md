@@ -125,8 +125,8 @@ Open the demo, hit **Pair a new agent**, paste the code, then **Connect
 agent**. The daemon's pairing link (`/pair#code=…`) auto-fills the dialog.
 
 ```bash
-npm run e2e        # full loop over real sockets, no browser, 72 checks
-npm run wire:check # wire validation: 411 fixture cases across all 40 frames
+npm run e2e        # full loop over real sockets, no browser, 100 checks
+npm run wire:check # wire validation: 485 fixture cases across all 43 frames
 npm run agui:check # every emitted AG-UI event parsed by @ag-ui/core's schemas
 npm run typecheck  # tsc -b over all packages
 npm run deploy     # build the site + wrangler deploy
@@ -309,8 +309,8 @@ has fixtures.
 Working: pairing, cert issuance and verification, directory + presence,
 capability grants with TTL, prompt streaming, plan reporting, tool-call
 round-trip, approval round-trip, cancellation, reconnect with in-place session
-resume, session teardown, and the full demo UI. 86 e2e checks and 459
-wire-validation cases pass.
+resume, session teardown, revocation, and the full demo UI. 100 e2e checks
+and 485 wire-validation cases pass.
 
 Not built yet, in rough priority order:
 
@@ -330,11 +330,15 @@ Not built yet, in rough priority order:
 4. ~~WebMCP interop.~~ **Done.** Both connect.js and the extension harvest
    `document.modelContext` registrations (with the deprecated
    `navigator.modelContext` fallback) into `SiteTool`s at attachment time.
-5. **Revocation.** No way to list what holds your agent, or to cut it off.
-   (The old note here pointed at `CertStore.remove` on the relay; that type is
-   gone from source — only stale `dist/` remains — because ADR-016 made the
-   relay stateless. Ownership lives at the edges now, so revocation is a daemon
-   + CLI + wallet job, not a relay one.)
+5. ~~Revocation.~~ **Done (ADR-022).** The revocation object is the
+   `SessionDelegation`, addressed by its origin, and a revocation is a
+   *tombstone* (`{origin, at}` refuses delegations issued at or before `at`),
+   not a denylist — so approving again works with no un-revoke verb, and the
+   store stays finite because a delegation's lifetime is bounded. Two frames
+   (`revoke`/`revoked`, owner-key only, never a delegated page key), a daemon
+   `revoke()`/`unpair()`, and `agentport status|revoke|unpair` over the
+   control file. Revoked means **unresumable at the daemon**, not just closed
+   — the client redials by itself now.
 6. ~~Reconnect + session resume.~~ **Done.** An unexpected socket close
    redials with bounded backoff and re-resumes every live session in place, so
    the page keeps the handle (and the listeners) it already had. Fresh keys per
