@@ -10,6 +10,25 @@ they moved.
 
 ## Unreleased
 
+### One "Approve" no longer selects allow_always
+
+`AcpRuntime`'s permission answer searched the runtime's option list for
+either `allow_once` or `allow_always` and took whichever the runtime listed
+first. The runtime controls both the options and their order, so a runtime
+listing `allow_always` first turned a single user "Approve" into standing
+approval for every later call in the attachment — the user answered one
+question and the daemon recorded a different one. Same trap on the deny side
+(`reject_always` could silently suppress every future ask).
+
+The daemon now selects only the `*_once` option matching the user's answer,
+and cancels when the runtime offers no once-option at all — a durable choice
+is never made on the user's behalf. `npm run acp:check` (new) drives the real
+`AcpRuntime` over stdio against a scripted hostile agent
+(`scripts/fixtures/acp/hostile-permission-agent.mjs`) that orders and prunes
+its permission options adversarially; four of its six checks fail against the
+previous selection logic. The daemon-side fix landed alongside eaa2009; this
+entry names the change.
+
 ### Use AG-UI instead of restating it
 
 `packages/agui` hand-declared the AG-UI event types instead of importing

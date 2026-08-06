@@ -17,6 +17,7 @@
     "demo": "tsx examples/inkwell/src/serve.ts",
     "e2e": "tsx scripts/e2e.ts",
     "wire:check": "tsx scripts/wire-check.ts",
+    "acp:check": "tsx scripts/acp-permission-check.ts",
     "agui:check": "tsx packages/agui/check.ts",
     "build:extension": "tsx packages/extension/build.ts",
     "check:extension": "npm run check -w @agentport/extension",
