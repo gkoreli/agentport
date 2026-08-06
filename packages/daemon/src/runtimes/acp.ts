@@ -345,10 +345,7 @@ export class AcpRuntime implements AgentRuntime {
       }) ?? [],
     );
     if (typeof announced === 'string' && grantedMcpNames.has(announced)) {
-      const allowOnce = options.find((option: PermissionOption) => option.kind === 'allow_once');
-      return allowOnce
-        ? { outcome: { outcome: 'selected', optionId: allowOnce.optionId } }
-        : { outcome: { outcome: 'cancelled' } };
+      return this.#answerOnce(options, true, announced);
     }
 
     const allow =
@@ -366,14 +363,29 @@ export class AcpRuntime implements AgentRuntime {
           );
 
     if (signal.aborted) return { outcome: { outcome: 'cancelled' } };
-    // The user's answer covers this call alone. The runtime chooses the
-    // option list and its order, so a durable option must never be selected
-    // on the user's behalf — picking allow_always because it was listed
-    // first would turn one "Approve" into standing approval for every later
-    // call in the attachment.
-    const wanted = allow ? 'allow_once' : 'reject_once';
-    const chosen = options.find((option: PermissionOption) => option.kind === wanted);
-    if (!chosen) return { outcome: { outcome: 'cancelled' } };
+    return this.#answerOnce(options, allow, announced);
+  }
+
+  /**
+   * Answer one permission question with a once-scoped option, chosen by kind.
+   *
+   * The peer orders its own option list and we do not: claude-agent-acp puts
+   * `allow_always` first, so matching on a *set* of acceptable kinds would
+   * return it and convert a single browser "Allow" into a session-scoped
+   * `addRules()` grant on the user's own machine. One approval answers exactly
+   * one call, so a durable option is never selected on the user's behalf —
+   * and when the peer offers no once-scoped option at all we cancel loudly
+   * rather than widening authority to fit its menu.
+   */
+  #answerOnce(options: PermissionOption[], allow: boolean, tool: string | null | undefined): RequestPermissionResponse {
+    const kind = allow ? 'allow_once' : 'reject_once';
+    const chosen = options.find((option: PermissionOption) => option.kind === kind);
+    if (!chosen) {
+      this.#log.warn('agent offered no once-scoped permission option; cancelling', {
+        data: { tool, wanted: kind, offered: options.map((option: PermissionOption) => option.kind) },
+      });
+      return { outcome: { outcome: 'cancelled' } };
+    }
     return { outcome: { outcome: 'selected', optionId: chosen.optionId } };
   }
 }
