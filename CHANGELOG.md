@@ -8,6 +8,51 @@ header or an extension popup names exactly one commit. Separately versioned
 npm artifacts (`@gkoreli/agentport`, the shared chat overlay) are noted where
 they moved.
 
+## Unreleased
+
+### Use AG-UI instead of restating it
+
+`packages/agui` hand-declared the AG-UI event types instead of importing
+`@ag-ui/core`, and that copy was missing `TOOL_CALL_RESULT` — so the adapter
+stuffed a tool's return value into `rawEvent` on `TOOL_CALL_END`, where no
+standard renderer looks. A standard AG-UI component rendering an AgentPort
+session showed tool calls and never their results, which made ADR-017's central
+claim ("any AG-UI-compatible component can render an AgentPort session with
+zero custom code") false from the day it was written. The root cause is in the
+deleted implementation report: the package was uncached in an offline sandbox,
+so the types were written by hand against a web reference.
+
+- Event types now come from `@ag-ui/core` (pinned `^0.0.57`), re-exported under
+  the same names so consumers are unchanged. Taking the dependency is safe
+  here: it brings zod, which the bundle rules for `@agentport/protocol` and
+  `@agentport/client` forbid, but the dependency direction is agui → client and
+  never the reverse, and the adapter is consumed only by our own demo surfaces.
+  Measured: +69 kB to `inkwell.js` and `tasker.js`, **0 to `connect.js`**, the
+  drop-in that ships into other people's pages.
+- The adapter now emits a real `TOOL_CALL_RESULT`, and `TOOL_CALL_END` is
+  spec-pure. A failed tool call is a result with an error, not a failed run.
+- `packages/agui/check.ts` existed but nothing ran it. It is now
+  `npm run agui:check`, and it parses **every** emitted event against
+  `@ag-ui/core`'s own runtime schemas, so the next drift from the spec fails
+  the check instead of shipping.
+
+ADR-017 records the corrected reasoning. The line it used to carry — revisit
+AG-UI alignment "only if it clearly wins its layer; premature while the spec is
+young" — was backwards: a young, fast-moving spec is an argument *for*
+depending on the package, because its versioning tells you when you have
+drifted, while restating it locally is how you drift silently. The repo has now
+been bitten by that twice; the WebMCP harvester is the other case, and it says
+so itself.
+
+### The north star, written down
+
+`docs/NORTH-STAR.md` — what this is for, what "the site learns nothing"
+enumerates, what we will never be, what has to stay true, and how we would know
+it worked. The part worth having explicit is the hierarchy: AG-UI, WebMCP, MCP
+and ACP are components we use, not competitors and not layers to negotiate
+with. AG-UI in particular normalizes the agent-to-client edge for a builder who
+controls their own agent — the assumption this project removes.
+
 ## 0.0.11
 
 ### One strict schema layer for the whole wire (ADR-019 Gate B §1)

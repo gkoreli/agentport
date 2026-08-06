@@ -127,6 +127,7 @@ agent**. The daemon's pairing link (`/pair#code=…`) auto-fills the dialog.
 ```bash
 npm run e2e        # full loop over real sockets, no browser, 72 checks
 npm run wire:check # wire validation: 411 fixture cases across all 40 frames
+npm run agui:check # every emitted AG-UI event parsed by @ag-ui/core's schemas
 npm run typecheck  # tsc -b over all packages
 npm run deploy     # build the site + wrangler deploy
 

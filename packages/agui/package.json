@@ -8,6 +8,7 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
+    "@ag-ui/core": "^0.0.57",
     "@agentport/client": "0.0.1"
   }
 }

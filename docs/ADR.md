@@ -421,27 +421,97 @@ forwarders are fungible.
 
 ## ADR-017: Adopt AG-UI as the UI-event edge, via an adapter — accepted
 
-**Context.** AG-UI standardizes the agent→UI event stream (text deltas, tool
-call lifecycle, state sync, human-in-the-loop) with a growing ecosystem of
-ready renderers (CopilotKit et al.). It is perpendicular to WebMCP: WebMCP is
-the site→agent capability direction, AG-UI is the agent→screen direction. A
-single AgentPort session uses both at once. Neither defines identity, grants,
-consent, or transport — the middle stays ours (same finding as ADR-006).
+**Context.** AG-UI normalizes the agent→client edge: the events an agent
+streams to a UI (text deltas, reasoning, tool-call lifecycle, run lifecycle)
+and the streaming/run semantics around them, so an application builder can add
+agentic flows to their own site without inventing that vocabulary. It solves
+that problem well, and there is a real ecosystem of renderers (CopilotKit et
+al.) on top of it.
+
+What it does not do — and does not try to do — is bring-your-own-agent: it
+assumes the application builder controls the agent. That assumption is the one
+AgentPort removes. A user's own agent, owned by their key, consented per
+session, reachable from any site, with the site learning nothing about runtime,
+model, memory, or who pays for inference, is outside AG-UI's scope and always
+was. So AG-UI is not something to measure ourselves against; it is a well-made
+component we use, because event vocabulary and streaming semantics are exactly
+the kind of thing you should not hand-roll when someone has already normalized
+them.
 
 **Decision.** Integrate as an ADAPTER at the client edge, not as the wire
 format:
 
 - Ship `@agentport/agui`: translate a live `AgentSession` into an AG-UI event
-  stream (`delta` → TEXT_MESSAGE_CONTENT, `tool.call`/`tool.result` →
-  TOOL_CALL_*, `thought` → thinking events, `approval.request` → the
-  human-in-the-loop pattern). Any AG-UI-compatible component can then render
-  an AgentPort session with zero custom code.
-- Our SessionFrame vocabulary REMAINS the sealed wire format. It carries what
-  AG-UI has no words for (epk handshakes, grants, resume, approval authority),
-  and interop has no value inside ciphertext — only at the edges where other
-  people's code runs.
-- Revisit aligning the inner content vocabulary with AG-UI only if it clearly
-  wins its layer; premature while the spec is young.
+  stream (`delta` → TEXT_MESSAGE_CONTENT, `thought` → REASONING_*, `tool.call`
+  → TOOL_CALL_START/ARGS/END plus TOOL_CALL_RESULT, `approval` → a CUSTOM
+  observation). Any AG-UI-compatible component can then render an AgentPort
+  session with zero custom code.
+- The event types come from `@ag-ui/core` (pinned `^0.0.57`), not from a local
+  restatement of them. That is what the first version got wrong: it declared
+  the event shapes by hand, missed TOOL_CALL_RESULT entirely, and stuffed the
+  tool's return value into `rawEvent` on TOOL_CALL_END — where no standard
+  renderer looks. A standard renderer showed tool calls and never their
+  results, so the "zero custom code" claim above was false from the day it was
+  written. Depending on the package is safe here: it brings zod, which the
+  bundle rules for `@agentport/protocol` and `@agentport/client` would forbid,
+  but the dependency direction is agui → client and never the reverse, and
+  `@agentport/agui` is consumed only by our own demo surfaces. It is not in
+  connect.js, the drop-in that ships into other people's pages. Measured:
+  +69 kB to inkwell.js and tasker.js, 0 to connect.js.
+- Our SessionFrame vocabulary REMAINS the sealed wire format. Interop has no
+  value inside ciphertext — only at the edges where other people's code runs —
+  and the frames carry the things this project exists to get right: the
+  ephemeral-key handshake, the capability grant, resume authority, and who is
+  allowed to answer an approval.
+- The earlier version of this record said to revisit AG-UI alignment "only if
+  it clearly wins its layer; premature while the spec is young". That reasoning
+  was backwards. A young, fast-moving spec is an argument FOR depending on the
+  package: its versioning tells you when you have drifted. Restating it locally
+  is how you drift silently. This repo has now been bitten twice — the
+  hand-rolled AG-UI types above, and the WebMCP harvester, which by its own
+  report "follows the repository's existing extension integration, not an
+  independently fetched specification"
+  (`docs/webmcp-harvest-report.md`). Take the dependency; pin it; let the
+  package's own schemas fail the check when we drift (`npm run agui:check`
+  parses every emitted event with `EventSchemas`).
+
+**What the component offers that we have not taken.** Reading the package
+rather than the event enum alone turned up more than the adapter uses. These
+are not gaps in AgentPort; they are normalized pieces available to us if we
+want them:
+
+- `InterruptSchema` / `ResumeEntrySchema` / `RunFinishedInterruptOutcome`: a
+  structured pause-and-answer mechanism, keyed to a `toolCallId`, with a
+  declared `responseSchema` and an `expiresAt`.
+- `HumanInTheLoopCapabilities` = `{supported, approvals, interventions,
+  feedback, interrupts, approveWithEdits}`. `approveWithEdits` — approve a
+  call but modify its arguments — is a good idea our approval round-trip does
+  not have, and worth adding on its own merits.
+- `ToolsCapabilities.clientProvided`, `TransportCapabilities.resumable` and
+  `.websocket`: a way to declare, in someone else's vocabulary, things our
+  transport already does.
+- `ToolMessage` = `{id, content, role, toolCallId, error, encryptedValue}` —
+  tool results as messages, with an error channel the event side lacks.
+- In passing: `RunAgentInput` carries `{threadId, runId, state, messages,
+  tools, context, resume}`. That is close to the shape of our own
+  `session.open` grant, and `tools.clientProvided` names the same idea as a
+  site lending its tools. Others hit the same shape; nothing more is claimed
+  from it.
+
+**Open question — NOT decided.** The adapter is one-way (agent → events).
+`AbstractAgent` in `@ag-ui/client` (not a dependency of this repo) is a
+subclassable agent abstraction (`runAgent`, `connect`, `abortRun`,
+`addMessages`, `setState`, `subscribe`, middleware via `use`); `HttpAgent` is
+only one transport implementation of it, and `connect` is part of the
+abstraction, with `AGUIConnectNotImplementedError` for implementations that do
+not offer it. Implementing `AbstractAgent` over the AgentPort sealed channel
+would be an adoption lever, not an alignment exercise: anyone who has already
+built a UI against AG-UI could swap in a user-owned agent with almost no work.
+It would need `runAgent` mapped onto our prompt/session lifecycle, interrupts
+mapped onto `approval.request`/`approval.response` (with authority staying at
+the user's wallet or daemon — never the page), and an `AgentCapabilities`
+declaration. Nobody has decided to do this. Do not implement it on the strength
+of this paragraph.
 
 **Consequences.** The standardized stack positioning is complete: WebMCP at
 the input edge (ADR-006), ACP at the runtime (ADR-004), AG-UI at the output

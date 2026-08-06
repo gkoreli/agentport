@@ -1,103 +1,75 @@
+import {
+  EventType,
+  type BaseEvent,
+  type ReasoningEndEvent,
+  type ReasoningMessageContentEvent,
+  type ReasoningMessageEndEvent,
+  type ReasoningMessageStartEvent,
+  type ReasoningStartEvent,
+  type RunErrorEvent,
+  type RunFinishedEvent,
+  type RunStartedEvent,
+  type TextMessageContentEvent,
+  type TextMessageEndEvent,
+  type TextMessageStartEvent,
+  type ToolCallArgsEvent,
+  type ToolCallEndEvent,
+  type ToolCallResultEvent,
+  type ToolCallStartEvent,
+} from '@ag-ui/core';
 import type { AgentSessionHandle, SessionEvents } from '@agentport/client';
 
-interface BaseEvent {
-  timestamp?: number;
-  rawEvent?: unknown;
-}
+/**
+ * The event vocabulary comes from the spec's own package, not from a local
+ * restatement of it. A copy drifts silently — the hand-rolled version of this
+ * file missed TOOL_CALL_RESULT entirely, so renderers saw tool calls but never
+ * their results.
+ *
+ * `@ag-ui/core` pulls in zod, which the bundle-size rules for
+ * `@agentport/protocol` and `@agentport/client` would forbid. Those rules do
+ * not reach here: the dependency direction is agui → client and never the
+ * reverse, and `@agentport/agui` is consumed only by our own demo surfaces
+ * (site/src/agentport-ui.ts, bundled into inkwell and tasker). It is NOT in
+ * connect.js, the drop-in that ships into other people's pages.
+ */
+export { EventType } from '@ag-ui/core';
+export type {
+  ReasoningEndEvent,
+  ReasoningMessageContentEvent,
+  ReasoningMessageEndEvent,
+  ReasoningMessageStartEvent,
+  ReasoningStartEvent,
+  RunErrorEvent,
+  RunFinishedEvent,
+  RunStartedEvent,
+  TextMessageContentEvent,
+  TextMessageEndEvent,
+  TextMessageStartEvent,
+  ToolCallArgsEvent,
+  ToolCallEndEvent,
+  ToolCallResultEvent,
+  ToolCallStartEvent,
+} from '@ag-ui/core';
 
-export type RunStartedEvent = BaseEvent & {
-  type: 'RUN_STARTED';
-  threadId: string;
-  runId: string;
-};
-
-export type RunFinishedEvent = BaseEvent & {
-  type: 'RUN_FINISHED';
-  threadId: string;
-  runId: string;
-  result?: unknown;
-};
-
-export type RunErrorEvent = BaseEvent & {
-  type: 'RUN_ERROR';
-  message: string;
-  code?: string;
-};
-
-export type TextMessageStartEvent = BaseEvent & {
-  type: 'TEXT_MESSAGE_START';
-  messageId: string;
-  role: 'assistant';
-};
-
-export type TextMessageContentEvent = BaseEvent & {
-  type: 'TEXT_MESSAGE_CONTENT';
-  messageId: string;
-  delta: string;
-};
-
-export type TextMessageEndEvent = BaseEvent & {
-  type: 'TEXT_MESSAGE_END';
-  messageId: string;
-};
-
-export type ToolCallStartEvent = BaseEvent & {
-  type: 'TOOL_CALL_START';
-  toolCallId: string;
-  toolCallName: string;
-  parentMessageId?: string;
-};
-
-export type ToolCallArgsEvent = BaseEvent & {
-  type: 'TOOL_CALL_ARGS';
-  toolCallId: string;
-  delta: string;
-};
-
-export type ToolCallEndEvent = BaseEvent & {
-  type: 'TOOL_CALL_END';
-  toolCallId: string;
-};
-
-export type ReasoningStartEvent = BaseEvent & {
-  type: 'REASONING_START';
-  messageId: string;
-};
-
-export type ReasoningMessageStartEvent = BaseEvent & {
-  type: 'REASONING_MESSAGE_START';
-  messageId: string;
-  role: 'reasoning';
-};
-
-export type ReasoningMessageContentEvent = BaseEvent & {
-  type: 'REASONING_MESSAGE_CONTENT';
-  messageId: string;
-  delta: string;
-};
-
-export type ReasoningMessageEndEvent = BaseEvent & {
-  type: 'REASONING_MESSAGE_END';
-  messageId: string;
-};
-
-export type ReasoningEndEvent = BaseEvent & {
-  type: 'REASONING_END';
-  messageId: string;
-};
-
+/**
+ * CUSTOM is AG-UI's escape hatch. The spec types its `value` as `any`; these
+ * two aliases pin the payloads AgentPort actually puts there so consumers keep
+ * real types. Only the AgentPort-specific part is local — the base fields and
+ * the discriminant still come from the spec.
+ */
 export type AgentPortApprovalEvent = BaseEvent & {
-  type: 'CUSTOM';
+  type: EventType.CUSTOM;
   name: 'agentport.approval';
   value: SessionEvents['approval'];
 };
 
 export type AgentPortClosedEvent = BaseEvent & {
-  type: 'CUSTOM';
+  type: EventType.CUSTOM;
   name: 'agentport.closed';
   value: SessionEvents['closed'];
 };
 
+/** The subset of the AG-UI event union this adapter can produce. */
 export type AguiEvent =
   | RunStartedEvent
   | RunFinishedEvent
@@ -108,6 +80,7 @@ export type AguiEvent =
   | ToolCallStartEvent
   | ToolCallArgsEvent
   | ToolCallEndEvent
+  | ToolCallResultEvent
   | ReasoningStartEvent
   | ReasoningMessageStartEvent
   | ReasoningMessageContentEvent
@@ -138,6 +111,23 @@ interface PendingRun {
   settled: boolean;
 }
 
+/**
+ * TOOL_CALL_RESULT carries a string. Tool results are hostile data (they can
+ * come from a poisoned document), so serialization must degrade visibly rather
+ * than throw and kill the event stream mid-run.
+ */
+function resultText(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (value === undefined) return '';
+  try {
+    return JSON.stringify(value, null, 2) ?? String(value);
+  } catch {
+    // Cycles and BigInt make stringify throw; the coerced form still reaches
+    // the renderer, so nothing is silently dropped.
+    return String(value);
+  }
+}
+
 class Translator {
   readonly #session: AgentSessionHandle;
   readonly #emit: Emit;
@@ -159,7 +149,7 @@ class Translator {
       session.on('done', (event: SessionEvents['done']) => this.#onDone(event)),
       session.on('tool', (event: SessionEvents['tool']) => this.#onTool(event)),
       session.on('approval', (event: SessionEvents['approval']) =>
-        this.#emit({ type: 'CUSTOM', name: 'agentport.approval', value: event }),
+        this.#emit({ type: EventType.CUSTOM, name: 'agentport.approval', value: event }),
       ),
       session.on('closed', (event: SessionEvents['closed']) => this.#onClosed(event)),
     ];
@@ -168,7 +158,7 @@ class Translator {
   run(text: string): Promise<string> {
     const pending: PendingRun = { runId: this.#id('run', ++this.#nextRun), settled: false };
     this.#pendingRuns.push(pending);
-    this.#emit({ type: 'RUN_STARTED', threadId: this.#session.id, runId: pending.runId });
+    this.#emit({ type: EventType.RUN_STARTED, threadId: this.#session.id, runId: pending.runId });
 
     let result: Promise<string>;
     try {
@@ -188,7 +178,7 @@ class Translator {
         pending.settled = true;
         this.#removePending(pending);
         this.#emit({
-          type: 'RUN_FINISHED',
+          type: EventType.RUN_FINISHED,
           threadId: this.#session.id,
           runId: pending.runId,
           result: value,
@@ -223,10 +213,10 @@ class Translator {
     const prompt = this.#prompt(event.promptId);
     if (!prompt.textStarted) {
       prompt.textStarted = true;
-      this.#emit({ type: 'TEXT_MESSAGE_START', messageId: event.promptId, role: 'assistant' });
+      this.#emit({ type: EventType.TEXT_MESSAGE_START, messageId: event.promptId, role: 'assistant' });
     }
     prompt.text += event.text;
-    this.#emit({ type: 'TEXT_MESSAGE_CONTENT', messageId: event.promptId, delta: event.text });
+    this.#emit({ type: EventType.TEXT_MESSAGE_CONTENT, messageId: event.promptId, delta: event.text });
   }
 
   #onThought(event: SessionEvents['thought']): void {
@@ -235,10 +225,10 @@ class Translator {
     const messageId = this.#reasoningId(event.promptId);
     if (!prompt.reasoningStarted) {
       prompt.reasoningStarted = true;
-      this.#emit({ type: 'REASONING_START', messageId });
-      this.#emit({ type: 'REASONING_MESSAGE_START', messageId, role: 'reasoning' });
+      this.#emit({ type: EventType.REASONING_START, messageId });
+      this.#emit({ type: EventType.REASONING_MESSAGE_START, messageId, role: 'reasoning' });
     }
-    this.#emit({ type: 'REASONING_MESSAGE_CONTENT', messageId, delta: event.text });
+    this.#emit({ type: EventType.REASONING_MESSAGE_CONTENT, messageId, delta: event.text });
   }
 
   #onDone(event: SessionEvents['done']): void {
@@ -251,14 +241,14 @@ class Translator {
     if (prompt.external) {
       if (event.stopReason === 'error') {
         this.#emit({
-          type: 'RUN_ERROR',
+          type: EventType.RUN_ERROR,
           message: event.error ?? 'agent error',
           code: 'AGENT_ERROR',
           rawEvent: { runId: prompt.runId, promptId: event.promptId, stopReason: event.stopReason },
         });
       } else {
         this.#emit({
-          type: 'RUN_FINISHED',
+          type: EventType.RUN_FINISHED,
           threadId: this.#session.id,
           runId: prompt.runId,
           result: prompt.text,
@@ -269,12 +259,23 @@ class Translator {
 
   #onTool(event: SessionEvents['tool']): void {
     const toolCallId = this.#id('tool', ++this.#nextTool);
-    this.#emit({ type: 'TOOL_CALL_START', toolCallId, toolCallName: event.name });
-    this.#emit({ type: 'TOOL_CALL_ARGS', toolCallId, delta: JSON.stringify(event.arguments) });
-    // AgentSession exposes the completed call but not its wire id. rawEvent is
-    // the AG-UI escape hatch that preserves the result without inventing an
-    // incompatible field on TOOL_CALL_END or turning a tool failure into a run failure.
-    this.#emit({ type: 'TOOL_CALL_END', toolCallId, rawEvent: event });
+    this.#emit({ type: EventType.TOOL_CALL_START, toolCallId, toolCallName: event.name });
+    this.#emit({ type: EventType.TOOL_CALL_ARGS, toolCallId, delta: JSON.stringify(event.arguments) });
+    this.#emit({ type: EventType.TOOL_CALL_END, toolCallId });
+    // TOOL_CALL_RESULT is where every AG-UI renderer looks for what a tool
+    // returned, so the result belongs in `content` and nowhere else.
+    // AgentSession reports the completed call without a wire message id, so the
+    // result message is identified from the call. rawEvent still carries the
+    // AgentPort event because the spec has no success/failure discriminator on
+    // a tool result — a failed tool is a result, not a failed run.
+    this.#emit({
+      type: EventType.TOOL_CALL_RESULT,
+      messageId: `${toolCallId}:result`,
+      toolCallId,
+      content: event.ok ? resultText(event.result) : (event.error ?? 'tool call failed'),
+      role: 'tool',
+      rawEvent: event,
+    });
   }
 
   #onClosed(event: SessionEvents['closed']): void {
@@ -289,7 +290,7 @@ class Translator {
       this.#emitRunError(pending.runId, new Error(`session closed: ${event.reason}`));
     }
     this.#pendingRuns.splice(0);
-    this.#emit({ type: 'CUSTOM', name: 'agentport.closed', value: event });
+    this.#emit({ type: EventType.CUSTOM, name: 'agentport.closed', value: event });
     this.stop();
     this.#finish();
   }
@@ -322,7 +323,7 @@ class Translator {
       reasoningStarted: false,
     };
     this.#prompts.set(promptId, prompt);
-    this.#emit({ type: 'RUN_STARTED', threadId: this.#session.id, runId: prompt.runId });
+    this.#emit({ type: EventType.RUN_STARTED, threadId: this.#session.id, runId: prompt.runId });
     return prompt;
   }
 
@@ -332,16 +333,16 @@ class Translator {
   }
 
   #closePrompt(promptId: string, prompt: PromptState): void {
-    if (prompt.textStarted) this.#emit({ type: 'TEXT_MESSAGE_END', messageId: promptId });
+    if (prompt.textStarted) this.#emit({ type: EventType.TEXT_MESSAGE_END, messageId: promptId });
     if (!prompt.reasoningStarted) return;
     const messageId = this.#reasoningId(promptId);
-    this.#emit({ type: 'REASONING_MESSAGE_END', messageId });
-    this.#emit({ type: 'REASONING_END', messageId });
+    this.#emit({ type: EventType.REASONING_MESSAGE_END, messageId });
+    this.#emit({ type: EventType.REASONING_END, messageId });
   }
 
   #emitRunError(runId: string, error: unknown): void {
     this.#emit({
-      type: 'RUN_ERROR',
+      type: EventType.RUN_ERROR,
       message: error instanceof Error ? error.message : String(error),
       code: 'AGENTPORT_RUN_ERROR',
       rawEvent: { runId },

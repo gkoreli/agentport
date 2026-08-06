@@ -139,14 +139,20 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
         case 'TOOL_CALL_ARGS':
           chat.apply({ type: 'tool.input', id: event.toolCallId, input: event.delta });
           return;
-        case 'TOOL_CALL_END': {
+        case 'TOOL_CALL_END':
+          // The call is settled here; what it returned arrives next, exactly as
+          // a third-party AG-UI renderer would see it.
+          chat.apply({ type: 'tool.end', id: event.toolCallId });
+          return;
+        case 'TOOL_CALL_RESULT': {
+          // `content` is the spec field every renderer reads. rawEvent carries
+          // the AgentPort outcome because AG-UI has no success flag on a result.
           const call = event.rawEvent as SessionEvents['tool'];
-          const result = call.result === undefined ? undefined : [text(displayJson(call.result))];
           chat.apply({
             type: 'tool.end',
             id: event.toolCallId,
             status: call.ok ? 'complete' : 'error',
-            output: result,
+            output: event.content === '' ? undefined : [text(event.content)],
             error: call.ok ? undefined : (call.error ?? 'Tool call failed'),
           });
           return;
