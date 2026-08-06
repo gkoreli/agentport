@@ -115,8 +115,15 @@ const daemon = new AgentDaemon({
     return ask('  Allow?');
   },
 
-  onLocalApproval: async (summary, call) => {
+  onLocalApproval: async (domain, summary, call) => {
     console.log('');
+    // Which authority, in words, before anything the agent wrote. The summary
+    // is agent-authored and can be made to read like a site's own tool.
+    console.log(
+      domain === 'site_tool'
+        ? '  The website is asking your agent to use a tool it lent:'
+        : "  Your agent wants to use ITS OWN tool on this machine:",
+    );
     console.log(`  ${summary}`);
     if (call) console.log(`    ${call.name}(${JSON.stringify(call.arguments).slice(0, 200)})`);
     return ask('  Approve?');

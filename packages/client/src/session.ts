@@ -14,6 +14,7 @@ import {
   randomId,
   toErr,
   type ApprovalRequest,
+  type AuthorityDomain,
   type CapabilityGrant,
   type Frame,
   type HistoryEntry,
@@ -58,6 +59,16 @@ export interface SiteTool extends ToolDefinition {
 }
 
 export interface ApprovalPrompt {
+  /**
+   * WHICH authority is being asked about (ADR-023). A renderer must say this
+   * in words a human recognises — "your agent's own tool" versus "a tool this
+   * site lent it" — because it is the distinction that makes the question
+   * answerable. `site_tool` is bounded by the signed grant; `runtime_own_tool`
+   * is the agent's own capability on the user's machine, bounded by nothing
+   * the site can see.
+   */
+  domain: AuthorityDomain;
+  /** Agent-authored, therefore untrusted. Never present it as verified fact. */
   summary: string;
   call?: { name: string; arguments: Record<string, unknown> };
 }
@@ -329,7 +340,10 @@ export class AgentSession extends Emitter<SessionEvents> implements AgentSession
     }
 
     if (tool.requiresApproval || this.#alwaysAsk.has(frame.name)) {
+      // This one the client knows for itself: the tool came from the grant
+      // it registered, so the domain is not taken from anybody's word.
       const prompt: ApprovalPrompt = {
+        domain: 'site_tool',
         summary: `Run ${frame.name}`,
         call: { name: frame.name, arguments: frame.arguments },
       };
@@ -402,7 +416,10 @@ export class AgentSession extends Emitter<SessionEvents> implements AgentSession
   }
 
   async #onApproval(frame: ApprovalRequest): Promise<void> {
-    const prompt: ApprovalPrompt = { summary: frame.summary, call: frame.call };
+    // The domain is the daemon's stamp, carried through rather than inferred
+    // from the summary — which is agent-authored text and can be made to read
+    // like anything at all.
+    const prompt: ApprovalPrompt = { domain: frame.domain, summary: frame.summary, call: frame.call };
     let granted = false;
     try {
       granted = await this.#decide(prompt);

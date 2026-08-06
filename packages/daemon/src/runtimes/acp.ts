@@ -380,7 +380,14 @@ export class AcpRuntime implements AgentRuntime {
             params.toolCall.title ?? 'The agent wants to run a tool',
             params.toolCall.rawInput && typeof params.toolCall.rawInput === 'object'
               ? {
-                  name: params.toolCall.title ?? 'tool',
+                  // `call.name` is schema-validated against TOOL_NAME_PATTERN,
+                  // and a human title is not a tool name: a title containing
+                  // any character that pattern forbids used to reject the
+                  // whole frame, so the user was never asked and the agent's
+                  // request hung until the turn aborted. The title already
+                  // reaches the user as `summary`; the daemon does not need a
+                  // second, laundered copy of it in an identifier field.
+                  name: 'runtime.tool',
                   arguments: params.toolCall.rawInput as Record<string, unknown>,
                 }
               : undefined,

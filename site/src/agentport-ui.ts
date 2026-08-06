@@ -506,8 +506,18 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
           const toolName = computed(() => approval.value.prompt.call?.name ?? 'Agent request');
           const hasArguments = computed(() => approval.value.prompt.call !== undefined);
           const argumentsText = computed(() => JSON.stringify(approval.value.prompt.call?.arguments ?? {}, null, 2));
+          // Which authority, in words, ABOVE the agent's own text (ADR-023
+          // R4). `summary` is authored by the agent and steered by whatever
+          // it has been reading, so it can be made to read like one of this
+          // site's own tools; this line is the only part of the card the
+          // agent does not write.
+          const authority = computed(() =>
+            approval.value.prompt.domain === 'site_tool'
+              ? 'A tool this site lent your agent'
+              : "Your agent's own tool, on your machine",
+          );
           return html`<section class="ap-approval" aria-live="polite">
-            <div class="ap-approval-label">Approval required</div>
+            <div class="ap-approval-label">${authority}</div>
             <strong>${summary}</strong>
             <span class="ap-approval-tool">${toolName}</span>
             ${when(hasArguments, () => html`<pre>${argumentsText}</pre>`)}

@@ -42,6 +42,7 @@ import {
   verifyCert,
   verifyDelegation,
   type AgentCert,
+  type AuthorityDomain,
   type CapabilityGrant,
   type Frame,
   type HistoryEntry,
@@ -157,7 +158,11 @@ export interface DaemonOptions {
    * Approval for a single gated tool call in a connect.js session. Same
    * reasoning: the requesting page must not be the one saying yes.
    */
-  onLocalApproval?: (summary: string, call?: { name: string; arguments: Record<string, unknown> }) => Promise<boolean>;
+  onLocalApproval?: (
+    domain: AuthorityDomain,
+    summary: string,
+    call?: { name: string; arguments: Record<string, unknown> },
+  ) => Promise<boolean>;
   /**
    * Test-only clock seam, as `RelayOptions.now` is. The approval window is
    * minutes long by design, and an expiry check that has to sleep for one is a
@@ -1071,8 +1076,13 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     // viaConnect terminal gate.
     if (session.viaConnect && (tool.requiresApproval || session.grant.alwaysAsk.includes(name))) {
       this.#log.info('surface tool awaiting terminal approval', { sessionId: session.id, data: { tool: name } });
-      const approved = await (this.#options.onLocalApproval?.(`Run ${name}`, { name, arguments: args }) ??
-        Promise.resolve(false));
+      // A GRANTED tool, asked about in the terminal. The other caller of
+      // onLocalApproval is the runtime's own capability, and until now the
+      // two were indistinguishable to whoever was reading (ADR-023).
+      const approved = await (this.#options.onLocalApproval?.('site_tool', `Run ${name}`, {
+        name,
+        arguments: args,
+      }) ?? Promise.resolve(false));
       this.#log.info('terminal approval resolved', {
         sessionId: session.id,
         data: { tool: name, granted: approved },
@@ -1119,7 +1129,7 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     if (session.viaConnect) {
       const ask = this.#options.onLocalApproval;
       if (!ask) return Promise.resolve(false);
-      return ask(summary, call);
+      return ask('runtime_own_tool', summary, call);
     }
 
     const id = randomId('appr_');
@@ -1132,7 +1142,21 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     if (signal?.aborted) abort();
     else signal?.addEventListener('abort', abort, { once: true });
     if (!signal?.aborted) {
-      this.#sendSession(session, { t: 'approval.request', s: session.id, id, summary, ...(call ? { call } : {}) });
+      // The domain is a CONSTANT here, not a parameter, and that is the
+      // enforcement (ADR-023 R2). `TurnContext.requestApproval` is the only
+      // way a runtime can reach this, so everything arriving through it is by
+      // construction the runtime's own capability — and the runtime is
+      // precisely the party that must not get to say otherwise, since the
+      // `summary` beside it is already agent-authored text that page content
+      // steers. A parameter would be a self-declared field.
+      this.#sendSession(session, {
+        t: 'approval.request',
+        s: session.id,
+        id,
+        domain: 'runtime_own_tool',
+        summary,
+        ...(call ? { call } : {}),
+      });
     }
     return deferred.promise.finally(() => signal?.removeEventListener('abort', abort));
   }

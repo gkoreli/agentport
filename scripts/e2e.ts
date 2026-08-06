@@ -268,12 +268,14 @@ check('agent shows as online', agents[0]?.online === true, agents[0]);
 
 console.log('\n3. session + capability grant');
 const approvals: string[] = [];
+const approvalDomains: string[] = [];
 const session = await wallet.openSession({
   agent: agentKeys.publicKey,
   surface: { name: 'Inkwell', route: '/documents/doc_123', origin: 'https://inkwell.test' },
   tools: inkwellTools(),
   decide: async (prompt) => {
     approvals.push(prompt.call?.name ?? prompt.summary);
+    approvalDomains.push(prompt.domain);
     return true;
   },
 });
@@ -292,6 +294,21 @@ console.log('\n4. prompt -> tool loop');
 const reply = await session.prompt('Then the wind rose.');
 check('agent read the document', toolEvents.includes('inkwell.document.read:true'), toolEvents);
 check('write was approved', approvals.length > 0, approvals);
+// ADR-023: the two authorities must be TELLABLE APART on the decision
+// surface. This one write produces both — the runtime asks first through its
+// own advisory channel, then the grant gate asks about the actual tool.call —
+// and before this change they arrived indistinguishable, so a policy written
+// for one would have answered the other.
+check(
+  'the grant gate asks as a site tool',
+  approvalDomains.includes('site_tool'),
+  approvalDomains,
+);
+check(
+  "the runtime's own request is a different domain",
+  approvalDomains.includes('runtime_own_tool'),
+  approvalDomains,
+);
 check('document was mutated in the page', doc.text.endsWith('Then the wind rose.'), doc.text);
 check('agent streamed a reply', reply.includes('Done.'), reply);
 

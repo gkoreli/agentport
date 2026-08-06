@@ -690,11 +690,34 @@ export const ToolResult = obj({
 });
 export type ToolResult = Infer<typeof ToolResult>;
 
+/**
+ * Which authority an approval is about (ADR-023).
+ *
+ * Closed, because an open string is one more thing a peer self-declares, and
+ * because whoever renders this has to be able to say something true about it.
+ * `site_tool` is bounded by the signed grant; `runtime_own_tool` is the
+ * agent's own capability on the user's machine and is bounded by nothing the
+ * site can see. Those are different questions and a human must be asked them
+ * differently.
+ */
+export const AuthorityDomain = en('site_tool', 'runtime_own_tool');
+export type AuthorityDomain = Infer<typeof AuthorityDomain>;
+
 export const ApprovalRequest = obj({
   t: lit('approval.request'),
   s: idField,
   id: idField,
-  /** Human-readable description of what the agent wants to do. */
+  /**
+   * Stamped by the daemon, never by the runtime (ADR-023 R2). The runtime is
+   * exactly the party that cannot be trusted to classify its own request:
+   * `summary` below is already agent-chosen text, and page content steers it.
+   */
+  domain: AuthorityDomain,
+  /**
+   * Human-readable description of what the agent wants to do. Agent-authored
+   * and therefore untrusted — a renderer must not present it as a verified
+   * statement of what will happen.
+   */
   summary: str(0, MAX_DESCRIPTION_CHARS),
   /** The tool call this approval gates, when applicable. */
   call: opt(obj({ name: toolName, arguments: record })),

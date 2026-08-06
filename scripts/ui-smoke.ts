@@ -399,17 +399,36 @@ FakeRelay.latest?.sealedReply({
   t: 'approval.request',
   s: 'sess_test',
   id: 'approval_test',
+  // The agent's own capability, wearing a summary that reads exactly like one
+  // of the site's granted tools — the confusion ADR-023 exists to stop.
+  domain: 'runtime_own_tool',
   summary: 'Write the document',
   call: { name: 'inkwell.document.write', arguments: { text: 'changed' } },
 });
 await new Promise((resolve) => setTimeout(resolve, 20));
 flush();
 check('approval card shows summary and arguments', rendered().includes('Write the document') && rendered().includes('changed'), rendered().slice(0, 300));
+// The one line on the card the agent does not write. Without it a user reads
+// a convincing site-tool summary and has no way to know this is their own
+// agent's tool on their own machine (ADR-023 R4).
+check(
+  'the card says WHICH authority is being asked about',
+  rendered().includes("Your agent's own tool, on your machine"),
+  rendered().slice(0, 400),
+);
 const allow = (clickMount as unknown as { querySelector(s: string): { click(): void } | null }).querySelector('.ap-approval-actions button:last-child');
 allow?.click();
 await new Promise((resolve) => setTimeout(resolve, 20));
 check('Allow resolves the protocol decision', FakeRelay.frames.includes('enc:approval.response'), FakeRelay.frames);
-check('the approval card settles and disappears', !rendered().includes('Approval required'), rendered().slice(0, 260));
+// Checks the AUTHORITY line, not the summary: the summary also appears in the
+// transcript, so asserting on it would pass whether or not the card cleared.
+// (The old assertion used the 'Approval required' label, which this change
+// replaced — it would have become vacuously true.)
+check(
+  'the approval card settles and disappears',
+  !rendered().includes("Your agent's own tool, on your machine"),
+  rendered().slice(0, 260),
+);
 
 console.log(failures === 0 ? '\nUI smoke passed' : `\n${failures} failed`);
 process.exit(failures === 0 ? 0 : 1);
