@@ -54,7 +54,7 @@ damage outlives the moment: everything downstream inherits false provenance.
 The agent will later act "because you told me to", and no frame, hash or
 domain can un-attribute that afterwards.
 
-### Why there is no degraded mode
+### Why bounding the answer does not help
 
 The tempting middle path is to allow it everywhere and mark the answer
 untrusted, the way tool results are marked. That is useless by construction:
@@ -62,10 +62,24 @@ the entire value of an elicitation is that the user's answer is
 *authoritative*. An answer the agent must not rely on is an answer the agent
 must ignore, which is identical to not having asked.
 
-Compare an approval, which degrades gracefully in three directions — ask more
-often, ask in a worse surface, ask about smaller things — and is still an
-approval in every one. **Elicitation has no such knob.** So the choice is
-have-it or refuse-it, and refusal is forced rather than chosen.
+An earlier draft said flatly that elicitation "has no degraded mode". That is
+true of a free-text elicitation and **false of a closed-choice one** — where
+the agent supplies the options and the user only selects, a forged answer can
+only pick something the agent already authored and was willing to act on. That
+is bounded much as an approval is bounded, and `AskUserQuestion` is
+substantially a multiple-choice affordance, so the objection is not
+hypothetical.
+
+The argument survives in a narrower and stronger form:
+
+> **Elicitation can be degraded in its content and cannot be degraded in its
+> authority — and it is the authority the page must not hold.**
+
+Bounding the answer space bounds *what* can be said. It does nothing about
+*who is recorded as having said it*. A page-selected choice still arrives as
+"your user chose B", and attribution to the user is not a side effect of the
+feature, it **is** the feature — so it cannot be narrowed away by design. No
+bounding of the answer space makes a page-answered elicitation acceptable.
 
 ## Decision
 
@@ -234,6 +248,53 @@ with that ban from the start rather than retrofitting it. Taken: a form field
 is not a credential prompt, and the surfaces must not grow one. This is
 cheaper to hold now than to walk back after a site has learned the shape —
 the same reasoning as freezing the signing envelope early.
+
+### R10. What a page may answer for — and the hole this exposes in ADR-023
+
+Run R1's provenance argument against something we ship today and it seems to
+prove too much. A page-answered **approval** in the delegated tier also
+arrives as "your user said yes" — same false provenance, same party, same
+tier. If provenance is what condemns page-answered elicitation, why not that?
+
+The resolution is not quantitative, and it is not "bounded by the grant". It
+is structural, and it turns on a fact easy to miss: **in the delegated tier
+the site's tools are the site's own functions.** `SiteTool` carries a
+`handler` the page supplies, and the client invokes it in the page
+(`session.ts:374`). A site forging an approval for one of its own tools has
+gained *nothing it did not already have* — it could simply call the function.
+Those approvals do not protect the user from the site; they protect the user
+from the **agent** being talked into misusing the site's tools by hostile
+content. Self-referential, not escalation.
+
+That gives the general rule, of which R1 is one case:
+
+> **A page may answer for its own capability. It may not answer for the
+> user's, and it may not answer as the user.**
+
+- *site-tool approval, page-answered* — the page's own capability. Fine.
+- *elicitation, page-answered* — answering **as** the user. Refused (R1).
+- *runtime-own-tool approval, page-answered* — answering for **the user's**
+  capability. **Also wrong, and we ship it today.**
+
+That last row is a live hole, and ADR-023 got close enough to name it without
+closing it. The daemon routes every non-`viaConnect` approval to the client
+panel (`daemon.ts:1146-1151`), and ADR-023 established that
+`runtime_own_tool` approvals travel that same path. So in a delegated session
+**the page is asked whether the agent may use the agent's own shell** — and
+ADR-023 made the two domains *distinguishable*, so a renderer can tell the
+truth, but it did not make them *route differently*.
+
+Distinguishable was the right first step and is not sufficient. The domain
+field is exactly the discriminator needed: a `runtime_own_tool` approval
+belongs on a surface the origin cannot forge, by the same rule as an
+elicitation, and for the same reason.
+
+**This is not fixed here.** It is a separate change to ADR-023's routing
+rather than a paragraph in ADR-024, it wants its own adversarial check, and
+folding it into an elicitation ADR would bury it. Recorded so that the next
+person finds it stated rather than rediscovers it — and so that nobody reads
+ADR-024 as implying that page-answered approvals are fine in general. They are
+fine in exactly one case, for a reason that does not extend.
 
 ## The cost, stated rather than discovered
 
