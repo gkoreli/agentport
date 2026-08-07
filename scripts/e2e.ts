@@ -2235,6 +2235,111 @@ console.log("\n18. a page may not answer for the user's own capability (ADR-024 
   await r18.close();
 }
 
+// --- 19. a delegated attachment can come back, and cannot be talked into asking
+// Two things nothing covered. The first is a live break of a shipped tier;
+// the second is ADR-024 R2's own falsifiability clause.
+console.log('\n19. delegated resume, and a runtime that ignores its policy');
+{
+  const r19 = new Relay({ port: 0, log: () => {} });
+  await r19.listening();
+  const url19 = `ws://127.0.0.1:${r19.port}`;
+  const owner19 = generateKeyPair();
+  const agent19 = generateKeyPair();
+  const cert19 = signCert(owner19.secretKey, {
+    user: owner19.publicKey,
+    agent: agent19.publicKey,
+    name: "Goga's Real Agent Name",
+    runtime: 'demo-writer',
+    issuedAt: Date.now(),
+  });
+
+  // A runtime that asks REGARDLESS of what its policy said — the peer we do
+  // not control, and the case capability negotiation alone cannot cover.
+  const askAttempted: boolean[] = [];
+  class DisobedientRuntime implements AgentRuntime {
+    readonly name = 'disobedient';
+    openSession(): void {}
+    async prompt(_text: string, ctx: TurnContext): Promise<void> {
+      const answers = await ctx.ask({ message: 'Who are you really?', fields: [{ key: 'who', label: 'You' }] });
+      askAttempted.push(answers !== undefined);
+      ctx.say('done');
+    }
+  }
+
+  const daemon19 = new AgentDaemon({
+    relayUrl: url19,
+    identity: {
+      secretKey: agent19.secretKey,
+      publicKey: agent19.publicKey,
+      name: "Goga's Real Agent Name",
+      runtime: 'demo-writer',
+      cert: cert19,
+    },
+    createRuntime: () => new DisobedientRuntime(),
+  });
+  await daemon19.start();
+
+  const pageKeys = generateKeyPair();
+  const origin19 = 'https://delegated-resume.test';
+  const grant19 = buildGrant({ surface: { name: 'Delegated' }, tools: [] });
+  const issued19 = Date.now();
+  const approved19 = {
+    grant: grant19,
+    delegation: signDelegation(owner19.secretKey, {
+      delegate: pageKeys.publicKey,
+      agent: agent19.publicKey,
+      origin: origin19,
+      grantHash: hashGrant(grant19),
+      issuedAt: issued19,
+      expiresAt: issued19 + 60 * 60 * 1000,
+    }),
+  };
+  const firstTab = new AgentWallet({ relayUrl: url19, userSecretKey: pageKeys.secretKey, socketFactory });
+  await firstTab.connect();
+  const delegated19 = await firstTab.openSession({
+    agent: agent19.publicKey,
+    approved: approved19,
+    surface: { name: 'Delegated', origin: origin19 },
+    tools: [],
+  });
+
+  // The page must NEVER be asked on this tier, even by a runtime that tries.
+  let pageWasAsked = false;
+  delegated19.on('ask', () => {
+    pageWasAsked = true;
+  });
+  await delegated19.prompt('go');
+  check('a runtime cannot ask where the page would answer', pageWasAsked === false, pageWasAsked);
+  check('and its ask resolves as unanswered rather than hanging', askAttempted[0] === false, askAttempted);
+
+  // Now the resume. A refreshed tab is a NEW page key by construction, so it
+  // presents only the bearer token — exactly the real hosted-wallet flow.
+  const token19 = firstTab.resumeTokenFor(delegated19.id)!;
+  firstTab.disconnect();
+  await new Promise((resolve) => setTimeout(resolve, 250));
+
+  const secondTab = new AgentWallet({ relayUrl: url19, userSecretKey: generateKeyPair().secretKey, socketFactory });
+  await secondTab.connect();
+  let resumeFailure = '';
+  const resumed19 = await secondTab
+    .resumeSession({ id: delegated19.id, agent: agent19.publicKey, token: token19, tools: [] })
+    .catch((err: Error) => {
+      resumeFailure = err.message;
+      return undefined;
+    });
+  check('a delegated attachment survives a reload', resumed19 !== undefined, resumeFailure);
+  check(
+    'and it comes back under the name the page was given, not the real one',
+    resumed19?.session.info.agentName === 'Personal agent',
+    resumed19?.session.info.agentName,
+  );
+
+  secondTab.close();
+  firstTab.close();
+  await daemon19.stop();
+  await r19.close();
+}
+
 // --- teardown ---------------------------------------------------------------
 
 session.close();

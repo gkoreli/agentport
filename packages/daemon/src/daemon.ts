@@ -854,10 +854,19 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     const missed = session.missed;
     session.missed = 0;
 
+    // ONE name, used for both the field and the proof. They used to be
+    // computed separately — the field said 'Personal agent' for a delegated
+    // session while the proof signed the real one — so verifyEpk failed at
+    // the client and every delegated resume aborted with "agent sealing-key
+    // proof failed". The open path already derived it once and got this
+    // right; the resume path derived it twice and got it wrong, which is the
+    // whole argument for deriving it once.
+    const resumedAgentName = session.delegation ? 'Personal agent' : this.#options.identity.name;
+
     this.#send({
       t: 'session.resumed',
       s: frame.s,
-      agentName: session.delegation ? 'Personal agent' : this.#options.identity.name,
+      agentName: resumedAgentName,
       runtime: this.#options.identity.runtime,
       surface: session.surface,
       grant: session.grant,
@@ -872,7 +881,7 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
         frame.s,
         mine.publicKey,
         answerProofBinding('resume', frame.client, frame.epk, session.surface, session.grant, {
-          agentName: this.#options.identity.name,
+          agentName: resumedAgentName,
           runtime: this.#options.identity.runtime,
           missed,
           ownTools: session.policy.mayUseOwnTools,
@@ -1265,6 +1274,26 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     question: AskQuestion,
     signal?: AbortSignal,
   ): Promise<AskAnswers | undefined> {
+    // The capability declaration is what SHOULD stop this — a runtime that
+    // sees mayAsk false never advertises the tool, so its agent has no way to
+    // ask (ADR-024 R2). But that is the runtime honouring a policy, and this
+    // is the daemon: a runtime that ignored it, or one we did not write,
+    // would otherwise put a question on a tier where the PAGE answers it, and
+    // the answer would arrive carrying the user's authority while being
+    // authored by the site. R2's own falsifiability clause said this needed
+    // closing if negotiation ever stopped being sufficient; it costs one
+    // check, so it does not wait for that to be demonstrated.
+    //
+    // Resolving undefined rather than throwing keeps the contract: every
+    // non-answer means "proceed without one", and a runtime asking where it
+    // may not is a bug to log, not a turn to destroy.
+    if (!session.policy.mayAsk) {
+      this.#log.warn('runtime asked on an attachment with no trusted answer surface; declining', {
+        sessionId: session.id,
+      });
+      return Promise.resolve(undefined);
+    }
+
     const id = randomId('ask_');
     const deferred = new Deferred<AskAnswers | undefined>();
     session.asks.set(id, deferred);
