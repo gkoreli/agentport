@@ -255,7 +255,14 @@ nothing. They are cheap to apply and each one has caught a real instance.
    never mentions it. The wire harness had 500 fixture cases, a coverage gate
    and two exhaustiveness guards, and had never heard of `PROTOCOL_VERSION`,
    which is the field the wire's compatibility actually depends on.
-6. **When the only available check would lie, do not write it — record the
+6. **When you sabotage something to prove a check fires, read the failure and
+   confirm it is the failure you intended.** A different red is not evidence,
+   and it is harder to catch than no red because something *did* go red and
+   you were looking for red. Renaming a `case` label to prove an exhaustive
+   switch produced three errors, none of them the guard — a renamed case is
+   not a missing case. Everything else here assumes the failure you observe
+   is the failure you caused; this is the line that checks the assumption.
+7. **When the only available check would lie, do not write it — record the
    gap and its cost.** A gap in the record looks like incompleteness; a
    passing check that proves nothing looks like rigour. Prefer the first.
    ADR-023 R9 is the worked example.
