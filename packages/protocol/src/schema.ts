@@ -65,6 +65,57 @@ export type Schema<T> = (value: unknown, path: string) => T;
 
 export type Infer<S> = S extends Schema<infer T> ? T : never;
 
+/**
+ * A structural description of what a schema accepts, carried by the schema
+ * itself, so the wire's compatibility can be DERIVED rather than remembered.
+ *
+ * `PROTOCOL_VERSION` is the only thing between "these two peers disagree" and
+ * a confusing failure after auth, and three breaking changes landed before
+ * anyone noticed it had not moved — the same hand-maintained-registry defect
+ * this codebase has hit five times.
+ *
+ * It describes NESTED shape, not just top-level fields, and that is the whole
+ * point. The change worst to miss is `grantHash`: it lives inside
+ * `SessionDelegation` and it is SIGNED, so two peers agreeing on a version
+ * while computing different canonical bytes surfaces as `bad_delegation` — an
+ * authorisation error that sends the operator looking at keys and clocks. A
+ * fingerprint reaching only top level would have been silent about exactly
+ * that one, while looking like a guarantee.
+ */
+export type WireShape =
+  | { k: 'lit'; v: string }
+  | { k: 'en'; v: readonly string[] }
+  | { k: 'bool' }
+  | { k: 'int'; min: number; max: number }
+  | { k: 'str'; min: number; max: number }
+  | { k: 'pattern'; re: string; max: number }
+  | { k: 'hex'; min: number; max: number }
+  | { k: 'hexRange'; min: number; max: number }
+  | { k: 'arr'; max: number; of: WireShape }
+  | { k: 'obj'; fields: { key: string; optional: boolean; of: WireShape }[] }
+  | { k: 'json'; record: boolean; depth: number; nodes: number; leaf: number }
+  | { k: 'refined'; of: WireShape };
+
+const SHAPE = Symbol.for('agentport.wireShape');
+
+/** Attach a shape to a schema without changing how it validates. */
+function described<T>(shape: WireShape, schema: Schema<T>): Schema<T> {
+  Object.defineProperty(schema, SHAPE, { value: shape, enumerable: false });
+  return schema;
+}
+
+/**
+ * Read a schema's shape. Throws rather than returning a placeholder: a
+ * combinator that forgot to describe itself would otherwise yield a
+ * fingerprint that stays stable across real changes — worse than none,
+ * because it would look like a guarantee.
+ */
+export function wireShapeOf(schema: Schema<unknown>): WireShape {
+  const shape = (schema as unknown as Record<symbol, WireShape | undefined>)[SHAPE];
+  if (!shape) throw new Error('schema has no wire shape; a combinator is not described');
+  return shape;
+}
+
 /** Marks an object field as optional; absent keys are fine, present ones validate. */
 export interface Optional<T> {
   readonly optional: true;
@@ -92,30 +143,30 @@ export type ObjOut<S extends Shape> = Pretty<
 >;
 
 export function lit<const V extends string>(expected: V): Schema<V> {
-  return (value, path) => {
+  return described({ k: 'lit', v: expected }, (value, path) => {
     if (value !== expected) throw new WireViolation('wrong_type', path);
     return expected;
-  };
+  });
 }
 
 export function en<const V extends readonly string[]>(...values: V): Schema<V[number]> {
   const set = new Set<string>(values);
-  return (value, path) => {
+  return described({ k: 'en', v: values }, (value, path) => {
     if (typeof value !== 'string' || !set.has(value)) throw new WireViolation('bad_format', path);
     return value as V[number];
-  };
+  });
 }
 
 export function bool(): Schema<boolean> {
-  return (value, path) => {
+  return described({ k: 'bool' }, (value, path) => {
     if (typeof value !== 'boolean') throw new WireViolation('wrong_type', path);
     return value;
-  };
+  });
 }
 
 /** Safe integer within [min, max]. Nothing else — no floats, no strings. */
 export function int(min: number, max: number): Schema<number> {
-  return (value, path) => {
+  return described({ k: 'int', min, max }, (value, path) => {
     if (typeof value !== 'number' || !Number.isSafeInteger(value)) {
       throw new WireViolation('wrong_type', path);
     }
@@ -124,7 +175,7 @@ export function int(min: number, max: number): Schema<number> {
     if (Object.is(value, -0)) throw new WireViolation('wrong_type', path);
     if (value < min || value > max) throw new WireViolation('out_of_range', path);
     return value;
-  };
+  });
 }
 
 /**
@@ -141,12 +192,12 @@ function wellFormed(value: string, path: string): string {
 
 /** String with length in [min, max] UTF-16 code units; must be well-formed Unicode. */
 export function str(min: number, max: number): Schema<string> {
-  return (value, path) => {
+  return described({ k: 'str', min, max }, (value, path) => {
     if (typeof value !== 'string') throw new WireViolation('wrong_type', path);
     if (value.length < min) throw new WireViolation('too_short', path);
     if (value.length > max) throw new WireViolation('too_long', path);
     return wellFormed(value, path);
-  };
+  });
 }
 
 /**
@@ -158,40 +209,40 @@ export function pattern(re: RegExp, maxLength: number): Schema<string> {
   // then alternate pass/fail across calls. Reject the flag rather than
   // silently resetting it, so the mistake surfaces at module load.
   if (re.global || re.sticky) throw new Error(`wire pattern must not be global or sticky: ${re}`);
-  return (value, path) => {
+  return described({ k: 'pattern', re: re.source, max: maxLength }, (value, path) => {
     if (typeof value !== 'string') throw new WireViolation('wrong_type', path);
     if (value.length > maxLength) throw new WireViolation('too_long', path);
     if (!re.test(value)) throw new WireViolation('bad_format', path);
     return value;
-  };
+  });
 }
 
 /** Exactly `byteLength` bytes of canonical lowercase hex. */
 export function hex(byteLength: number): Schema<string> {
   const chars = byteLength * 2;
-  return (value, path) => {
+  return described({ k: 'hex', min: byteLength, max: byteLength }, (value, path) => {
     if (typeof value !== 'string') throw new WireViolation('wrong_type', path);
     if (value.length !== chars) throw new WireViolation('bad_format', path);
     // `*` not `+`: a zero-byte field's only valid encoding is the empty string.
     if (!/^[0-9a-f]*$/.test(value)) throw new WireViolation('bad_format', path);
     return value;
-  };
+  });
 }
 
 /** Lowercase hex encoding between minBytes and maxBytes of payload. */
 export function hexRange(minBytes: number, maxBytes: number): Schema<string> {
-  return (value, path) => {
+  return described({ k: 'hexRange', min: minBytes, max: maxBytes }, (value, path) => {
     if (typeof value !== 'string') throw new WireViolation('wrong_type', path);
     if (value.length % 2 !== 0) throw new WireViolation('bad_format', path);
     if (value.length < minBytes * 2) throw new WireViolation('too_short', path);
     if (value.length > maxBytes * 2) throw new WireViolation('too_long', path);
     if (!/^[0-9a-f]*$/.test(value)) throw new WireViolation('bad_format', path);
     return value;
-  };
+  });
 }
 
 export function arr<T>(item: Schema<T>, maxLength: number): Schema<T[]> {
-  return (value, path) => {
+  return described({ k: 'arr', max: maxLength, of: wireShapeOf(item as Schema<unknown>) }, (value, path) => {
     if (!Array.isArray(value)) throw new WireViolation('wrong_type', path);
     if (value.length > maxLength) throw new WireViolation('too_many', path);
     const out: T[] = [];
@@ -205,7 +256,7 @@ export function arr<T>(item: Schema<T>, maxLength: number): Schema<T[]> {
       out.push(item(value[i], `${path}[${i}]`));
     }
     return out;
-  };
+  });
 }
 
 /**
@@ -220,7 +271,11 @@ export function obj<S extends Shape>(shape: S): Schema<ObjOut<S>> {
     schema: ('optional' in field && field.optional === true ? field.schema : field) as Schema<unknown>,
   }));
   const known = new Set(fields.map((f) => f.key));
-  return (value, path) => {
+  const shape_: WireShape = {
+    k: 'obj',
+    fields: fields.map((f) => ({ key: f.key, optional: f.optional, of: wireShapeOf(f.schema) })),
+  };
+  return described(shape_, (value, path) => {
     if (typeof value !== 'object' || value === null || Array.isArray(value)) {
       throw new WireViolation('wrong_type', path);
     }
@@ -244,7 +299,7 @@ export function obj<S extends Shape>(shape: S): Schema<ObjOut<S>> {
       out[field.key] = field.schema(source[field.key], path === '' ? field.key : `${path}.${field.key}`);
     }
     return out as ObjOut<S>;
-  };
+  });
 }
 
 /**
@@ -264,7 +319,7 @@ export function jsonValue(
   maxNodes: number,
   maxLeafChars: number,
 ): Schema<unknown> {
-  return (value, path) => {
+  return described({ k: 'json', record: false, depth: maxDepth, nodes: maxNodes, leaf: maxLeafChars }, (value, path) => {
     let nodes = 0;
     // Rebuilds as it walks, like obj(): a handler never receives the parsed
     // input itself, so no aliasing, no getters, no surprise prototype.
@@ -312,7 +367,7 @@ export function jsonValue(
       }
     };
     return walk(value, 1);
-  };
+  });
 }
 
 /**
@@ -327,12 +382,12 @@ export function jsonRecord(
   maxLeafChars: number,
 ): Schema<Record<string, unknown>> {
   const inner = jsonValue(maxDepth, maxNodes, maxLeafChars);
-  return (value, path) => {
+  return described({ k: 'json', record: true, depth: maxDepth, nodes: maxNodes, leaf: maxLeafChars }, (value, path) => {
     if (typeof value !== 'object' || value === null || Array.isArray(value)) {
       throw new WireViolation('wrong_type', path);
     }
     return inner(value, path) as Record<string, unknown>;
-  };
+  });
 }
 
 /**
@@ -344,10 +399,10 @@ export function refined<T>(
   schema: Schema<T>,
   predicate: (value: T) => ViolationCode | null,
 ): Schema<T> {
-  return (value, path) => {
+  return described({ k: 'refined', of: wireShapeOf(schema as Schema<unknown>) }, (value, path) => {
     const validated = schema(value, path);
     const code = predicate(validated);
     if (code !== null) throw new WireViolation(code, path);
     return validated;
-  };
+  });
 }

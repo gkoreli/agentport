@@ -30,7 +30,14 @@ import {
   MAX_SEALED_PLAINTEXT_BYTES,
   MAX_TEXT_CHARS,
 } from '../packages/protocol/src/limits.js';
-import { FRAME_SCHEMAS, PROTOCOL_VERSION, type Frame, type SessionFrame } from '../packages/protocol/src/messages.js';
+import {
+  FRAME_SCHEMAS,
+  PROTOCOL_VERSION,
+  WIRE_FINGERPRINT,
+  wireFingerprint,
+  type Frame,
+  type SessionFrame,
+} from '../packages/protocol/src/messages.js';
 import { VIOLATION_CODES, WireViolation, type ViolationCode } from '../packages/protocol/src/schema.js';
 import {
   deriveSealChannel,
@@ -494,15 +501,23 @@ console.log('\n6. protocol version');
   // — which is what made an additive field a breaking change in the first place.
   // The lesson is not "add a check": when a new invariant appears, ask whether
   // the existing suite is still shaped like the problem.
-  //
-  // What this asserts is deliberately weak, and honestly so. It pins the shape
-  // and the current value, so a bump is a visible, reviewed edit here rather
-  // than something three engineers do not notice for a day. It CANNOT tell you
-  // the version should have been bumped — that needs a fingerprint derived from
-  // the schemas themselves, which is being built separately. When it lands, its
-  // one-line assertion belongs in this section and replaces the pin below.
   check('the protocol version is a legible pinned identifier', /^agentport\/\d+$/.test(PROTOCOL_VERSION), PROTOCOL_VERSION);
-  check('the version matches what this harness was written against', PROTOCOL_VERSION === 'agentport/2', PROTOCOL_VERSION);
+
+  // The pin this replaces could say the version had changed; it could not say
+  // the version SHOULD have. This can. The fingerprint is recomputed from the
+  // schemas on every run and covers every frame type and the full nested shape
+  // of every field — so a widened bound, a new optional key, or a field buried
+  // inside SessionDelegation all move it, and a wire change that forgot the
+  // version is a red build instead of a confusing failure after auth.
+  //
+  // When this fails the fix is two edits, not one: bump PROTOCOL_VERSION and
+  // record the new fingerprint. Recording the fingerprint alone is not a way
+  // to silence it — that is the point of them being separate constants.
+  check(
+    'the wire matches the fingerprint recorded beside its version',
+    wireFingerprint() === WIRE_FINGERPRINT,
+    { recorded: WIRE_FINGERPRINT, actual: wireFingerprint() },
+  );
 }
 
 // --- summary ------------------------------------------------------------------

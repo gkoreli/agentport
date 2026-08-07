@@ -30,6 +30,7 @@ import {
   pattern,
   refined,
   str,
+  wireShapeOf,
   type Infer,
   type Schema,
 } from './schema.js';
@@ -67,7 +68,39 @@ import {
   TOKEN_PATTERN,
   TOOL_NAME_PATTERN,
 } from './limits.js';
-import { canonicalJson } from './crypto.js';
+import { canonicalJson, toHex } from './crypto.js';
+import { sha256 } from '@noble/hashes/sha256';
+
+/**
+ * A fingerprint of the entire wire: every frame type and the full NESTED
+ * shape of every field, hashed.
+ *
+ * This exists so that forgetting to bump `PROTOCOL_VERSION` is a red build
+ * rather than a thing three engineers do not notice for a day. Change any
+ * frame — add a type, add a field, widen a bound, alter a signed body — and
+ * this moves; `wire:check` compares it against the recorded value below and
+ * fails when they disagree.
+ *
+ * It is deliberately NOT the version itself. The version's job is diagnosis:
+ * the relay compares it at `hello` before auth, so an operator reading
+ * `agentport/2 != agentport/3` in a rejection knows what happened and can
+ * find a release note. Two twelve-character hashes tell them only that
+ * something differs, not which side is newer — a field whose purpose is
+ * diagnosis has to be diagnosable, and a hash is the least diagnosable thing
+ * that could go there.
+ */
+export function wireFingerprint(): string {
+  const types = Object.keys(FRAME_SCHEMAS).sort();
+  const shapes = types.map((t) => [t, wireShapeOf(FRAME_SCHEMAS[t as FrameType])] as const);
+  return toHex(sha256(new TextEncoder().encode(`agentport-wire:${canonicalJson(shapes)}`))).slice(0, 24);
+}
+
+/**
+ * The fingerprint as of the current PROTOCOL_VERSION. Updated in the same
+ * commit as the version, deliberately by hand — but unlike the version, a
+ * stale value here CANNOT pass, because the check recomputes it.
+ */
+export const WIRE_FINGERPRINT = 'f4869da4880129f5c2aacbcb';
 
 /**
  * The wire dialect both ends must agree on, checked at `hello` before
