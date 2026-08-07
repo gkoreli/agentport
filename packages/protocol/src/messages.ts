@@ -69,7 +69,32 @@ import {
 } from './limits.js';
 import { canonicalJson } from './crypto.js';
 
-export const PROTOCOL_VERSION = 'agentport/1';
+/**
+ * The wire dialect both ends must agree on, checked at `hello` before
+ * anything else happens (`relay/src/core.ts`).
+ *
+ * BUMP THIS WHENEVER THE WIRE CHANGES — a new frame type, a new field, a
+ * changed signed body. Its entire job is to turn "these two peers disagree"
+ * into one legible error at the handshake, instead of a confusing
+ * `unexpected_key` on the first real frame, after pairing and auth have
+ * already appeared to succeed.
+ *
+ * v2: `grantHash` and `issuedAt` on SessionDelegation (both signed, so the
+ * canonical body changed too), `domain` and `callHash` on the approval pair,
+ * and the `revoke`/`revoked` and `ask`/`answer` frames.
+ *
+ * Known weakness, stated rather than left to be discovered: this constant is
+ * HAND-MAINTAINED, which is the pattern that produced four separate defects
+ * in this codebase already. Three breaking wire changes landed before anyone
+ * noticed it had not moved. The structural fix is to derive it from the
+ * schemas — a fingerprint over `FRAME_SCHEMAS`' types and their field shapes
+ * — which needs every combinator in `schema.ts` to expose its structure, and
+ * is deliberately not done here rather than done shallowly: a fingerprint
+ * covering only top-level fields would have missed `grantHash`, since that
+ * one is nested inside `SessionDelegation`, while still looking like a
+ * guarantee.
+ */
+export const PROTOCOL_VERSION = 'agentport/2';
 
 export type Hex = string;
 

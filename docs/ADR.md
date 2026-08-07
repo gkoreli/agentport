@@ -1002,3 +1002,39 @@ waiting. Internal failure is now a denial with a logged reason.
 R9 records one property this change does *not* assert — that a replayed
 `approval.response` is ignored — with the reason it could not be tested
 honestly, rather than shipping a check that would pass either way.
+
+---
+
+## ADR-024: The agent may ask its own user — accepted (shipped 2026-08-07)
+
+Full record: [`ADR-024-elicitation.md`](ADR-024-elicitation.md).
+
+`AskUserQuestion` was **actively disabled** in every AgentPort session — the
+daemon declared no elicitation capability, so `claude-agent-acp` put that tool
+on its own disallowed list. The agent could not ask its user anything, so it
+guessed, and never reported that it could not ask. An AgentPort session was
+quietly worse than using the agent directly, which is the one thing the north
+star cannot afford.
+
+The design is entirely about **where an answer may come from**. An elicitation
+answer is the only page-reachable channel that would carry *user authority*
+into the agent's reasoning — every other one is already classified hostile —
+so a page supplying it is privilege escalation in the trust model rather than
+impersonation within it. And it cannot be softened: bounding the answer space
+bounds *what* is said and does nothing about *who is recorded as saying it*,
+and attribution to the user is not a side effect of the feature, it is the
+feature.
+
+So the rule is about routing rather than tiers: **an elicitation may only be
+answered on a surface the requesting origin cannot draw, read, or forge.**
+Refusal is by per-attachment capability negotiation, not by rejecting
+requests — a refused tier's agent has no ask affordance at all, so the refusal
+path has no code and therefore cannot hang.
+
+Two things the record deliberately does *not* claim. It does not make the
+agent *know* it may not ask — a model experiences an absent tool as nothing at
+all — so visibility is a separate, user-facing win (R3/R4). And R10/R11 record
+a hole this exposed rather than fixing it: page-answered `runtime_own_tool`
+approvals are wrong for the same reason, the wallet-origin redirect that
+looked like the fix cannot work (a popup needs user activation an
+agent-initiated approval does not have), and the answer is the same refusal.
