@@ -67,6 +67,13 @@ export interface AttachmentPolicy {
    * whose answer surface the requesting origin could draw, read or forge; a
    * runtime that sees false must not advertise the capability to its agent,
    * so the agent has no ask affordance rather than asking into silence.
+   *
+   * Every field here is decided by the daemon from ONE predicate — does a
+   * surface exist that the requesting origin cannot draw — because they all
+   * turn on the same question. Add a field by deriving it from that
+   * predicate, not by adding a second boolean that happens to agree: two
+   * booleans that agree today drift silently, since agreeing is not
+   * something a compiler can check.
    */
   mayAsk: boolean;
 }

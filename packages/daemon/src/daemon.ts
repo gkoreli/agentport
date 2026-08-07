@@ -990,7 +990,7 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
         surface: session.surface,
         grant: session.grant,
         tools: session.tools,
-        policy: { mayAsk: this.#mayAsk(session) },
+        policy: { mayAsk: this.#hasTrustedAnswerSurface(session) },
       });
     } catch (err) {
       this.#sessions.delete(frame.s);
@@ -1168,28 +1168,38 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
   }
 
   /**
-   * May this attachment's agent ask its own user a question? (ADR-024 R1.)
+   * Does this attachment have an answer surface the requesting origin cannot
+   * draw, read, or forge? (ADR-024 R1.)
    *
-   * The rule is about ROUTING, not tiers: an elicitation may only be answered
-   * on a surface the requesting origin cannot draw, read, or forge.
+   * ONE predicate, deliberately, because every policy that depends on it
+   * depends on it for the same reason: may the agent ask its user something
+   * (ADR-024), and may it use its own capabilities here (ADR-024 R10). Two
+   * booleans that happen to agree today would drift the first time somebody
+   * changed one, and they would drift silently, because agreeing is not a
+   * thing a compiler can check.
    *
    * - `viaConnect` answers at the daemon's own terminal — a surface no page
-   *   can reach. Permitted.
+   *   can reach. True.
    * - A delegated session answers in the CLIENT PANEL, which is page DOM the
-   *   requesting origin renders. Refused: an answer from there would arrive
-   *   as "your user said this" while being authored by the site.
+   *   requesting origin renders. False. And there is no repair available at
+   *   the wallet origin either: opening its popup needs user activation, and
+   *   an agent-initiated question has no gesture behind it — which is exactly
+   *   why `connect.ts` reserves its popup synchronously during the click. A
+   *   persistent cross-origin frame would be readable-proof and not
+   *   overlay-proof, which is the attack a real browser window exists to
+   *   defeat.
    * - A non-delegated session is the owner's own wallet — today the in-page
-   *   demo wallet, so it is treated as page-answered until the extension is
-   *   the wallet. Conservative on purpose: this returns false unless the
-   *   surface is known to be unforgeable, rather than true unless known bad.
+   *   demo wallet, so it is treated as page-answered until the extension IS
+   *   the wallet. When that changes, this one predicate flips and everything
+   *   derived from it flips together.
    *
-   * Refusing here is not a refusal the agent ever sees. The runtime never
-   * declares the capability, so the agent has no ask affordance at all —
-   * which is why a refused tier cannot produce the ask-into-silence hang.
+   * Conservative on purpose: false unless the surface is known unforgeable,
+   * rather than true unless known bad.
    */
-  #mayAsk(session: SessionState): boolean {
+  #hasTrustedAnswerSurface(session: SessionState): boolean {
     return session.viaConnect;
   }
+
 
   /**
    * One question, one answer, and never a hang.
