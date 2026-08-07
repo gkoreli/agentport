@@ -2,6 +2,7 @@ import { WebSocket } from 'ws';
 import {
   Deferred,
   Emitter,
+  MAX_DESCRIPTION_CHARS,
   MAX_ERROR_CHARS,
   MAX_FRAME_CHARS,
   MAX_HISTORY_ENTRIES,
@@ -58,7 +59,7 @@ import {
 } from '@agentport/protocol';
 import type { AgentIdentity } from './identity.js';
 import { isRevoked, memoryRevocations, type Revocation, type RevocationStore } from './revocations.js';
-import type { AgentRuntime, TurnContext } from './runtime.js';
+import type { AskAnswers, AskQuestion, AgentRuntime, TurnContext } from './runtime.js';
 
 interface SessionState {
   id: string;
@@ -84,6 +85,7 @@ interface SessionState {
   transcript: HistoryEntry[];
   toolCalls: Map<string, Deferred<unknown>>;
   approvals: Map<string, { decision: Deferred<boolean>; callHash?: string }>;
+  asks: Map<string, Deferred<AskAnswers | undefined>>;
   prompts: Map<string, AbortController>;
   /** Symmetric key sealing this attachment's content frames (ADR-003). */
   sealChannel: SealChannel;
@@ -110,6 +112,14 @@ const DETACH_GRACE_MS = 30 * 60 * 1000;
  */
 const CONNECT_APPROVAL_TTL_MS = 6 * 60 * 1000;
 const MAX_RESUME_ATTEMPTS = 10;
+
+/**
+ * How long the agent waits for its user to answer before proceeding as if
+ * they skipped. Generous, because a human has to read a question and decide —
+ * but finite, because a turn that waits forever on a dialog nobody is looking
+ * at is the hang this whole design exists to avoid.
+ */
+const ASK_TIMEOUT_MS = 5 * 60 * 1000;
 
 /**
  * Char budget for one history frame's entries. UTF-8 never exceeds 3 bytes
@@ -689,6 +699,23 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
         return;
       }
 
+      case 'answer': {
+        const session = this.#sessions.get(frame.s);
+        const pending = session?.asks.get(frame.id);
+        if (!session || !pending) return;
+        // Delete before resolve, and let delete's result decide — same
+        // interlock as the approval path, for the same reason.
+        if (!session.asks.delete(frame.id)) return;
+        if (frame.outcome === 'skipped') {
+          pending.resolve(undefined);
+          return;
+        }
+        const answers: AskAnswers = {};
+        for (const entry of frame.values ?? []) answers[entry.key] = entry.value;
+        pending.resolve(answers);
+        return;
+      }
+
       case 'approval.response': {
         const pending = this.#sessions.get(frame.s)?.approvals.get(frame.id);
         if (!pending) return;
@@ -948,6 +975,7 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
       transcript: [],
       toolCalls: new Map(),
       approvals: new Map(),
+      asks: new Map(),
       prompts: new Map(),
       sealChannel,
       resumeToken,
@@ -958,7 +986,12 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     this.#sessions.set(frame.s, session);
 
     try {
-      await runtime.openSession?.({ surface: session.surface, grant: session.grant, tools: session.tools });
+      await runtime.openSession?.({
+        surface: session.surface,
+        grant: session.grant,
+        tools: session.tools,
+        policy: { mayAsk: this.#mayAsk(session) },
+      });
     } catch (err) {
       this.#sessions.delete(frame.s);
       try {
@@ -1017,6 +1050,7 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
       grant: session.grant,
       tools: session.tools,
       signal: controller.signal,
+      ask: (question, signal) => this.#ask(session, question, signal),
       say: (text) => {
         record('agent', text);
         this.#streamText(session, 'delta', frame.id, text);
@@ -1131,6 +1165,81 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     else signal?.addEventListener('abort', abort, { once: true });
     if (!signal?.aborted) this.#sendSession(session, { t: 'tool.call', s: session.id, id, name, arguments: args });
     return deferred.promise.finally(() => signal?.removeEventListener('abort', abort));
+  }
+
+  /**
+   * May this attachment's agent ask its own user a question? (ADR-024 R1.)
+   *
+   * The rule is about ROUTING, not tiers: an elicitation may only be answered
+   * on a surface the requesting origin cannot draw, read, or forge.
+   *
+   * - `viaConnect` answers at the daemon's own terminal — a surface no page
+   *   can reach. Permitted.
+   * - A delegated session answers in the CLIENT PANEL, which is page DOM the
+   *   requesting origin renders. Refused: an answer from there would arrive
+   *   as "your user said this" while being authored by the site.
+   * - A non-delegated session is the owner's own wallet — today the in-page
+   *   demo wallet, so it is treated as page-answered until the extension is
+   *   the wallet. Conservative on purpose: this returns false unless the
+   *   surface is known to be unforgeable, rather than true unless known bad.
+   *
+   * Refusing here is not a refusal the agent ever sees. The runtime never
+   * declares the capability, so the agent has no ask affordance at all —
+   * which is why a refused tier cannot produce the ask-into-silence hang.
+   */
+  #mayAsk(session: SessionState): boolean {
+    return session.viaConnect;
+  }
+
+  /**
+   * One question, one answer, and never a hang.
+   *
+   * Resolves `undefined` for every non-answer — skipped, aborted, timed out,
+   * session gone. That is the ACP semantic too: declining means the tool runs
+   * with no answers and the model is told the user skipped, while cancelling
+   * aborts the turn. An unanswered question must decay into the first, not
+   * the second: losing the user's work because nobody clicked is a worse
+   * failure than proceeding without an answer.
+   */
+  #ask(
+    session: SessionState,
+    question: AskQuestion,
+    signal?: AbortSignal,
+  ): Promise<AskAnswers | undefined> {
+    const id = randomId('ask_');
+    const deferred = new Deferred<AskAnswers | undefined>();
+    session.asks.set(id, deferred);
+
+    // Registered before the frame leaves, so an instant answer cannot arrive
+    // before there is anything to resolve. Delete's own boolean is the
+    // single-winner interlock, so a timeout racing an answer cannot resolve
+    // twice — the same ordering the approval path depends on.
+    const settle = (): boolean => session.asks.delete(id);
+    const abort = () => {
+      if (settle()) deferred.resolve(undefined);
+    };
+    const timer = setTimeout(() => {
+      if (settle()) {
+        this.#log.info('nobody answered the agent; proceeding as skipped', { sessionId: session.id });
+        deferred.resolve(undefined);
+      }
+    }, ASK_TIMEOUT_MS);
+
+    if (signal?.aborted) abort();
+    else signal?.addEventListener('abort', abort, { once: true });
+    if (!signal?.aborted) {
+      this.#sendSession(session, {
+        t: 'ask',
+        s: session.id,
+        id,
+        message: this.#bounded(question.message, MAX_DESCRIPTION_CHARS, 'ask.message', session.id),
+        fields: question.fields,
+      });
+    }
+    return deferred.promise.finally(() => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', abort);
+    });
   }
 
   #requestApproval(
@@ -1264,6 +1373,9 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     for (const pending of session.toolCalls.values()) pending.reject(new Error(reason));
     session.toolCalls.clear();
     for (const pending of session.approvals.values()) pending.decision.resolve(false);
+    // Undefined, not a rejection: a torn-down session means "proceed without
+    // an answer", which is the same thing an unanswered question means.
+    for (const pending of session.asks.values()) pending.resolve(undefined);
     session.approvals.clear();
   }
 

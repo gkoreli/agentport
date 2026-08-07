@@ -1,5 +1,6 @@
 import type {
   CapabilityGrant,
+  FormField,
   HistoryEntry,
   PlanStep,
   SurfaceDescriptor,
@@ -38,9 +39,46 @@ export interface TurnContext {
     call?: { name: string; arguments: Record<string, unknown> },
     signal?: AbortSignal,
   ): Promise<boolean>;
+  /**
+   * Ask the user a question and wait for their answer (ADR-024).
+   *
+   * Resolves `undefined` when the user skipped, when nobody answered in time,
+   * or when the turn was cancelled — all of which mean "proceed without an
+   * answer", never "abort". Losing the user's work because they did not
+   * answer a question is a worse failure than continuing without one, which
+   * is also what the agent's own built-in ask does.
+   *
+   * Only reachable when the attachment's policy permits it; on a tier whose
+   * answer surface the requesting origin could forge, the capability is never
+   * declared and the agent has no ask affordance at all.
+   */
+  ask(question: AskQuestion, signal?: AbortSignal): Promise<AskAnswers | undefined>;
   /** Aborts when the client cancels the prompt or closes the session. */
   signal: AbortSignal;
 }
+
+/**
+ * What this attachment is permitted to do, decided by the daemon — which
+ * knows which tier answers its questions — and never by the runtime.
+ */
+export interface AttachmentPolicy {
+  /**
+   * Whether the agent may ask its own user a question. False on any tier
+   * whose answer surface the requesting origin could draw, read or forge; a
+   * runtime that sees false must not advertise the capability to its agent,
+   * so the agent has no ask affordance rather than asking into silence.
+   */
+  mayAsk: boolean;
+}
+
+/** One question, already narrowed to what a consent surface can render. */
+export interface AskQuestion {
+  message: string;
+  fields: FormField[];
+}
+
+/** Field key to the user's answer. Absent keys were left blank. */
+export type AskAnswers = Record<string, string>;
 
 export interface AgentRuntime {
   readonly name: string;
@@ -56,7 +94,16 @@ export interface AgentRuntime {
   replayHistory?(): Promise<HistoryEntry[] | null>;
   /** Called once per session before the first prompt. */
   openSession?(
-    context: Omit<TurnContext, 'say' | 'think' | 'plan' | 'callTool' | 'requestApproval' | 'signal'>,
+    context: Omit<TurnContext, 'say' | 'think' | 'plan' | 'callTool' | 'requestApproval' | 'ask' | 'signal'> & {
+      /**
+       * Attachment POLICY, as distinct from attachment content (ADR-024 R5).
+       *
+       * An object rather than a boolean deliberately: Gate C's own-tool
+       * allowlist needs exactly this channel next, and a one-off flag now
+       * would mean a real policy object three weeks later.
+       */
+      policy: AttachmentPolicy;
+    },
   ): Promise<void> | void;
   closeSession?(): Promise<void> | void;
   prompt(text: string, context: TurnContext): Promise<void>;

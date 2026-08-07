@@ -16,6 +16,7 @@ import {
   toErr,
   type ApprovalRequest,
   type AuthorityDomain,
+  type FormField,
   type CapabilityGrant,
   type Frame,
   type HistoryEntry,
@@ -79,6 +80,13 @@ export type ApprovalDecider = (prompt: ApprovalPrompt) => boolean | Promise<bool
 export type SessionEvents = {
   delta: { promptId: string; text: string };
   thought: { promptId: string; text: string };
+  /**
+   * The agent is asking its user a question (ADR-024). Answer it with
+   * `session.answer(id, …)`. If nothing answers, the daemon proceeds as
+   * skipped after its own deadline — an unanswered question never hangs the
+   * turn.
+   */
+  ask: { id: string; message: string; fields: FormField[] };
   /** The agent's current plan for a prompt. Each event replaces the last. */
   plan: { promptId: string; steps: PlanStep[] };
   /** The socket dropped and this attachment was re-established, with fresh
@@ -116,6 +124,7 @@ export interface AgentSessionHandle {
   startPrompt(text: string, context?: Record<string, unknown>): PromptRequest;
   history(): Promise<HistoryEntry[]>;
   cancel(promptId: string): void;
+  answer(askId: string, values?: Record<string, string>): void;
   close(reason?: string): void;
   on<K extends keyof SessionEvents>(event: K, listener: (value: SessionEvents[K]) => void): () => void;
 }
@@ -242,6 +251,26 @@ export class AgentSession extends Emitter<SessionEvents> implements AgentSession
     this.#send({ t: 'prompt.cancel', s: this.id, id: promptId });
   }
 
+  /**
+   * Answer a question the agent asked (ADR-024). Omitting `values` — or
+   * passing none — is a SKIP, which is a real answer meaning "proceed without
+   * one", not an error and not a cancellation.
+   */
+  answer(askId: string, values?: Record<string, string>): void {
+    const entries = Object.entries(values ?? {});
+    if (entries.length === 0) {
+      this.#send({ t: 'answer', s: this.id, id: askId, outcome: 'skipped' });
+      return;
+    }
+    this.#send({
+      t: 'answer',
+      s: this.id,
+      id: askId,
+      outcome: 'answered',
+      values: entries.map(([key, value]) => ({ key, value })),
+    });
+  }
+
   close(reason = 'user_closed'): void {
     if (this.#closed) return;
     // Clamped, not rejected: a close must always go through, and a reason is
@@ -302,6 +331,10 @@ export class AgentSession extends Emitter<SessionEvents> implements AgentSession
       case 'thought':
         this.emit('thought', { promptId: frame.promptId, text: frame.text });
         return;
+      case 'ask':
+        this.emit('ask', { id: frame.id, message: frame.message, fields: frame.fields });
+        return;
+
       case 'plan':
         // A snapshot replaces the previous plan; the session keeps no copy,
         // because the only consumer that needs one is the view rendering it.

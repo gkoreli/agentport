@@ -178,6 +178,35 @@ export const MAX_PLAN_STEP_CHARS = MAX_DESCRIPTION_CHARS;
 export const MAX_DELEGATION_LIFETIME_MS = 24 * 60 * 60 * 1000;
 
 /**
+ * Fields in one elicitation form, and options in one choice field (ADR-024).
+ *
+ * Bounded by US, not by the asker. A real `AskUserQuestion` is already capped
+ * by the agent SDK at 4 questions of at most 4 options — but an MCP server's
+ * elicitation passes the server's own JSON Schema through with only
+ * `type: "object"` forced, which is arbitrary and unbounded. These are the
+ * numbers a human can actually read in one sitting: a form too large to read
+ * is not a consent surface, and the honest answer to one is to refuse it
+ * rather than render a wall.
+ */
+export const MAX_FORM_FIELDS = 12;
+export const MAX_FORM_OPTIONS = 16;
+
+/**
+ * One field's label, and one option's label. A form is rendered in a dialog,
+ * not a document; the same ceiling as a tool description is already generous
+ * for a question, and far past it the field is not a question any more.
+ */
+export const MAX_FORM_LABEL_CHARS = MAX_DESCRIPTION_CHARS;
+
+/**
+ * A free-text answer. Deliberately far below MAX_TEXT_CHARS: this is a line a
+ * person typed into a box, not a document, and the value crosses into the
+ * agent's reasoning carrying the user's authority — the one place where
+ * generosity about size is generosity to whoever is lying.
+ */
+export const MAX_ANSWER_CHARS = 4096;
+
+/**
  * Ceiling on the closed-session count a `revoked` ack reports. The number is
  * feedback for the user ("ended 2 attachments"), never an authority, so the
  * daemon clamps rather than failing — but an unbounded integer on the wire is

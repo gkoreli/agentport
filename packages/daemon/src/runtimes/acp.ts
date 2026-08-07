@@ -14,7 +14,8 @@ import {
   type SessionNotification,
 } from '@agentclientprotocol/sdk';
 import { createLogger, type HistoryEntry, type Logger, type LogSink } from '@agentport/protocol';
-import type { AgentRuntime, TurnContext } from '../runtime.js';
+import type { AgentRuntime, AttachmentPolicy, TurnContext } from '../runtime.js';
+import type { FormField } from '@agentport/protocol';
 import { McpBridge, mcpToolName } from '../mcp-bridge.js';
 
 const PROCESS_EXIT_GRACE_MS = 2_000;
@@ -84,6 +85,64 @@ export interface AcpRuntimeOptions {
   sink?: LogSink;
 }
 
+/**
+ * Narrow an ACP form schema to questions a consent surface can render, or
+ * refuse. Returns undefined when the schema is anything we would have to
+ * guess about — an unknown field kind, a form larger than a person will read,
+ * a choice with no choices. Refusing produces a decline the agent understands;
+ * guessing produces a dialog that misrepresents what is being asked.
+ */
+function toFormFields(schema: unknown): FormField[] | undefined {
+  if (typeof schema !== 'object' || schema === null) return undefined;
+  const properties = (schema as { properties?: unknown }).properties;
+  if (typeof properties !== 'object' || properties === null) return undefined;
+
+  const fields: FormField[] = [];
+  for (const [key, raw] of Object.entries(properties as Record<string, unknown>)) {
+    if (typeof raw !== 'object' || raw === null) return undefined;
+    const property = raw as { type?: unknown; title?: unknown; enum?: unknown; oneOf?: unknown; items?: unknown };
+    const label = typeof property.title === 'string' && property.title ? property.title : key;
+
+    // A key is an opaque handle we hand back verbatim, so it has to satisfy
+    // the same pattern every other id on the wire does. A schema whose
+    // property names do not is not one we can answer.
+    if (!/^[A-Za-z0-9_]{1,64}$/.test(key)) return undefined;
+
+    const options = readOptions(property);
+    if (property.type === 'string') {
+      fields.push(options ? { key, label, options, multi: false } : { key, label });
+      continue;
+    }
+    if (property.type === 'array') {
+      const items = readOptions(property.items);
+      if (!items) return undefined;
+      fields.push({ key, label, options: items, multi: true });
+      continue;
+    }
+    // boolean/number/integer and every custom `type` land here. They are
+    // renderable in principle and we do not render them yet; declining is
+    // honest, showing a text box labelled with someone's number field is not.
+    return undefined;
+  }
+  return fields.length > 0 ? fields : undefined;
+}
+
+/** `enum: string[]` or `anyOf: [{const,title}]`, the two ACP spellings. */
+function readOptions(source: unknown): string[] | undefined {
+  if (typeof source !== 'object' || source === null) return undefined;
+  const holder = source as { enum?: unknown; anyOf?: unknown; oneOf?: unknown };
+  const listed = holder.enum ?? holder.anyOf ?? holder.oneOf;
+  if (!Array.isArray(listed) || listed.length === 0) return undefined;
+  const options: string[] = [];
+  for (const entry of listed) {
+    if (typeof entry === 'string') options.push(entry);
+    else if (typeof entry === 'object' && entry !== null && typeof (entry as { const?: unknown }).const === 'string') {
+      options.push((entry as { const: string }).const);
+    } else return undefined;
+  }
+  return options;
+}
+
 export class AcpRuntime implements AgentRuntime {
   readonly name: string;
 
@@ -115,6 +174,8 @@ export class AcpRuntime implements AgentRuntime {
     surface: { name: string; origin: string; route?: string };
     grant: { tools: { name: string; description: string; inputSchema: Record<string, unknown> }[] };
     tools: { name: string; description: string; inputSchema: Record<string, unknown> }[];
+    /** Decided by the daemon; the runtime never classifies its own session. */
+    policy: AttachmentPolicy;
   }): Promise<void> {
     const child = spawn(this.#options.command, this.#options.args ?? [], {
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -140,6 +201,19 @@ export class AcpRuntime implements AgentRuntime {
     // https://github.com/agentclientprotocol/claude-agent-acp/blob/main/src/tests/acp-agent.test.ts
     const acpConnection = client({ name: 'agentport' })
       .onNotification(methods.client.session.update, (request) => this.#sessionUpdate(request.params))
+      .onRequest(methods.client.elicitation.create, async (request) => {
+        // Same posture as the permission handler below: inside a request
+        // handler the only acceptable outcome is an answer, so an internal
+        // failure declines rather than throwing. Declining is honest here —
+        // it means the user did not answer, and the agent proceeds knowing
+        // that, which is what an unanswered question must decay into.
+        try {
+          return await this.#elicit(request.params, request.signal);
+        } catch (err) {
+          this.#log.error('elicitation failed internally; declining', { err });
+          return { action: 'decline' as const };
+        }
+      })
       .onRequest(methods.client.session.requestPermission, async (request) => {
         // A throw here never reaches the agent — it just never answers, and
         // the agent waits for a permission response that will never come
@@ -166,7 +240,27 @@ export class AcpRuntime implements AgentRuntime {
       clientInfo: { name: 'agentport', version: '0.0.1' },
       // We expose no filesystem and no terminal. The only capabilities this
       // agent gains from us are the site's tools, over MCP, below.
-      clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
+      //
+      // Elicitation is declared PER ATTACHMENT, from the policy the daemon
+      // decided — it knows which tier answers this session's questions and
+      // the runtime does not (ADR-024 R2). Declaring it is what makes the
+      // agent's AskUserQuestion available at all: claude-agent-acp puts that
+      // tool on its own disallowed list when form elicitation is absent. So
+      // on a tier with no unforgeable answer surface the refusal costs no
+      // code here and cannot hang — the agent simply has no way to ask.
+      //
+      // The marker MUST be `{}`, not `true`: the SDK parses this field with
+      // defaultOnError, so a wrong value is silently replaced with undefined
+      // and reads as unsupported, with no error anywhere.
+      clientCapabilities: {
+        fs: { readTextFile: false, writeTextFile: false },
+        terminal: false,
+        // `=== true`, not truthiness, and tolerant of the field being
+        // absent entirely: required by the type so every real caller has to
+        // decide, and fail-closed at runtime so a caller that did not cannot
+        // accidentally be granted it. Absent ownership is refusal here too.
+        ...(context.policy?.mayAsk === true ? { elicitation: { form: {} } } : {}),
+      },
     });
     this.#supportsLoad = init.agentCapabilities?.loadSession === true;
 
@@ -362,6 +456,54 @@ export class AcpRuntime implements AgentRuntime {
       default:
         return;
     }
+  }
+
+  /**
+   * ACP `elicitation/create` -> our `ask` -> the user -> back.
+   *
+   * Translated into our own bounded shape rather than forwarded. ACP's form
+   * schema admits five field kinds plus an open extension point whose extra
+   * keys arrive unvalidated, and an MCP server authors its own schema freely
+   * — so anything that does not fit a question a consent surface can render
+   * honestly is declined rather than shown as a wall of unknown widgets
+   * (ADR-024 R8).
+   *
+   * `decline` and `cancel` are NOT interchangeable in ACP: decline runs the
+   * tool with empty answers and tells the model the user skipped, cancel
+   * aborts the tool call. Everything non-affirmative here declines, because
+   * destroying a turn is a worse answer to silence than proceeding without
+   * one.
+   */
+  async #elicit(
+    params: { mode?: string; message?: string; requestedSchema?: unknown },
+    signal: AbortSignal,
+  ): Promise<{ action: 'accept'; content: Record<string, string> } | { action: 'decline' }> {
+    const turn = this.#turn;
+    if (!turn || signal.aborted) return { action: 'decline' };
+
+    // A closed set that refuses what it does not know, rather than rendering
+    // an unknown mode as the one it happens to understand. ACP says outright
+    // that custom modes MUST NOT be rendered as a known mode, and `url` is a
+    // separate consent design we have deliberately not built (ADR-024 R6).
+    if (params.mode !== 'form') {
+      this.#log.warn('declining an elicitation mode we do not render', {
+        data: { mode: params.mode === 'url' ? 'url' : 'other' },
+      });
+      return { action: 'decline' };
+    }
+
+    const fields = toFormFields(params.requestedSchema);
+    if (!fields) {
+      this.#log.warn('declining an elicitation we cannot render honestly');
+      return { action: 'decline' };
+    }
+
+    const answers = await turn.ask(
+      { message: typeof params.message === 'string' && params.message ? params.message : 'The agent has a question.', fields },
+      signal,
+    );
+    if (!answers) return { action: 'decline' };
+    return { action: 'accept', content: answers };
   }
 
   async #requestPermission(

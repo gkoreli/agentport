@@ -164,6 +164,7 @@ console.log('\n0c. ACP attachment identity');
     surface: { name: 'Same Label', origin: 'https://same.test' },
     grant: { tools: [] },
     tools: [],
+    policy: { mayAsk: false },
   };
   const first = makeRuntime();
   const second = makeRuntime();
@@ -1785,6 +1786,114 @@ console.log('\n16. an approval answers the question it was asked (ADR-023)');
     doc.text,
   );
   tampering.close();
+}
+
+// --- 17. the agent can ask its own user ------------------------------------
+// ADR-024. Two properties, and the second is the one that matters: the tier
+// whose answers a site could forge never gets the capability at all, so its
+// agent has no way to ask rather than asking into silence.
+console.log('\n17. the agent asks its own user (ADR-024)');
+{
+  const r17 = new Relay({ port: 0, log: () => {} });
+  await r17.listening();
+  const url17 = `ws://127.0.0.1:${r17.port}`;
+  const owner17 = generateKeyPair();
+  const agent17 = generateKeyPair();
+  const cert17 = signCert(owner17.secretKey, {
+    user: owner17.publicKey,
+    agent: agent17.publicKey,
+    name: 'Curious Agent',
+    runtime: 'asking',
+    issuedAt: Date.now(),
+  });
+
+  const policies: boolean[] = [];
+  const asked = new Deferred<string | undefined>();
+  class AskingRuntime implements AgentRuntime {
+    readonly name = 'asking';
+    openSession(context: { policy: { mayAsk: boolean } }): void {
+      policies.push(context.policy.mayAsk);
+    }
+    async prompt(_text: string, ctx: TurnContext): Promise<void> {
+      const answers = await ctx.ask({
+        message: 'Which draft should I revise?',
+        fields: [{ key: 'draft', label: 'Draft', options: ['The first', 'The second'], multi: false }],
+      });
+      asked.resolve(answers?.['draft']);
+      ctx.say(answers ? `Revising ${answers['draft']}.` : 'I could not ask, so I guessed.');
+    }
+  }
+
+  const daemon17 = new AgentDaemon({
+    relayUrl: url17,
+    identity: {
+      secretKey: agent17.secretKey,
+      publicKey: agent17.publicKey,
+      name: 'Curious Agent',
+      runtime: 'asking',
+      cert: cert17,
+    },
+    createRuntime: () => new AskingRuntime(),
+    onConnectOffer: async () => true,
+    onLocalApproval: async () => true,
+  });
+  await daemon17.start();
+
+  // The drop-in tier answers at the daemon's own terminal, which no page can
+  // draw — so it may ask.
+  const page17 = new AgentWallet({ relayUrl: url17, userSecretKey: generateKeyPair().secretKey, socketFactory });
+  await page17.connect();
+  const offer17 = await page17.beginConnect({
+    surface: { name: 'Asker', origin: 'https://asker.test' },
+    tools: [],
+    decide: () => true,
+  });
+  daemon17.claimConnect(offer17.code);
+  const dropIn = await offer17.accepted;
+  check('a tier with an unforgeable answer surface may ask', policies[0] === true, policies);
+
+  dropIn.on('ask', (question) => {
+    check('the question reaches the user with its options intact', question.fields[0]?.options?.length === 2, question);
+    dropIn.answer(question.id, { draft: 'The second' });
+  });
+  const said = await dropIn.prompt('Revise it.');
+  check('the answer comes back to the agent', (await asked.promise) === 'The second', said);
+  check('and the agent acted on it', said.includes('The second'), said);
+
+  // The delegated tier answers in page DOM, so it never gets the capability.
+  const delegatePage = generateKeyPair();
+  const delegated17 = new AgentWallet({ relayUrl: url17, userSecretKey: delegatePage.secretKey, socketFactory });
+  await delegated17.connect();
+  const grant17 = buildGrant({ surface: { name: 'Delegated Asker' }, tools: [] });
+  const issued17 = Date.now();
+  const delegatedSession = await delegated17.openSession({
+    agent: agent17.publicKey,
+    approved: {
+      grant: grant17,
+      delegation: signDelegation(owner17.secretKey, {
+        delegate: delegatePage.publicKey,
+        agent: agent17.publicKey,
+        origin: 'https://delegated-asker.test',
+        grantHash: hashGrant(grant17),
+        issuedAt: issued17,
+        expiresAt: issued17 + 60 * 60 * 1000,
+      }),
+    },
+    surface: { name: 'Delegated Asker', origin: 'https://delegated-asker.test' },
+    tools: [],
+  });
+  check(
+    'a tier whose answers the site could forge is never given the capability',
+    policies[1] === false,
+    policies,
+  );
+
+  delegatedSession.close();
+  dropIn.close();
+  page17.close();
+  delegated17.close();
+  await daemon17.stop();
+  await r17.close();
 }
 
 // --- teardown ---------------------------------------------------------------

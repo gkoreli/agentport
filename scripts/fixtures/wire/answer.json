@@ -1,0 +1,136 @@
+{
+  "type": "answer",
+  "cases": [
+    {
+      "name": "minimal valid \u2014 the user skipped",
+      "expect": "ok",
+      "frame": {
+        "t": "answer",
+        "s": "sess_0123456789abcdef01234567",
+        "id": "ask_0123456789abcdef01234567",
+        "outcome": "skipped"
+      }
+    },
+    {
+      "name": "maximal valid \u2014 answered with values",
+      "expect": "ok",
+      "frame": {
+        "t": "answer",
+        "s": "sess_0123456789abcdef01234567",
+        "id": "ask_0123456789abcdef01234567",
+        "outcome": "answered",
+        "values": [
+          {
+            "key": "f_0123456789abcdef01234567",
+            "value": "The second"
+          }
+        ]
+      }
+    },
+    {
+      "name": "missing outcome",
+      "expect": "missing_key",
+      "frame": {
+        "t": "answer",
+        "s": "sess_0123456789abcdef01234567",
+        "id": "ask_0123456789abcdef01234567",
+        "values": [
+          {
+            "key": "f_0123456789abcdef01234567",
+            "value": "The second"
+          }
+        ]
+      }
+    },
+    {
+      "name": "outcome outside the closed set",
+      "expect": "bad_format",
+      "frame": {
+        "t": "answer",
+        "s": "sess_0123456789abcdef01234567",
+        "id": "ask_0123456789abcdef01234567",
+        "outcome": "cancelled",
+        "values": [
+          {
+            "key": "f_0123456789abcdef01234567",
+            "value": "The second"
+          }
+        ]
+      }
+    },
+    {
+      "name": "skipped but carrying values anyway",
+      "expect": "mismatch",
+      "frame": {
+        "t": "answer",
+        "s": "sess_0123456789abcdef01234567",
+        "id": "ask_0123456789abcdef01234567",
+        "outcome": "skipped",
+        "values": [
+          {
+            "key": "f_0123456789abcdef01234567",
+            "value": "The second"
+          }
+        ]
+      }
+    },
+    {
+      "name": "two answers for one field",
+      "expect": "duplicate",
+      "frame": {
+        "t": "answer",
+        "s": "sess_0123456789abcdef01234567",
+        "id": "ask_0123456789abcdef01234567",
+        "outcome": "answered",
+        "values": [
+          {
+            "key": "f_0123456789abcdef01234567",
+            "value": "a"
+          },
+          {
+            "key": "f_0123456789abcdef01234567",
+            "value": "b"
+          }
+        ]
+      }
+    },
+    {
+      "name": "unknown extra key",
+      "expect": "unexpected_key",
+      "frame": {
+        "t": "answer",
+        "s": "sess_0123456789abcdef01234567",
+        "id": "ask_0123456789abcdef01234567",
+        "outcome": "answered",
+        "values": [
+          {
+            "key": "f_0123456789abcdef01234567",
+            "value": "The second"
+          }
+        ],
+        "who": "the user"
+      }
+    },
+    {
+      "name": "outcome is a boolean, not a member of the closed set",
+      "expect": "bad_format",
+      "frame": {
+        "t": "answer",
+        "s": "sess_0123456789abcdef01234567",
+        "id": "ask_0123456789abcdef01234567",
+        "outcome": true,
+        "values": [
+          {
+            "key": "f_0123456789abcdef01234567",
+            "value": "The second"
+          }
+        ]
+      }
+    },
+    {
+      "name": "raw: whitespace breaks canonical form",
+      "expect": "non_canonical",
+      "raw": "{\"id\": \"ask_0123456789abcdef01234567\", \"outcome\": \"skipped\", \"s\": \"sess_0123456789abcdef01234567\", \"t\": \"answer\"}"
+    }
+  ]
+}

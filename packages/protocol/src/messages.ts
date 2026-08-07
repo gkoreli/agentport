@@ -42,7 +42,11 @@ import {
   MAX_CIPHERTEXT_BYTES,
   MAX_DELEGATION_LIFETIME_MS,
   MAX_DESCRIPTION_CHARS,
+  MAX_ANSWER_CHARS,
   MAX_ERROR_CHARS,
+  MAX_FORM_FIELDS,
+  MAX_FORM_LABEL_CHARS,
+  MAX_FORM_OPTIONS,
   MAX_GRANT_CHARS,
   MAX_HISTORY_ENTRIES,
   MAX_JSON_DEPTH,
@@ -662,6 +666,84 @@ export const Plan = obj({
 });
 export type Plan = Infer<typeof Plan>;
 
+/**
+ * One question in an elicitation form (ADR-024).
+ *
+ * A closed shape rather than a JSON Schema passthrough. ACP's own form schema
+ * admits five field kinds plus an open `type: string` extension point whose
+ * extra keys arrive unvalidated, and an MCP server may author it freely — so
+ * we translate into this and refuse what does not fit, rather than forwarding
+ * something we cannot render honestly. Bounded by us, not by the asker.
+ */
+export const FormField = refined(
+  obj({
+    /** Stable key the answer is returned under. */
+    key: idField,
+    label: str(1, MAX_FORM_LABEL_CHARS),
+    /** Absent means free text; present means choose from exactly these. */
+    options: opt(arr(str(1, MAX_FORM_LABEL_CHARS), MAX_FORM_OPTIONS)),
+    /** More than one option may be chosen. Only meaningful with `options`. */
+    multi: opt(bool()),
+  }),
+  (field) => {
+    if (field.options && new Set(field.options).size !== field.options.length) return 'duplicate';
+    // `multi` without `options` would describe a free-text box that somehow
+    // takes several answers — a shape no renderer could honour, so it is a
+    // malformed question rather than a permissive one.
+    if (field.multi !== undefined && field.options === undefined) return 'mismatch';
+    return null;
+  },
+);
+export type FormField = Infer<typeof FormField>;
+
+/**
+ * The agent asking its own user a question, mid-turn.
+ *
+ * Sealed content: the relay never sees that a question was asked, let alone
+ * what it was. Only tiers whose answer surface the requesting origin cannot
+ * draw, read or forge ever receive one — that is enforced upstream, by not
+ * declaring the capability at all, so a refused tier's agent never asks
+ * rather than asking into silence (ADR-024 R1, R2).
+ */
+export const Ask = obj({
+  t: lit('ask'),
+  s: idField,
+  id: idField,
+  /** What the agent needs to know, in its own words. Agent-authored. */
+  message: str(1, MAX_DESCRIPTION_CHARS),
+  fields: arr(FormField, MAX_FORM_FIELDS),
+});
+export type Ask = Infer<typeof Ask>;
+
+/**
+ * The user's answer — or their refusal to give one, which is a real outcome
+ * and not an error.
+ *
+ * `answered` carries values; `skipped` means the user declined to answer and
+ * the agent should proceed knowing that, which is what the built-in tool does
+ * and what an unanswered question must decay into (ADR-024 R7/R8). There is
+ * deliberately no third outcome that aborts the turn: losing the user's work
+ * because they did not answer a question is a worse failure than guessing.
+ */
+export const Answer = refined(
+  obj({
+    t: lit('answer'),
+    s: idField,
+    id: idField,
+    outcome: en('answered', 'skipped'),
+    /** Present only when answered; keys are the field keys that were asked. */
+    values: opt(arr(obj({ key: idField, value: str(0, MAX_ANSWER_CHARS) }), MAX_FORM_FIELDS)),
+  }),
+  (answer) => {
+    if (answer.outcome === 'skipped' && answer.values !== undefined) return 'mismatch';
+    if (answer.values && new Set(answer.values.map((v) => v.key)).size !== answer.values.length) {
+      return 'duplicate';
+    }
+    return null;
+  },
+);
+export type Answer = Infer<typeof Answer>;
+
 export const Done = obj({
   t: lit('done'),
   s: idField,
@@ -803,6 +885,8 @@ export type SessionFrame =
   | Delta
   | Thought
   | Plan
+  | Ask
+  | Answer
   | Done
   | ToolCall
   | ToolResult
@@ -857,6 +941,8 @@ export const FRAME_SCHEMAS: { readonly [K in FrameType]: Schema<Frame> } = {
   'delta': Delta,
   'thought': Thought,
   'plan': Plan,
+  'ask': Ask,
+  'answer': Answer,
   'done': Done,
   'tool.call': ToolCall,
   'tool.result': ToolResult,
@@ -889,6 +975,8 @@ const SESSION_FRAME_MEMBERS = {
   'delta': true,
   'thought': true,
   'plan': true,
+  'ask': true,
+  'answer': true,
   'done': true,
   'tool.call': true,
   'tool.result': true,
@@ -960,6 +1048,7 @@ export function mayOriginate(role: Role, type: string): boolean {
  * both the daemon and the wallet use (previously duplicated in each).
  */
 const CLIENT_SEALABLE_MEMBERS = {
+  'answer': true,
   'prompt': true,
   'prompt.cancel': true,
   'tool.result': true,
@@ -968,6 +1057,7 @@ const CLIENT_SEALABLE_MEMBERS = {
 } as const satisfies Partial<Record<ContentFrameType, true>>;
 
 const AGENT_SEALABLE_MEMBERS = {
+  'ask': true,
   'delta': true,
   'thought': true,
   'plan': true,

@@ -1,0 +1,264 @@
+{
+  "type": "ask",
+  "cases": [
+    {
+      "name": "minimal valid \u2014 one free-text question",
+      "expect": "ok",
+      "frame": {
+        "t": "ask",
+        "s": "sess_0123456789abcdef01234567",
+        "id": "ask_0123456789abcdef01234567",
+        "message": "What should I call it?",
+        "fields": [
+          {
+            "key": "f_0123456789abcdef01234567",
+            "label": "Name"
+          }
+        ]
+      }
+    },
+    {
+      "name": "maximal valid \u2014 a bounded multi-select",
+      "expect": "ok",
+      "frame": {
+        "t": "ask",
+        "s": "sess_0123456789abcdef01234567",
+        "id": "ask_0123456789abcdef01234567",
+        "message": "Which draft should I revise?",
+        "fields": [
+          {
+            "key": "f_0123456789abcdef01234567",
+            "label": "Draft",
+            "options": [
+              "The first",
+              "The second"
+            ],
+            "multi": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "missing message",
+      "expect": "missing_key",
+      "frame": {
+        "t": "ask",
+        "s": "sess_0123456789abcdef01234567",
+        "id": "ask_0123456789abcdef01234567",
+        "fields": [
+          {
+            "key": "f_0123456789abcdef01234567",
+            "label": "Draft",
+            "options": [
+              "The first",
+              "The second"
+            ],
+            "multi": false
+          }
+        ]
+      }
+    },
+    {
+      "name": "empty message",
+      "expect": "too_short",
+      "frame": {
+        "t": "ask",
+        "s": "sess_0123456789abcdef01234567",
+        "id": "ask_0123456789abcdef01234567",
+        "message": "",
+        "fields": [
+          {
+            "key": "f_0123456789abcdef01234567",
+            "label": "Draft",
+            "options": [
+              "The first",
+              "The second"
+            ],
+            "multi": false
+          }
+        ]
+      }
+    },
+    {
+      "name": "unknown extra key",
+      "expect": "unexpected_key",
+      "frame": {
+        "t": "ask",
+        "s": "sess_0123456789abcdef01234567",
+        "id": "ask_0123456789abcdef01234567",
+        "message": "Which draft should I revise?",
+        "fields": [
+          {
+            "key": "f_0123456789abcdef01234567",
+            "label": "Draft",
+            "options": [
+              "The first",
+              "The second"
+            ],
+            "multi": false
+          }
+        ],
+        "urgent": true
+      }
+    },
+    {
+      "name": "fields is an object, not an array",
+      "expect": "wrong_type",
+      "frame": {
+        "t": "ask",
+        "s": "sess_0123456789abcdef01234567",
+        "id": "ask_0123456789abcdef01234567",
+        "message": "Which draft should I revise?",
+        "fields": {}
+      }
+    },
+    {
+      "name": "more fields than a human can read",
+      "expect": "too_many",
+      "frame": {
+        "t": "ask",
+        "s": "sess_0123456789abcdef01234567",
+        "id": "ask_0123456789abcdef01234567",
+        "message": "Which draft should I revise?",
+        "fields": [
+          {
+            "key": "f_000000000000000000000000",
+            "label": "q"
+          },
+          {
+            "key": "f_000000000000000000000001",
+            "label": "q"
+          },
+          {
+            "key": "f_000000000000000000000002",
+            "label": "q"
+          },
+          {
+            "key": "f_000000000000000000000003",
+            "label": "q"
+          },
+          {
+            "key": "f_000000000000000000000004",
+            "label": "q"
+          },
+          {
+            "key": "f_000000000000000000000005",
+            "label": "q"
+          },
+          {
+            "key": "f_000000000000000000000006",
+            "label": "q"
+          },
+          {
+            "key": "f_000000000000000000000007",
+            "label": "q"
+          },
+          {
+            "key": "f_000000000000000000000008",
+            "label": "q"
+          },
+          {
+            "key": "f_000000000000000000000009",
+            "label": "q"
+          },
+          {
+            "key": "f_000000000000000000000010",
+            "label": "q"
+          },
+          {
+            "key": "f_000000000000000000000011",
+            "label": "q"
+          },
+          {
+            "key": "f_000000000000000000000012",
+            "label": "q"
+          }
+        ]
+      }
+    },
+    {
+      "name": "more options than a human can read",
+      "expect": "too_many",
+      "frame": {
+        "t": "ask",
+        "s": "sess_0123456789abcdef01234567",
+        "id": "ask_0123456789abcdef01234567",
+        "message": "Which draft should I revise?",
+        "fields": [
+          {
+            "key": "f_0123456789abcdef01234567",
+            "label": "Draft",
+            "options": [
+              "o0",
+              "o1",
+              "o2",
+              "o3",
+              "o4",
+              "o5",
+              "o6",
+              "o7",
+              "o8",
+              "o9",
+              "o10",
+              "o11",
+              "o12",
+              "o13",
+              "o14",
+              "o15",
+              "o16"
+            ],
+            "multi": false
+          }
+        ]
+      }
+    },
+    {
+      "name": "duplicate options in one field",
+      "expect": "duplicate",
+      "frame": {
+        "t": "ask",
+        "s": "sess_0123456789abcdef01234567",
+        "id": "ask_0123456789abcdef01234567",
+        "message": "Which draft should I revise?",
+        "fields": [
+          {
+            "key": "f_0123456789abcdef01234567",
+            "label": "Draft",
+            "options": [
+              "same",
+              "same"
+            ],
+            "multi": false
+          }
+        ]
+      }
+    },
+    {
+      "name": "multi-select with no options to select from",
+      "expect": "mismatch",
+      "frame": {
+        "t": "ask",
+        "s": "sess_0123456789abcdef01234567",
+        "id": "ask_0123456789abcdef01234567",
+        "message": "Which draft should I revise?",
+        "fields": [
+          {
+            "key": "f_0123456789abcdef01234567",
+            "label": "Draft",
+            "multi": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "raw: keys out of order are non-canonical",
+      "expect": "non_canonical",
+      "raw": "{\"t\":\"ask\",\"s\":\"sess_0123456789abcdef01234567\",\"id\":\"ask_0123456789abcdef01234567\",\"message\":\"hi\",\"fields\":[]}"
+    },
+    {
+      "name": "raw: __proto__ smuggle is just an unknown key",
+      "expect": "unexpected_key",
+      "raw": "{\"__proto__\":{},\"fields\":[],\"id\":\"ask_0123456789abcdef01234567\",\"message\":\"hi\",\"s\":\"sess_0123456789abcdef01234567\",\"t\":\"ask\"}"
+    }
+  ]
+}
