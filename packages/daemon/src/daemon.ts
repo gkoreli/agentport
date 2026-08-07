@@ -725,7 +725,14 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
           pending.resolve(undefined);
           return;
         }
-        const answers: AskAnswers = {};
+        // Object.create(null), not {}. `__proto__` satisfies ID_PATTERN, so it
+        // is a legal field key on the wire — and assigning it onto an object
+        // LITERAL hits the prototype setter, which ignores a string. The
+        // answer would not be polluted; it would silently VANISH, and the
+        // agent would be told the user left blank a field it explicitly asked
+        // about. A null-prototype object has no such setter, so every key the
+        // user answered arrives as the key they answered.
+        const answers: AskAnswers = Object.create(null) as AskAnswers;
         for (const entry of frame.values ?? []) answers[entry.key] = entry.value;
         pending.resolve(answers);
         return;

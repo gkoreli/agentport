@@ -1822,6 +1822,7 @@ console.log('\n17. the agent asks its own user (ADR-024)');
 
   const policies: boolean[] = [];
   const asked = new Deferred<string | undefined>();
+  const hostileKey: { value?: unknown } = {};
   /** Every answer the agent received, in turn order — `asked` only ever
    *  settles on the first one. */
   const answered: (string | undefined)[] = [];
@@ -1848,8 +1849,13 @@ console.log('\n17. the agent asks its own user (ADR-024)');
     async prompt(_text: string, ctx: TurnContext): Promise<void> {
       const answers = await ctx.ask({
         message: 'Which draft should I revise?',
-        fields: [{ key: 'draft', label: 'Draft', options: ['The first', 'The second'], multi: false }],
+        fields: [
+          { key: 'draft', label: 'Draft', options: ['The first', 'The second'], multi: false },
+          // A legal field key by ID_PATTERN, and one an object literal eats.
+          { key: '__proto__', label: 'A legal but hostile field name' },
+        ],
       });
+      hostileKey.value = answers ? Object.getOwnPropertyDescriptor(answers, '__proto__')?.value : undefined;
       answered.push(answers?.['draft']);
       asked.resolve(answers?.['draft']);
       ctx.say(answers ? `Revising ${answers['draft']}.` : 'I could not ask, so I guessed.');
@@ -1886,10 +1892,17 @@ console.log('\n17. the agent asks its own user (ADR-024)');
 
   dropIn.on('ask', (question) => {
     check('the question reaches the user with its options intact', question.fields[0]?.options?.length === 2, question);
-    dropIn.answer(question.id, { draft: 'The second' });
+    // Answering the hostile key must reach the agent rather than hitting a
+    // prototype setter and vanishing — a field it explicitly asked about.
+    dropIn.answer(question.id, { draft: 'The second', ['__proto__']: 'kept' });
   });
   const said = await dropIn.prompt('Revise it.');
   check('the answer comes back to the agent', (await asked.promise) === 'The second', said);
+  check(
+    'an answer keyed __proto__ survives instead of silently vanishing',
+    hostileKey.value === 'kept',
+    hostileKey.value,
+  );
   check('and the agent acted on it', said.includes('The second'), said);
 
   // The delegated tier answers in page DOM, so it never gets the capability.
