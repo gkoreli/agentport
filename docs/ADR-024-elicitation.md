@@ -186,6 +186,55 @@ request/response round trip *through a human*, so the daemon side needs a
 deadline and a decline-on-timeout, or an unanswered question hangs the turn.
 `AgentWallet.revoke`'s `#awaitTimed` is the template.
 
+### R8. Four things the code says that the design assumed wrongly
+
+Verified against `@agentclientprotocol/sdk@1.3.0` and
+`claude-agent-acp@0.64.0` before writing any frame, because the last two
+times a shape was asserted ahead of the code, the code disagreed.
+
+**The capability is a marker object, not a boolean.** `elicitation: { form: {} }`
+— `ElicitationFormCapabilities` is `{ _meta? }` and nothing else. And the
+trap: the SDK parses it with `defaultOnError`, so a *wrong* value is not an
+error, it is silently replaced with `undefined`, which reads as unsupported.
+`elicitation: { form: true }` would land on the agent as capability-off with
+**no error anywhere**. The failure mode of this feature is silence — the same
+shape as the bug it exists to fix, one layer up. R2's negotiation therefore
+needs a check that the capability was actually accepted, not merely sent.
+
+**`decline` and `cancel` are not interchangeable, and `decline` means
+*allow*.** `applyAskElicitationResponse` maps `decline` to
+`{behavior:'allow', updatedInput:{…answers:{}}}` — the tool runs with empty
+answers and the model is told the user skipped. `cancel`, and any unknown
+action, throws `Tool use aborted`. So the timeout in R7 must **decline, not
+cancel**: an unanswered question should leave the agent proceeding as though
+the user skipped, which is what the built-in tool does, rather than killing
+the turn. Cancelling on a timeout would convert "you didn't answer" into "your
+work is destroyed".
+
+**`AskUserQuestion` is not a veto point, and elicitation is not an approval.**
+The answer becomes *input to a tool that then runs* — it is not a gate on the
+call. ACP's permission channel only covers calls the runtime chooses to
+surface. Nothing here should be mistaken for a security control; this ADR is
+about restoring a capability, and the security content is entirely in *who may
+answer*.
+
+**There are two producers, and only one is bounded.** A real
+`AskUserQuestion` is capped by the agent SDK at ≤4 questions × ≤4 options,
+rendering to ≤8 form fields. But an **MCP server elicitation** passes the
+server's own JSON Schema through with only `type:"object"` forced — arbitrary,
+unbounded, server-authored. Our wire schema is bounded by *us*, at our own
+limits, and refuses what exceeds them. A form is rendered to a human; a form
+too large to read is not a consent surface.
+
+### R9. No secrets through a form, from day one
+
+`prior-art-synthesis.md:398-403` records that elicitation had to **ban**
+collecting secrets through structured forms, and says to design our surfaces
+with that ban from the start rather than retrofitting it. Taken: a form field
+is not a credential prompt, and the surfaces must not grow one. This is
+cheaper to hold now than to walk back after a site has learned the shape —
+the same reasoning as freezing the signing envelope early.
+
 ## The cost, stated rather than discovered
 
 **A hosted-wallet session gets no elicitation, therefore no
