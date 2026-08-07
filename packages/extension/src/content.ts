@@ -216,6 +216,25 @@ window.addEventListener('message', (event: MessageEvent) => {
       if (record) tell({ t: 'prompt.cancel', ref: record.ref, promptId: body.promptId });
       return;
     }
+    case 'answer': {
+      // The session reference comes from OUR table, keyed by owner: a page may
+      // only answer a question asked of a session this document owns, never
+      // one belonging to another frame or to the extension's own widget. The
+      // ask id is the page's to supply — the worker checks it against the
+      // asks actually outstanding, and the daemon checks it again.
+      const record = ownedBy(body.ref, 'page');
+      if (!record) {
+        // Refused rather than forwarded, and said out loud. `answer` returns
+        // void by contract, so there is no promise to reject: silence in the
+        // isolated world is the only place this can surface, and a question
+        // that then times out minutes later is exactly the failure this whole
+        // path exists to avoid.
+        log.warn('refused an answer for a session this document does not own', { data: { ref: body.ref } });
+        return;
+      }
+      tell({ t: 'answer', ref: record.ref, askId: body.askId, ...(body.values ? { values: body.values } : {}) });
+      return;
+    }
     case 'tool.result': {
       // The page may only answer a call we dispatched to it, exactly once. The
       // session reference comes from our own table, never from the message.
@@ -242,6 +261,35 @@ window.addEventListener('message', (event: MessageEvent) => {
       return;
   }
 });
+
+/**
+ * The agent asked a question of a session the WIDGET owns, and the widget has
+ * no form to render it in.
+ *
+ * Answered immediately as SKIPPED rather than left to the daemon's five-minute
+ * deadline. Both end in the same place — the agent proceeds without an answer
+ * — but only one of them is a decision: a stall is indistinguishable from a
+ * slow agent, so the user watches a turn hang for minutes over a question they
+ * were never shown. A skip carries no authority and attributes nothing to the
+ * user, which is exactly why it is the safe thing to send on their behalf and
+ * an ANSWER never would be.
+ *
+ * The user is still told, because a question they did not get the chance to
+ * answer changes how much they should trust what comes next (ADR-024 R4). The
+ * complete fix is a form in the overlay — extension chrome, a surface the page
+ * cannot draw — at which point this becomes the fallback for a widget that has
+ * no overlay open rather than the whole story.
+ */
+function skipWidgetAsk(ref: string, payload: unknown): void {
+  const askId = isRecord(payload) && typeof payload['id'] === 'string' ? payload['id'] : undefined;
+  if (!askId) {
+    log.error('the agent asked something with no id; nothing can answer it', { data: { ref } });
+    return;
+  }
+  log.warn('skipping an agent question: the widget has no form surface', { data: { ref } });
+  tell({ t: 'answer', ref, askId });
+  overlayInstance?.notice('Your agent asked you a question. This surface cannot show it, so it was skipped — expect a guess.');
+}
 
 function ownedBy(ref: string, owner: Origin): SessionRecord | undefined {
   const record = records.get(ref);
@@ -339,6 +387,7 @@ function onWorkerMessage(message: WorkerToContent): void {
       const record = records.get(message.ref);
       if (!record) return;
       if (record.owner === 'page') toPage({ t: 'event', ref: message.ref, event: message.event, payload: message.payload });
+      else if (message.event === 'ask') skipWidgetAsk(message.ref, message.payload);
       else onWidgetEvent(message.event, message.payload);
       if (message.event === 'closed') records.delete(message.ref);
       return;

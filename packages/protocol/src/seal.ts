@@ -96,7 +96,19 @@ export function answerProofBinding(
   clientEpk: Hex,
   surface: SurfaceDescriptor,
   grant: CapabilityGrant,
-  details: { agentName: string; runtime: string; resume?: string; missed?: number },
+  details: {
+    agentName: string;
+    runtime: string;
+    resume?: string;
+    missed?: number;
+    /**
+     * Whether the agent may use its own capabilities here (ADR-024 R11).
+     * Bound, not merely sent: the page renders this to the user, and a relay
+     * able to flip it could make the page claim an authority the daemon will
+     * refuse — or hide a restriction the user needs to know about.
+     */
+    ownTools: boolean;
+  },
 ): unknown {
   return { mode, client, clientEpk, surface, grant, details };
 }

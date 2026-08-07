@@ -60,6 +60,11 @@ export interface TurnContext {
 /**
  * What this attachment is permitted to do, decided by the daemon — which
  * knows which tier answers its questions — and never by the runtime.
+ *
+ * Build one with `attachmentPolicy()`. There is no other constructor on
+ * purpose: every field here answers the SAME question, so the only input is
+ * that question's answer and no caller can hand two fields values that
+ * disagree.
  */
 export interface AttachmentPolicy {
   /**
@@ -67,15 +72,40 @@ export interface AttachmentPolicy {
    * whose answer surface the requesting origin could draw, read or forge; a
    * runtime that sees false must not advertise the capability to its agent,
    * so the agent has no ask affordance rather than asking into silence.
-   *
-   * Every field here is decided by the daemon from ONE predicate — does a
-   * surface exist that the requesting origin cannot draw — because they all
-   * turn on the same question. Add a field by deriving it from that
-   * predicate, not by adding a second boolean that happens to agree: two
-   * booleans that agree today drift silently, since agreeing is not
-   * something a compiler can check.
    */
   mayAsk: boolean;
+  /**
+   * Whether the agent may use its OWN capabilities — its shell, its files,
+   * whatever its runtime carries — during this attachment (ADR-024 R11).
+   *
+   * An own-tool approval asks the user to lend the agent authority over their
+   * own machine, so it may only be answered on a surface the requesting
+   * origin cannot draw. Where no such surface exists there is nobody who may
+   * answer, and the rule is refuse rather than reroute: the delegated tier's
+   * only candidate surfaces are a popup that cannot be opened without a user
+   * gesture the agent does not have, and an iframe the page can cover.
+   *
+   * The site's OWN tools are unaffected, and that asymmetry is the whole
+   * point: a site forging approval for its own function gains nothing it did
+   * not already have, while forging approval for the user's shell is
+   * escalation.
+   */
+  mayUseOwnTools: boolean;
+}
+
+/**
+ * Derive an attachment's whole policy from the ONE question it turns on: does
+ * this attachment have an answer surface the requesting origin cannot draw,
+ * read or forge?
+ *
+ * One input, deliberately. Both fields would otherwise be two booleans that
+ * agree today and drift the first time somebody changes one — silently, since
+ * agreeing is not a thing a compiler can check. A future field goes here as
+ * another derivation of the same argument; a field that genuinely needs a
+ * second input changes this signature, which is a change a reviewer sees.
+ */
+export function attachmentPolicy(hasTrustedAnswerSurface: boolean): AttachmentPolicy {
+  return { mayAsk: hasTrustedAnswerSurface, mayUseOwnTools: hasTrustedAnswerSurface };
 }
 
 /** One question, already narrowed to what a consent surface can render. */
@@ -131,9 +161,19 @@ export class EchoRuntime implements AgentRuntime {
 
 /**
  * Exercises the full protocol surface without an LLM: reads the document,
- * asks for approval, then writes through a site tool.
+ * then writes through a site tool.
  *
- * This is what a real adapter's tool loop looks like, minus the model.
+ * This is what a real adapter's tool loop looks like, minus the model — and
+ * that includes NOT asking `requestApproval` about a site tool it is about to
+ * call. `requestApproval` is a runtime's own advisory channel, so the daemon
+ * stamps everything arriving on it `runtime_own_tool` (ADR-023 R2), and under
+ * ADR-024 R11 that authority is refused wherever the page is the only surface
+ * that could answer. A demo that asked there would simply stop writing on the
+ * tier the site actually uses. The real adapter never asks either: AcpRuntime
+ * short-circuits granted MCP names before they reach this channel (acp.ts),
+ * because the gate that matters for a site tool is the browser's own
+ * `requiresApproval` check on the `tool.call` — which asks the user exactly
+ * once, in the surface that owns that tool.
  */
 export class DemoWriterRuntime implements AgentRuntime {
   readonly name = 'demo-writer';
@@ -150,7 +190,7 @@ export class DemoWriterRuntime implements AgentRuntime {
     // what a real runtime does — this demo exists to exercise that path.
     const steps: PlanStep[] = [
       { text: 'Read the current document', status: 'active' },
-      { text: 'Ask before writing', status: 'pending' },
+      { text: 'Choose how to write it back', status: 'pending' },
       { text: 'Write the change', status: 'pending' },
     ];
     const advance = (index: number): void => {
@@ -166,6 +206,7 @@ export class DemoWriterRuntime implements AgentRuntime {
     const body = doc?.text ?? '';
     ctx.say(`I read ${body.length} characters. `);
 
+    advance(1);
     // Write through whichever mutation tool the surface granted.
     const writer = has('inkwell.document.replaceSelection')
       ? { name: 'inkwell.document.replaceSelection', args: (t: string) => ({ text: `${body.trim()}\n\n${t}`.trim() }) }
@@ -177,19 +218,21 @@ export class DemoWriterRuntime implements AgentRuntime {
       return;
     }
 
-    advance(1);
-    const approved = await ctx.requestApproval('Write your instruction into the document', {
-      name: writer.name,
-      arguments: writer.args(text),
-    });
-
-    if (!approved) {
-      ctx.say('Understood — I left the document untouched.');
+    advance(2);
+    // The surface's own gate lives on this call: a tool marked
+    // `requiresApproval`, or named in the grant's `alwaysAsk`, is put to the
+    // user before its handler runs, as `site_tool`. A decline arrives here as
+    // a rejected call, which is the honest shape — the tool did not run.
+    try {
+      await ctx.callTool(writer.name, writer.args(text));
+    } catch (err) {
+      // Not swallowed: the daemon logs every failing surface call with its
+      // session and tool, and the runtime's job here is the other half of the
+      // rule — telling the user, in the conversation, that nothing was
+      // written and why.
+      ctx.say(`Understood — I left the document untouched (${err instanceof Error ? err.message : String(err)}).`);
       return;
     }
-
-    advance(2);
-    await ctx.callTool(writer.name, writer.args(text));
     advance(steps.length);
     ctx.say('Done. The document now ends with your instruction.');
   }

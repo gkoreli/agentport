@@ -100,7 +100,7 @@ export function wireFingerprint(): string {
  * commit as the version, deliberately by hand — but unlike the version, a
  * stale value here CANNOT pass, because the check recomputes it.
  */
-export const WIRE_FINGERPRINT = 'f4869da4880129f5c2aacbcb';
+export const WIRE_FINGERPRINT = 'e877e7667e5c86425b6652a2';
 
 /**
  * The wire dialect both ends must agree on, checked at `hello` before
@@ -127,7 +127,7 @@ export const WIRE_FINGERPRINT = 'f4869da4880129f5c2aacbcb';
  * one is nested inside `SessionDelegation`, while still looking like a
  * guarantee.
  */
-export const PROTOCOL_VERSION = 'agentport/2';
+export const PROTOCOL_VERSION = 'agentport/3';
 
 export type Hex = string;
 
@@ -564,6 +564,19 @@ export const SessionOpened = obj({
    * already knows the key from the cert and verifies against that instead.
    */
   agent: opt(pubkey),
+  /**
+   * Whether the agent may use its OWN capabilities in this attachment
+   * (ADR-024 R11). False when the only surface that could answer an own-tool
+   * approval is one the requesting origin draws — the daemon then refuses
+   * those approvals outright rather than asking a page whether the agent may
+   * use the user's own shell.
+   *
+   * Required, and signed into the epk proof, for two reasons. It is the value
+   * the daemon ENFORCES with, not a re-derivation, so it cannot drift from
+   * the policy; and a relay that could flip it would make the page tell the
+   * user the opposite of what their agent is actually allowed to do.
+   */
+  ownTools: bool(),
 });
 export type SessionOpened = Infer<typeof SessionOpened>;
 
@@ -608,6 +621,11 @@ export const SessionResumed = obj({
   epk: pubkey,
   /** Signature over both epks and canonical resume response context. */
   epkSig: sigHex,
+  /** As on `session.opened`: may the agent use its own tools here (ADR-024
+   *  R11). Restated on every re-attachment rather than remembered by the page,
+   *  because the answer belongs to the attachment and the daemon is the only
+   *  party that knows it. */
+  ownTools: bool(),
 });
 export type SessionResumed = Infer<typeof SessionResumed>;
 

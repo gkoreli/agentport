@@ -59,7 +59,14 @@ import {
 } from '@agentport/protocol';
 import type { AgentIdentity } from './identity.js';
 import { isRevoked, memoryRevocations, type Revocation, type RevocationStore } from './revocations.js';
-import type { AskAnswers, AskQuestion, AgentRuntime, TurnContext } from './runtime.js';
+import {
+  attachmentPolicy,
+  type AskAnswers,
+  type AskQuestion,
+  type AgentRuntime,
+  type AttachmentPolicy,
+  type TurnContext,
+} from './runtime.js';
 
 interface SessionState {
   id: string;
@@ -77,6 +84,14 @@ interface SessionState {
   grant: CapabilityGrant;
   tools: ToolDefinition[];
   runtime: AgentRuntime;
+  /**
+   * Decided ONCE, when the attachment opens, and then both declared to the
+   * runtime and enforced against. One object rather than a recomputation at
+   * each use: what the agent was told it may do and what the daemon will
+   * actually allow are then the same value, not two evaluations that have to
+   * keep agreeing.
+   */
+  policy: AttachmentPolicy;
   /**
    * The conversation, recorded on the user's own machine. This is the
    * authoritative transcript: the relay stores none of it, and the website is
@@ -847,6 +862,10 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
       surface: session.surface,
       grant: session.grant,
       missed,
+      // The attachment's policy is restated, not re-derived: a re-attachment
+      // is the same attachment, and the page must be told again because it
+      // deliberately kept nothing across the reload.
+      ownTools: session.policy.mayUseOwnTools,
       epk: mine.publicKey,
       epkSig: signEpk(
         this.#options.identity.secretKey,
@@ -856,6 +875,7 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
           agentName: this.#options.identity.name,
           runtime: this.#options.identity.runtime,
           missed,
+          ownTools: session.policy.mayUseOwnTools,
         }),
       ),
     });
@@ -949,6 +969,12 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     // Delegated pages receive a generic label, so signing the private label
     // here would make a valid response unverifiable at the other endpoint.
     const responseAgentName = frame.delegation ? 'Personal agent' : this.#options.identity.name;
+    const viaConnect = Boolean(frame.viaConnect);
+    const delegation = frame.delegation;
+    // Decided before the answer is signed, because the answer states it: the
+    // page is told what this attachment may do, and the statement is bound
+    // into the epk proof so the relay cannot rewrite it (ADR-024 R11).
+    const policy = attachmentPolicy(this.#hasTrustedAnswerSurface({ delegation }));
     const myEpk = {
       epk: mine.publicKey,
       epkSig: signEpk(
@@ -959,6 +985,7 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
           agentName: responseAgentName,
           runtime: this.#options.identity.runtime,
           resume: resumeToken,
+          ownTools: policy.mayUseOwnTools,
         }),
       ),
     };
@@ -966,8 +993,9 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     const runtime = this.#options.createRuntime();
     const session: SessionState = {
       id: frame.s,
-      viaConnect: Boolean(frame.viaConnect),
-      ...(frame.delegation ? { delegation: frame.delegation } : {}),
+      viaConnect,
+      policy,
+      ...(delegation ? { delegation } : {}),
       surface: frame.surface,
       grant: frame.grant,
       tools: frame.grant.tools,
@@ -990,7 +1018,7 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
         surface: session.surface,
         grant: session.grant,
         tools: session.tools,
-        policy: { mayAsk: this.#hasTrustedAnswerSurface(session) },
+        policy: session.policy,
       });
     } catch (err) {
       this.#sessions.delete(frame.s);
@@ -1019,6 +1047,7 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
       agentName: responseAgentName,
       runtime: this.#options.identity.runtime,
       resume: session.resumeToken,
+      ownTools: session.policy.mayUseOwnTools,
       ...myEpk,
     });
     this.emit('session', frame.s);
@@ -1176,28 +1205,48 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
    * (ADR-024), and may it use its own capabilities here (ADR-024 R10). Two
    * booleans that happen to agree today would drift the first time somebody
    * changed one, and they would drift silently, because agreeing is not a
-   * thing a compiler can check.
+   * thing a compiler can check. Narrow this and BOTH narrow; widen it and both
+   * widen. Special-casing one of them back is the drift, not the fix.
    *
-   * - `viaConnect` answers at the daemon's own terminal — a surface no page
-   *   can reach. True.
-   * - A delegated session answers in the CLIENT PANEL, which is page DOM the
-   *   requesting origin renders. False. And there is no repair available at
-   *   the wallet origin either: opening its popup needs user activation, and
-   *   an agent-initiated question has no gesture behind it — which is exactly
+   * The discriminator is DELEGATION, not the wallet's implementation. Three
+   * tiers, and the wire already separates them:
+   *
+   * - `viaConnect` — no delegation, no browser wallet at all. Answers at the
+   *   daemon's own terminal, a surface no page can reach. TRUE.
+   * - **Delegated** — the hosted wallet signed a short-lived authority for a
+   *   page's ephemeral key, and that page answers in its own panel, which is
+   *   DOM the requesting origin renders. FALSE, and no repair exists at the
+   *   wallet origin: opening its popup needs user activation, and an
+   *   agent-initiated question has no gesture behind it — which is exactly
    *   why `connect.ts` reserves its popup synchronously during the click. A
    *   persistent cross-origin frame would be readable-proof and not
    *   overlay-proof, which is the attack a real browser window exists to
    *   defeat.
-   * - A non-delegated session is the owner's own wallet — today the in-page
-   *   demo wallet, so it is treated as page-answered until the extension IS
-   *   the wallet. When that changes, this one predicate flips and everything
-   *   derived from it flips together.
+   * - **Direct key** — no delegation: the client IS the owner's key, checked
+   *   against the cert. TRUE.
    *
-   * Conservative on purpose: false unless the surface is known unforgeable,
-   * rather than true unless known bad.
+   * That last row is the non-obvious one, so state the argument rather than
+   * the conclusion. It covers the extension, whose consent window a page can
+   * neither draw nor read — the easy case. It also covers today's in-page
+   * demo wallet, and refusing THAT would protect nothing: a page holding the
+   * user key can already mint any authority it likes, including a fresh
+   * delegation to itself. This is the same self-referential argument that
+   * makes page-answered `site_tool` approvals fine — the forger already holds
+   * the capability, so there is no escalation left to prevent. AGENTS.md
+   * already says the in-page wallet is demo-only precisely because the page
+   * can reach the key; this policy agrees with that rather than pretending
+   * otherwise. Extension packaging is what turns the row from vacuously safe
+   * into genuinely safe, and needs no change here when it lands.
+   *
+   * So the refusal lands exactly where the escalation is: a page that does
+   * NOT hold the user key, answering for the user's capability.
+   *
+   * Takes only what it reads, so it can be answered before the session state
+   * it will be stored on exists — the answer has to be signed into the reply
+   * that opens the attachment.
    */
-  #hasTrustedAnswerSurface(session: SessionState): boolean {
-    return session.viaConnect;
+  #hasTrustedAnswerSurface(session: Pick<SessionState, 'delegation'>): boolean {
+    return session.delegation === undefined;
   }
 
 
@@ -1258,10 +1307,35 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     call?: { name: string; arguments: Record<string, unknown> },
     signal?: AbortSignal,
   ): Promise<boolean> {
-    // The code-carrying fallback has not been authorised by a browser wallet,
-    // so its questions stay with the daemon owner. Delegated sessions are the
-    // opposite: the hosted-wallet popup authorised this exact client surface,
-    // and the real approval UI is in that client's panel, not onLocalApproval.
+    // Everything reaching this method is the agent's OWN capability — the
+    // domain stamped below is a constant for that reason — so this fork is
+    // where ADR-024 R11 lands: a page may answer for its own capability, never
+    // for the user's, and never as the user.
+    //
+    // REFUSAL, not a reroute. The delegated tier has no surface that could
+    // answer this: a wallet-origin popup needs a user gesture the agent does
+    // not have mid-turn, and a cross-origin frame the page can cover is not a
+    // consent surface. So there is nobody who may say yes, and asking anyway
+    // would mean asking the party we are protecting the user from.
+    //
+    // `!== true`, not falsiness, and fail-closed: an attachment that does not
+    // positively carry this authority does not have it. Refusing here costs
+    // one synchronous return and cannot hang — the caller gets the same `false`
+    // a human decline produces, which every runtime already handles.
+    if (session.policy.mayUseOwnTools !== true) {
+      this.#log.warn('refused an own-tool approval: this attachment has no surface that may answer for the user', {
+        sessionId: session.id,
+        data: { origin: session.surface.origin, delegated: session.delegation !== undefined },
+      });
+      return Promise.resolve(false);
+    }
+
+    // Past the guard there are two trusted surfaces, and which one depends on
+    // whether a browser wallet was ever involved. The code-carrying fallback
+    // has none, so its questions stay with the daemon owner at the terminal.
+    // Everything else here is a DIRECT-KEY attachment — the client is the
+    // owner's own key — so the question goes to that wallet, which is the
+    // extension's consent window when the extension is the wallet.
     if (session.viaConnect) {
       const ask = this.#options.onLocalApproval;
       if (!ask) return Promise.resolve(false);

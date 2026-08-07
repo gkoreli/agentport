@@ -87,6 +87,13 @@ class FakeRelay {
   // same relay, which still knows the session it is routing.
   static surface: unknown;
   static grant: unknown;
+  /**
+   * What the daemon says this attachment may do with the agent's OWN tools
+   * (ADR-024 R11). Mutable so the panel can be watched changing its mind on a
+   * re-attachment, which is the only way the restriction ever appears mid-life
+   * — the daemon restates it, the page remembers nothing.
+   */
+  static ownTools = true;
   /** Sever the socket the way a network does — no API the wallet could read
    *  as an intentional teardown. */
   kill() {
@@ -135,6 +142,9 @@ class FakeRelay {
         // The real relay stamps resume authority here; without it the wallet
         // correctly refuses to resume anything, so the fake must too.
         resume: RESUME_TOKEN,
+        // A drop-in attachment answers at the daemon's own terminal, so its
+        // agent keeps its own tools (ADR-024 R11).
+        ownTools: FakeRelay.ownTools,
         epk: mine.publicKey,
         epkSig: signEpk(
           this.#agent.secretKey,
@@ -146,6 +156,7 @@ class FakeRelay {
             // Resume authority is bound into the proof (ADR-003), so stamping
             // a token means signing over it too.
             resume: RESUME_TOKEN,
+            ownTools: FakeRelay.ownTools,
           }),
         ),
         agent: this.#agent.publicKey,
@@ -166,6 +177,7 @@ class FakeRelay {
         surface,
         grant,
         missed: 0,
+        ownTools: FakeRelay.ownTools,
         epk: mine.publicKey,
         epkSig: signEpk(
           this.#agent.secretKey,
@@ -175,6 +187,7 @@ class FakeRelay {
             agentName: 'Test Agent',
             runtime: 'demo',
             missed: 0,
+            ownTools: FakeRelay.ownTools,
           }),
         ),
       });
@@ -328,6 +341,29 @@ check(
   clickMount.querySelector('[data-slot="chat"]')?.getAttribute('data-state'),
 );
 
+// The other half of the refusal (ADR-024 R4/R11). A tier that may not answer
+// for the user's own capability does not get to leave the user guessing about
+// it: the daemon says so on every (re)attachment and the panel has to SHOW it,
+// because the model treats an absent affordance as nothing at all and simply
+// guesses. Keyed on the element, not its wording — a sentence someone
+// legitimately rewrites must not silently turn this green.
+console.log('\n5d. an agent that lost its own tools says so');
+check('nothing is claimed while the agent keeps its own tools', clickMount.querySelector('.ap-limits') === null);
+FakeRelay.ownTools = false;
+FakeRelay.latest!.kill();
+await new Promise((resolve) => setTimeout(resolve, 1200));
+flush();
+check(
+  'the panel states the limit once the attachment carries it',
+  clickMount.querySelector('.ap-limits') !== null,
+  rendered().slice(-260),
+);
+check(
+  'and it says which tools DO work, not merely that something is missing',
+  /this site's tools only/.test(rendered()),
+  rendered().slice(-260),
+);
+
 console.log('\n6. protocol-neutral chat');
 const { createChatStore } = await import('../src/nisli-ui/lib/chat.js');
 const { Chat } = await import('../src/nisli-ui/ui/chat/chat.js');
@@ -394,7 +430,13 @@ await Promise.resolve();
 flush();
 check('external queued sends preserve order', prompts.length === 2 && prompts[1] === 'External follow-up', prompts);
 
-console.log('\n7. delegated approvals render a real decision card');
+// The shared approval card, fed the domain it must never draw dishonestly.
+// The DAEMON no longer routes an own-tool approval to any surface the
+// requesting origin draws (ADR-024 R11) — it refuses instead — so this frame
+// is injected directly, standing in for the wallet tier that does receive it.
+// What is under test here is the renderer: given the harder of the two
+// domains, does the card tell the truth about whose authority is at stake?
+console.log('\n7. the approval card draws the authority it was handed');
 FakeRelay.latest?.sealedReply({
   t: 'approval.request',
   s: 'sess_test',

@@ -21,12 +21,20 @@ import type {
   SessionEvents,
   SiteTool,
 } from '@agentport/client';
-import { randomId, type HistoryEntry, type ToolDefinition } from '@agentport/protocol';
+import {
+  ID_PATTERN,
+  MAX_ANSWER_CHARS,
+  MAX_FORM_FIELDS,
+  randomId,
+  type HistoryEntry,
+  type ToolDefinition,
+} from '@agentport/protocol';
 import {
   ENVELOPE,
   TO_PAGE,
   TO_WALLET,
   isRecord,
+  sanitizeFormFields,
   sanitizePlanSteps,
   type PageEnvelope,
   type PageInbound,
@@ -52,13 +60,13 @@ type Listener = (payload: never) => void;
  *  for THIS origin only — two sites comparing aliases learn nothing. */
 export interface PageAgentSession extends AgentSessionHandle {
   readonly id: string;
-  readonly info: { agentName: string; runtime: string; alias?: string };
+  readonly info: { agentName: string; runtime: string; ownTools: boolean; alias?: string };
   readonly grant: { tools: ToolDefinition[]; alwaysAsk: string[]; expiresAt: number };
 }
 
 class PageSession implements PageAgentSession {
   readonly id: string;
-  readonly info: { agentName: string; runtime: string; alias?: string };
+  readonly info: { agentName: string; runtime: string; ownTools: boolean; alias?: string };
   readonly grant: { tools: ToolDefinition[]; alwaysAsk: string[]; expiresAt: number };
 
   readonly tools = new Map<string, SiteTool>();
@@ -68,7 +76,7 @@ class PageSession implements PageAgentSession {
 
   constructor(init: {
     ref: string;
-    info: { agentName: string; runtime: string; alias?: string };
+    info: { agentName: string; runtime: string; ownTools: boolean; alias?: string };
     grant: { tools: ToolDefinition[]; alwaysAsk: string[]; expiresAt: number };
     tools: SiteTool[];
   }) {
@@ -117,6 +125,42 @@ class PageSession implements PageAgentSession {
 
   cancel(promptId: string): void {
     send({ t: 'prompt.cancel', ref: this.id, promptId });
+  }
+
+  /**
+   * Answer a question the agent asked (ADR-024). Omitting `values` — or
+   * passing none — is a SKIP, which is a real answer meaning "proceed without
+   * one", not an error and not a cancellation.
+   *
+   * The bounds checked here are ERGONOMICS, not security: this file is the one
+   * part of the extension the site can rewrite, so the authoritative copy of
+   * every check below runs in the content script (`sanitizeAnswerFields`). The
+   * reason to duplicate them is that the trusted side has no way to answer a
+   * `void` method — it can only drop the message — and a caller who quietly
+   * loses an answer learns nothing until the agent's question times out
+   * minutes later. Throwing here tells an honest caller immediately, in their
+   * own stack, exactly as `startPrompt` does for an over-long prompt.
+   */
+  answer(askId: string, values?: Record<string, string>): void {
+    if (!ID_PATTERN.test(askId)) throw new Error('invalid ask id');
+    const entries = Object.entries(values ?? {});
+    if (entries.length === 0) {
+      send({ t: 'answer', ref: this.id, askId });
+      return;
+    }
+    if (entries.length > MAX_FORM_FIELDS) {
+      throw new Error(`an answer may carry at most ${MAX_FORM_FIELDS} fields`);
+    }
+    for (const [key, value] of entries) {
+      if (!ID_PATTERN.test(key)) throw new Error(`answer field name is not a valid key: ${key}`);
+      // Rejected, never truncated: a shortened answer would be delivered to
+      // the agent as words the user did not say, with the user's authority on
+      // it. Same rule as a prompt that exceeds the wire bound.
+      if (typeof value !== 'string' || value.length > MAX_ANSWER_CHARS) {
+        throw new Error(`answer for "${key}" exceeds the protocol limit of ${MAX_ANSWER_CHARS} characters`);
+      }
+    }
+    send({ t: 'answer', ref: this.id, askId, values: entries.map(([key, value]) => ({ key, value })) });
   }
 
   /** The conversation, replayed from the agent's own store via the wallet. */
@@ -176,6 +220,19 @@ class PageSession implements PageAgentSession {
         // prompt and history request in flight lost its answer, so it is told.
         this.emit('reattached', typeof payload['verify'] === 'string' ? { verify: payload['verify'] } : {});
         return;
+      case 'ask': {
+        // The agent is asking its user something. Rebuilt rather than
+        // forwarded, and dropped whole if it does not rebuild: a question is a
+        // form a human reads before committing their own authority to the
+        // answer, so half of one is worse than none — the user would answer a
+        // question the agent did not ask.
+        const id = payload['id'];
+        const message = payload['message'];
+        const fields = sanitizeFormFields(payload['fields']);
+        if (typeof id !== 'string' || typeof message !== 'string' || !fields) return;
+        this.emit('ask', { id, message, fields });
+        return;
+      }
       case 'tool':
         this.emit('tool', payload as SessionEvents['tool']);
         return;
@@ -290,7 +347,7 @@ window.addEventListener('message', (event: MessageEvent) => {
 
 interface ConnectResult {
   ref: string;
-  info: { agentName: string; runtime: string; alias?: string };
+  info: { agentName: string; runtime: string; ownTools: boolean; alias?: string };
   grant: { tools: ToolDefinition[]; alwaysAsk: string[]; expiresAt: number };
 }
 

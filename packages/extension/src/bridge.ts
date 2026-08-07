@@ -23,10 +23,16 @@
  */
 
 import {
+  ID_PATTERN,
+  MAX_ANSWER_CHARS,
+  MAX_FORM_FIELDS,
+  MAX_FORM_LABEL_CHARS,
+  MAX_FORM_OPTIONS,
   MAX_PLAN_STEPS,
   MAX_PLAN_STEP_CHARS,
   isPromptId,
   randomId,
+  type FormField,
   type PlanStep,
   type ToolDefinition,
 } from '@agentport/protocol';
@@ -68,6 +74,22 @@ export interface PageConnectRequest {
   ttlMs?: number;
 }
 
+/**
+ * One field of an elicitation answer, in the wire's own shape.
+ *
+ * An ARRAY of pairs rather than a `Record`, all the way to the last hop, for
+ * two reasons that both matter at a hostile boundary. `Answer.values` on the
+ * wire is already this shape, so there is one dialect instead of two that
+ * drift; and an array cannot carry a key like `__proto__` in a position where
+ * a rebuild would have to invoke a setter, so every hop rebuilds pairs and
+ * only the final call site materialises an object, with `Object.fromEntries`,
+ * which defines own properties rather than assigning them.
+ */
+export interface AnswerField {
+  key: string;
+  value: string;
+}
+
 export type PageOutbound =
   | { t: 'available'; rid: string }
   | { t: 'connect'; rid: string; request: PageConnectRequest }
@@ -76,6 +98,18 @@ export type PageOutbound =
   | { t: 'history'; rid: string; ref: string }
   | { t: 'prompt'; rid: string; ref: string; promptId: string; text: string; context?: Record<string, unknown> }
   | { t: 'prompt.cancel'; ref: string; promptId: string }
+  /**
+   * The user's answer to a question the AGENT asked (ADR-024).
+   *
+   * The one page-controlled channel that carries USER AUTHORITY into the
+   * agent's reasoning, which is why ADR-024 refuses elicitation on tiers whose
+   * answer surface a site can draw — and why this tier is allowed to carry it
+   * at all: the extension's surface is one the site cannot draw or read. That
+   * makes this the most sensitive member of this union, not the least, so its
+   * validator refuses rather than repairs. Absent `values` is a SKIP, which is
+   * a real answer meaning "proceed without one", never an error.
+   */
+  | { t: 'answer'; ref: string; askId: string; values?: AnswerField[] }
   | { t: 'tool.result'; callId: string; ok: boolean; result?: unknown; error?: string }
   | { t: 'close'; ref: string; reason?: string }
   /** WebMCP interop: definitions harvested from the page-world modelContext. */
@@ -138,6 +172,8 @@ export type ContentToWorker =
   | { t: 'history'; rid: string; ref: string }
   | { t: 'prompt'; rid: string; ref: string; promptId: string; text: string; context?: Record<string, unknown> }
   | { t: 'prompt.cancel'; ref: string; promptId: string }
+  /** Already validated by `readPageOutbound`; the ref is re-checked here. */
+  | { t: 'answer'; ref: string; askId: string; values?: AnswerField[] }
   | { t: 'tool.result'; ref: string; callId: string; ok: boolean; result?: unknown; error?: string }
   | { t: 'close'; ref: string; reason?: string }
   | { t: 'status'; rid: string };
@@ -287,6 +323,97 @@ export function sanitizePlanSteps(value: unknown): PlanStep[] | undefined {
   return out;
 }
 
+/**
+ * The fields of one elicitation answer, rebuilt or refused whole.
+ *
+ * ALL-OR-NOTHING, and this is the rule that matters. Dropping one malformed
+ * field and forwarding the rest would deliver, under the user's own authority,
+ * an answer the user did not give — the agent is told "your user said this"
+ * and everything downstream inherits that provenance, which no later frame can
+ * un-attribute. Refusing the whole message leaves the question unanswered,
+ * which is a state the protocol already has a meaning for.
+ *
+ * Bounds are the WIRE's own (`MAX_FORM_FIELDS`, `MAX_ANSWER_CHARS`,
+ * `ID_PATTERN`), not numbers chosen here: an answer that would survive this
+ * hop and then be refused by the daemon's decoder is a boundary that lies
+ * about what it accepts. `undefined` means refused; an empty array is a real
+ * value meaning the user submitted nothing, which becomes a skip downstream.
+ *
+ * Note the empty-string allowance: the wire is `str(0, MAX_ANSWER_CHARS)`, so
+ * a blank text field is a legitimate answer and the local `str()` helper —
+ * which requires length > 0 — must not be used for it.
+ */
+export function sanitizeAnswerFields(value: unknown): AnswerField[] | undefined {
+  if (!Array.isArray(value) || value.length > MAX_FORM_FIELDS) return undefined;
+  const out: AnswerField[] = [];
+  const seen = new Set<string>();
+  for (const entry of value) {
+    if (!isRecord(entry)) return undefined;
+    const key = entry['key'];
+    const answer = entry['value'];
+    if (typeof key !== 'string' || !ID_PATTERN.test(key)) return undefined;
+    if (typeof answer !== 'string' || answer.length > MAX_ANSWER_CHARS) return undefined;
+    // The wire refuses duplicate keys outright rather than picking a winner,
+    // and so does this: two answers for one question is not a question we can
+    // honestly say the user answered.
+    if (seen.has(key)) return undefined;
+    seen.add(key);
+    out.push({ key, value: answer });
+  }
+  return out;
+}
+
+/**
+ * One elicitation's fields, rebuilt for the surface that renders them.
+ *
+ * The mirror of `sanitizeAnswerFields`, on the way OUT: the question crossing
+ * to whatever will draw it. All-or-nothing for the same reason a plan snapshot
+ * is — a half-rendered form asks the user something the agent did not ask, and
+ * they would answer it with their own authority. Bounds are the wire's own, so
+ * a question that crossed the sealed channel intact is never refused here for
+ * being too large; only one our own plumbing mangled would be.
+ *
+ * The refinements are the wire's too, and they are not decoration: `multi`
+ * without `options` describes a free-text box that somehow takes several
+ * answers, which no renderer can honour, and duplicate options make a choice
+ * whose answer is ambiguous.
+ */
+export function sanitizeFormFields(value: unknown): FormField[] | undefined {
+  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_FORM_FIELDS) return undefined;
+  const out: FormField[] = [];
+  const seenKeys = new Set<string>();
+  for (const entry of value) {
+    if (!isRecord(entry)) return undefined;
+    const key = entry['key'];
+    if (typeof key !== 'string' || !ID_PATTERN.test(key) || seenKeys.has(key)) return undefined;
+    seenKeys.add(key);
+    const label = str(entry['label'], MAX_FORM_LABEL_CHARS);
+    if (label === undefined) return undefined;
+
+    const rawOptions = entry['options'];
+    if (rawOptions === undefined) {
+      // Free text. `multi` is meaningless without options, so its presence
+      // here is a malformed question rather than a permissive one.
+      if (entry['multi'] !== undefined) return undefined;
+      out.push({ key, label });
+      continue;
+    }
+    if (!Array.isArray(rawOptions) || rawOptions.length === 0 || rawOptions.length > MAX_FORM_OPTIONS) {
+      return undefined;
+    }
+    const options: string[] = [];
+    for (const option of rawOptions) {
+      const text = str(option, MAX_FORM_LABEL_CHARS);
+      if (text === undefined || options.includes(text)) return undefined;
+      options.push(text);
+    }
+    const multi = entry['multi'];
+    if (multi !== undefined && typeof multi !== 'boolean') return undefined;
+    out.push({ key, label, options, ...(multi === undefined ? {} : { multi }) });
+  }
+  return out;
+}
+
 export function sanitizeConnectRequest(value: unknown): PageConnectRequest | undefined {
   if (!isRecord(value)) return undefined;
   const tools = sanitizeTools(value['tools']);
@@ -352,6 +479,22 @@ export function readPageOutbound(value: unknown): PageOutbound | undefined {
       const promptId = str(value['promptId'], 64);
       return ref && isPromptId(promptId) ? { t, ref, promptId } : undefined;
     }
+    case 'answer': {
+      const ref = str(value['ref'], 64);
+      const askId = str(value['askId'], 64);
+      // The ask id is an opaque handle we hand straight back to the daemon, so
+      // it has to satisfy the same pattern the wire will check it against —
+      // otherwise a malformed id crosses three hops and dies at a decoder that
+      // treats the failure as session-fatal.
+      if (!ref || !askId || !ID_PATTERN.test(askId)) return undefined;
+      // Absent is a skip. Present-but-unusable is a REFUSAL, never a skip: the
+      // two look alike here and mean opposite things to the person the answer
+      // is attributed to, so a malformed answer must not quietly become "the
+      // user chose not to answer".
+      if (value['values'] === undefined) return { t, ref, askId };
+      const values = sanitizeAnswerFields(value['values']);
+      return values ? { t, ref, askId, values } : undefined;
+    }
     case 'tool.result': {
       const callId = str(value['callId'], 64);
       if (!callId || typeof value['ok'] !== 'boolean') return undefined;
@@ -394,6 +537,7 @@ const VALIDATED = [
   'history',
   'prompt',
   'prompt.cancel',
+  'answer',
   'tool.result',
   'close',
   'webmcp.tools',

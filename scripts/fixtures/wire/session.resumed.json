@@ -6,6 +6,7 @@
       "expect": "ok",
       "frame": {
         "t": "session.resumed",
+        "ownTools": false,
         "s": "sess_0123456789abcdef01234567",
         "agentName": "Agent",
         "runtime": "claude-code",
@@ -46,6 +47,7 @@
       "expect": "ok",
       "frame": {
         "t": "session.resumed",
+        "ownTools": false,
         "s": "sess_0123456789abcdef01234567",
         "agentName": "Agent",
         "runtime": "rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr",
@@ -93,6 +95,7 @@
       "expect": "missing_key",
       "frame": {
         "t": "session.resumed",
+        "ownTools": false,
         "s": "sess_0123456789abcdef01234567",
         "agentName": "Agent",
         "runtime": "claude-code",
@@ -132,6 +135,7 @@
       "expect": "unexpected_key",
       "frame": {
         "t": "session.resumed",
+        "ownTools": false,
         "s": "sess_0123456789abcdef01234567",
         "agentName": "Agent",
         "runtime": "claude-code",
@@ -173,6 +177,7 @@
       "expect": "wrong_type",
       "frame": {
         "t": "session.resumed",
+        "ownTools": false,
         "s": "sess_0123456789abcdef01234567",
         "agentName": "Agent",
         "runtime": "claude-code",
@@ -213,6 +218,7 @@
       "expect": "out_of_range",
       "frame": {
         "t": "session.resumed",
+        "ownTools": false,
         "s": "sess_0123456789abcdef01234567",
         "agentName": "Agent",
         "runtime": "claude-code",
@@ -253,6 +259,7 @@
       "expect": "out_of_range",
       "frame": {
         "t": "session.resumed",
+        "ownTools": false,
         "s": "sess_0123456789abcdef01234567",
         "agentName": "Agent",
         "runtime": "claude-code",
@@ -293,6 +300,7 @@
       "expect": "too_deep",
       "frame": {
         "t": "session.resumed",
+        "ownTools": false,
         "s": "sess_0123456789abcdef01234567",
         "agentName": "Agent",
         "runtime": "claude-code",
@@ -373,6 +381,7 @@
       "expect": "duplicate",
       "frame": {
         "t": "session.resumed",
+        "ownTools": false,
         "s": "sess_0123456789abcdef01234567",
         "agentName": "Agent",
         "runtime": "claude-code",
@@ -412,6 +421,7 @@
       "expect": "duplicate",
       "frame": {
         "t": "session.resumed",
+        "ownTools": false,
         "s": "sess_0123456789abcdef01234567",
         "agentName": "Agent",
         "runtime": "claude-code",
@@ -446,6 +456,7 @@
       "expect": "mismatch",
       "frame": {
         "t": "session.resumed",
+        "ownTools": false,
         "s": "sess_0123456789abcdef01234567",
         "agentName": "Agent",
         "runtime": "claude-code",
@@ -479,6 +490,7 @@
       "expect": "too_long",
       "frame": {
         "t": "session.resumed",
+        "ownTools": false,
         "s": "sess_0123456789abcdef01234567",
         "agentName": "Agent",
         "runtime": "claude-code",
@@ -822,6 +834,7 @@
       "expect": "wrong_type",
       "frame": {
         "t": "session.resumed",
+        "ownTools": false,
         "s": "sess_0123456789abcdef01234567",
         "agentName": "Agent",
         "runtime": "claude-code",
@@ -850,6 +863,7 @@
       "expect": "bad_format",
       "frame": {
         "t": "session.resumed",
+        "ownTools": false,
         "s": "sess_0123456789abcdef01234567",
         "agentName": "Agent",
         "runtime": "claude-code",

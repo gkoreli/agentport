@@ -99,6 +99,13 @@ a { color: var(--accent); }
 .ap-verify { color: var(--muted); font-size: 10px; letter-spacing: .04em; padding: 2px 0 6px; }
 .ap-verify code { font: 10px/1.4 ui-monospace, monospace; color: #cfd6e2; }
 
+/* What this attachment CANNOT do, stated where the user is already looking
+   (ADR-024 R4). Standing state beside the fingerprint words, not a transient
+   notice: an agent quietly missing half of itself is worse than one that says
+   so, because the user cannot tell a guess from an answer. */
+.ap-limits { border: 1px solid var(--line); border-left: 2px solid var(--accent); border-radius: 8px; background: #12161d; color: var(--muted); font-size: 11px; line-height: 1.5; padding: 7px 10px; margin-bottom: 10px; }
+.ap-limits strong { color: var(--text); font-weight: 600; }
+
 /* The agent's live plan. One checklist that updates in place, above the
    transcript — a plan is what the agent intends now, not something that
    scrolls away. */

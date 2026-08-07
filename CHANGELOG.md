@@ -10,6 +10,115 @@ they moved.
 
 ## Unreleased
 
+### The extension can answer the agent's question, and now typechecks
+
+Narrowing the policy predicate to delegation turned elicitation ON for the
+extension tier — and `PageSession` had no `answer()`. An extension-tier
+question would have reached nobody and stalled the turn until the daemon's
+five-minute deadline decayed it to a skip: the ask-into-silence failure, in the
+same change whose purpose is refusing to send questions to surfaces that cannot
+honestly answer them.
+
+The missing method had been missing since `AgentSessionHandle` gained it. It
+was invisible because **`packages/extension` was in no tsconfig** and its own
+`check` script runs `tsx`, which does not typecheck — four
+`Property 'answer' is missing` errors, plus a `Signal`/`ReadonlySignal`
+variance error in the overlay, sitting in a package esbuild bundles and ships.
+`npx tsc -p packages/extension/tsconfig.json --noEmit` is now the fifth
+separately-typechecked project in AGENTS.md, and it passes.
+
+`answer()` runs the three hops the rest of the vocabulary already uses. The
+interesting half is the boundary: an elicitation answer is the one
+page-controlled channel that carries the USER'S AUTHORITY into the agent's
+reasoning, so `readPageOutbound` refuses it rather than repairing it. Bounds
+are the wire's own (`ID_PATTERN`, `MAX_FORM_FIELDS`, `MAX_ANSWER_CHARS`) — a
+boundary that accepted what the daemon's decoder rejects is a boundary that
+lies — and one unusable field refuses the whole message, because forwarding
+the rest would deliver, under the user's own name, an answer they did not
+give. Absent values is a skip; present-but-unusable is never quietly turned
+into one. Fields travel as key/value PAIRS to the last hop, where
+`Object.fromEntries` defines them, so a `__proto__` field key never reaches a
+prototype setter.
+
+The widget surface has no form to draw a question in, so it answers `skipped`
+immediately and tells the user, rather than letting the turn hang for minutes
+over a question they were never shown. A skip carries no authority and
+attributes nothing to anyone, which is exactly why it is the safe thing to
+send on someone's behalf and an answer never would be.
+
+Checked by driving the real page provider under happy-dom: the question
+surfaces on the site's session handle, a malformed one is dropped whole rather
+than half-drawn, and the answer comes back through the real trusted-side
+validator. The two middle hops need a real `chrome`, so the check says so
+rather than faking one.
+
+### The page is no longer asked whether your agent may use your own shell
+
+ADR-023 gave every approval a stamped `domain`, so a renderer could tell "a
+tool this site lent it" from "your agent's own tool". That made them
+distinguishable and left them routing identically — and the daemon's own
+routing sends every non-`viaConnect` approval to the client. So in a delegated
+session the site's panel was the surface answering whether the agent could run
+its own shell on the user's machine.
+
+`site_tool` staying in the page is right, and only that one: a `SiteTool`
+carries a handler the page supplies and the page invokes, so a site forging
+approval for its own function gains nothing it did not already have. Those
+approvals protect the user from the *agent* being talked into misusing the
+site's tools by hostile page content. `runtime_own_tool` is the opposite
+direction entirely.
+
+The fix is a **refusal, not a reroute**, because there is nowhere else to send
+it: a wallet-origin popup needs user activation, and an approval arrives
+mid-turn with no gesture behind it (`connect.ts` pre-opens `about:blank`
+*synchronously* for exactly this reason), while a cross-origin iframe the page
+can cover is not a consent surface. So `AttachmentPolicy` gained
+`mayUseOwnTools`, and `attachmentPolicy()` — the only constructor — takes a
+single boolean, so fields that disagree are unrepresentable rather than
+merely discouraged. The daemon refuses before the fork, returning the same
+`false` a human decline produces.
+
+The discriminator is **delegation**, not the wallet's implementation.
+`#hasTrustedAnswerSurface` is `session.delegation === undefined`, which
+separates the three tiers the wire already distinguishes: `viaConnect` answers
+at the daemon's terminal, a delegated page answers in DOM it renders itself,
+and a direct-key client *is* the owner's key. Allowing that last row is the
+same self-referential argument that keeps `site_tool` in the page: it covers
+the extension, whose consent window a page can neither draw nor read, and it
+covers today's in-page demo wallet, where a page that holds the user key could
+already mint any authority it wanted — so refusing to ask it would protect
+nothing while costing the extension a real capability. The refusal lands
+exactly where a page does **not** hold the key.
+
+Because both fields come from that one input, narrowing the predicate returned
+**elicitation** to the direct-key tier in the same edit: an extension-hosted
+or in-page-wallet session gets `AskUserQuestion` back. A hosted-wallet
+delegation still does not, which is the honest price of a tier whose only
+answer surface is one the site can read.
+
+And the user is told. `ownTools` rides on `session.opened`/`session.resumed`,
+required and signed into the sealing proof so a relay cannot flip it, and the
+panel renders it as standing state: *on this site your agent works with this
+site's tools only*. Withholding a capability silently is the failure this
+project has now hit three times — the model experiences an absent affordance
+as nothing at all and guesses, so the only party who can act on the knowledge
+is the person reading the panel.
+
+One thing falls out of it. `DemoWriterRuntime` stopped asking approval for a
+*site* tool it was about to call: everything on that channel is stamped
+`runtime_own_tool` by construction, the real ACP adapter never asked, and the
+browser's own `requiresApproval` gate was already asking the same question
+once, on the surface that owns the tool. That removes a long-standing double
+prompt as a side effect.
+
+e2e section 18 covers all three tiers, because a check that only exercised the
+refused one could not tell a correct predicate from one that refuses
+everything. It fails on the old daemon by watching the page answer
+`runtime_own_tool` and the agent act on that answer, and on the over-broad
+`viaConnect` predicate by watching the direct-key row get refused. Every wait
+in it has its own deadline: a refusal that hangs is indistinguishable from a
+slow one.
+
 ### A refusal settles its request even when no waiter asked for it
 
 The fix above closed one waiter list. This closes the class.

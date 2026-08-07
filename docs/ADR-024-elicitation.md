@@ -289,12 +289,22 @@ field is exactly the discriminator needed: a `runtime_own_tool` approval
 belongs on a surface the origin cannot forge, by the same rule as an
 elicitation, and for the same reason.
 
-**This is not fixed here.** It is a separate change to ADR-023's routing
-rather than a paragraph in ADR-024, it wants its own adversarial check, and
-folding it into an elicitation ADR would bury it. Recorded so that the next
-person finds it stated rather than rediscovers it — and so that nobody reads
-ADR-024 as implying that page-answered approvals are fine in general. They are
-fine in exactly one case, for a reason that does not extend.
+**This was not fixed when R10 was written.** It is a separate change to
+ADR-023's routing rather than a paragraph in ADR-024, it wants its own
+adversarial check, and folding it into an elicitation ADR would bury it.
+Recorded so that the next person finds it stated rather than rediscovers it —
+and so that nobody reads ADR-024 as implying that page-answered approvals are
+fine in general. They are fine in exactly one case, for a reason that does not
+extend.
+
+**Shipped, as R11 rather than as a redirect.** `AttachmentPolicy` gained
+`mayUseOwnTools`, derived from the same `#hasTrustedAnswerSurface` call that
+produces `mayAsk` — one input, so the two cannot disagree — and
+`AgentDaemon#requestApproval` refuses before the fork rather than routing.
+e2e section 18 is the adversarial check: a delegated session, a
+`runtime_own_tool` approval, and the page's decider never consulted. It fails
+on the pre-R11 daemon by observing the page answer `runtime_own_tool` and the
+agent act on that answer.
 
 ### R11. R10's redirect does not exist — the answer is refusal, symmetrically
 
@@ -337,13 +347,54 @@ one row down. The user is told "on this site your agent works with the site's
 tools only", in the session surface, for the same reason and by the same
 argument.
 
+Shipped as `ownTools` on `session.opened` and `session.resumed` — the value
+the daemon *enforces* with, not a second derivation of it — carried into
+`SessionInfo.ownTools` and rendered by the panel as standing state beside the
+fingerprint words. It is a **required** field and it is **signed into the epk
+proof**: a relay that could add, drop or flip it could make the page claim an
+authority the daemon will refuse, or hide a restriction the user needs.
+
+**The predicate keys on DELEGATION, and this is where R1's tier table became
+the implementation rather than an aspiration.** An earlier draft of the fix
+used `viaConnect`, which refused the extension tier too and was defended as
+conservatism. It was not: the extension is the one tier that demonstrably has
+an unforgeable surface, and the daemon never needed to recognise an extension
+to get this right. `session.delegation === undefined` separates the three rows
+today.
+
+The third row — direct key, no delegation — is allowed, and the argument is
+R10's own. That row covers the extension (safe because a page can neither draw
+nor read its consent window) *and* today's in-page demo wallet (safe because a
+page holding the user key could already mint any authority it wanted,
+including a fresh delegation to itself). Refusing the second would protect
+nothing while costing the first. That is exactly why page-answered `site_tool`
+approvals are fine: **the forger already holds the capability, so there is no
+escalation left to prevent.** The refusal lands precisely where a page does
+*not* hold the key.
+
+Two consequences worth stating rather than discovering. First, the reference
+`DemoWriterRuntime` had to stop asking `requestApproval` about a *site* tool
+it was about to call: everything on that channel is stamped `runtime_own_tool`
+by construction (ADR-023 R2), so under this rule the demo would simply have
+stopped writing on the tier the site uses. The real adapter never asked
+either — `AcpRuntime` short-circuits granted MCP names — and the browser's own
+`requiresApproval` gate was already asking the same question, once, on the
+surface that owns the tool.
+
 **One predicate, not two booleans.** `mayAsk` and any `mayUseOwnTools` turn on
 the *same* question — does a surface exist that the requesting origin cannot
 draw. They are derived from one named predicate
 (`#hasTrustedAnswerSurface`), because two booleans that agree today drift the
 first time somebody changes one, and they drift silently: agreeing is not
-something a compiler can check. When the extension becomes the wallet, one
-predicate flips and everything derived from it flips together.
+something a compiler can check.
+
+Shipped one step stronger than "derived from": `attachmentPolicy()` is the
+only constructor of an `AttachmentPolicy` and takes exactly one boolean, so
+disagreeing fields are not a discipline anybody has to remember — they are
+unrepresentable. This has already paid for itself once. Narrowing the
+predicate from `viaConnect` to "not delegated" widened *both* fields in the
+same edit, which is how the direct-key tier got elicitation back without
+anyone arguing about it separately.
 
 ## The cost, stated rather than discovered
 
@@ -352,6 +403,14 @@ predicate flips and everything derived from it flips together.
 of a tier whose only answer surface is one the site can read. It is not a
 temporary limitation to be engineered away later — it follows from the trust
 model, and the way out is the extension, not a cleverer page.
+
+**And the price is paid by that tier alone.** Because the predicate keys on
+delegation rather than on the wallet's implementation, the drop-in and
+direct-key tiers both keep the capability — so this is not "AgentPort agents
+cannot ask questions", it is "an agent borrowed through a hosted-wallet
+delegation cannot". The user-visible cost is bounded to the one row where the
+answer surface belongs to the party being protected against, and the panel
+says so rather than leaving them to infer it from a guess.
 
 ## Falsifiability
 

@@ -487,6 +487,7 @@ export class AgentWallet extends Emitter<WalletEvents> {
           agentName: opened.agentName,
           runtime: opened.runtime,
           resume: opened.resume,
+          ownTools: opened.ownTools,
         }),
       );
       if (opened.agent) this.#agentKeys.set(opened.s, opened.agent);
@@ -581,6 +582,7 @@ export class AgentWallet extends Emitter<WalletEvents> {
           agentName: resumed.agentName,
           runtime: resumed.runtime,
           missed: resumed.missed,
+          ownTools: resumed.ownTools,
         }),
       );
       this.#agentKeys.set(request.id, request.agent);
@@ -588,6 +590,7 @@ export class AgentWallet extends Emitter<WalletEvents> {
         existing.reattached({
           agentName: resumed.agentName,
           runtime: resumed.runtime,
+          ownTools: resumed.ownTools,
           verify: this.#verifyWords.get(request.id),
         });
         return { session: existing, missed: resumed.missed };
@@ -596,7 +599,7 @@ export class AgentWallet extends Emitter<WalletEvents> {
         resumed.s,
         resumed.surface,
         resumed.grant,
-        { agentName: resumed.agentName, runtime: resumed.runtime },
+        { agentName: resumed.agentName, runtime: resumed.runtime, ownTools: resumed.ownTools },
         request,
       );
       return { session, missed: resumed.missed };
@@ -646,6 +649,7 @@ export class AgentWallet extends Emitter<WalletEvents> {
         agentName: opened.agentName,
         runtime: opened.runtime,
         resume: opened.resume,
+        ownTools: opened.ownTools,
       }),
     );
     this.#agentKeys.set(id, request.agent);
@@ -704,14 +708,23 @@ export class AgentWallet extends Emitter<WalletEvents> {
     id: string,
     surface: SurfaceDescriptor,
     grant: CapabilityGrant,
-    opened: { agentName: string; runtime: string },
+    opened: { agentName: string; runtime: string; ownTools: boolean },
     request: { tools: SiteTool[]; decide?: ApprovalDecider },
   ): AgentSession {
     const session = new AgentSession({
       id,
       surface,
       grant,
-      info: { agentName: opened.agentName, runtime: opened.runtime, verify: this.#verifyWords.get(id) },
+      info: {
+        agentName: opened.agentName,
+        runtime: opened.runtime,
+        // Carried through from the daemon's signed answer, never guessed from
+        // which tier this wallet thinks it is: the daemon is the party that
+        // decides, and a second derivation here is exactly the drift the one
+        // predicate exists to prevent.
+        ownTools: opened.ownTools,
+        verify: this.#verifyWords.get(id),
+      },
       tools: request.tools,
       decide: request.decide ?? (() => false),
       logger: this.#log.child('session'),

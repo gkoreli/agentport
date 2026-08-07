@@ -107,6 +107,23 @@ export interface SessionInfo {
    * proves the relay did not sit in the key exchange. All sessions are sealed.
    */
   verify?: string;
+  /**
+   * Whether the agent may use its OWN tools during this attachment — its
+   * shell, its files, whatever its runtime carries (ADR-024 R11).
+   *
+   * False wherever this page is the only surface that could answer an
+   * own-tool approval, which is every tier without a wallet the site cannot
+   * draw. The daemon refuses those approvals rather than asking the page
+   * whether the agent may use the user's own machine.
+   *
+   * REQUIRED, and it must be RENDERED. An agent that quietly cannot use half
+   * of itself is the invisible diminishment this project keeps re-learning:
+   * the model experiences an absent affordance as nothing at all and guesses,
+   * so the only party who can act on this is the user, and only if someone
+   * tells them. Say it where they are looking: "on this site your agent works
+   * with the site's tools only".
+   */
+  ownTools: boolean;
 }
 
 export interface PromptRequest {

@@ -106,6 +106,22 @@ section is the short implementation checklist, not a second protocol spec.
    against a lying relay.
 7. **Secret keys never cross the wire.** Only public keys, signatures, and
    certs identify endpoints; attachment secrets remain in endpoint memory.
+8. **A page may answer for its own capability, never for the user's, and
+   never as the user** (ADR-024 R11). A `site_tool` approval is the page's own
+   function, so a site forging one gains nothing it did not already have —
+   self-referential, not escalation. A `runtime_own_tool` approval is the
+   user's machine, and a page that does **not** hold the user key answering
+   for it *is* escalation. So `#hasTrustedAnswerSurface` keys on delegation:
+   a **delegated** attachment is refused outright — never rerouted, because
+   the wallet popup needs a user gesture the agent does not have and an iframe
+   the page can cover is not a consent surface — while `viaConnect` (the
+   daemon's terminal) and direct-key (the wallet holds the user key) are
+   asked. The refusal is stated to the page in
+   `session.opened`/`session.resumed` and rendered, so the user is told rather
+   than quietly given a diminished agent. Every field of `AttachmentPolicy`
+   comes from that ONE predicate through `attachmentPolicy()`, which takes a
+   single boolean; add a field by deriving it too, and never special-case one
+   field back when the predicate moves.
 
 These are mandatory acceptance properties. ADR-018 maps them to current
 evidence and names the remaining blocking coverage gaps. If you change routing
@@ -125,25 +141,34 @@ Open the demo, hit **Pair a new agent**, paste the code, then **Connect
 agent**. The daemon's pairing link (`/pair#code=…`) auto-fills the dialog.
 
 ```bash
-npm run e2e        # full loop over real sockets, no browser, 113 checks
-npm run wire:check # wire validation: 513 fixture cases across all 45 frames
+npm run e2e        # full loop over real sockets, no browser, 136 checks
+npm run wire:check # wire validation: 515 fixture cases across all 45 frames
 npm run agui:check # every emitted AG-UI event parsed by @ag-ui/core's schemas
 npm run typecheck  # tsc -b over all packages
 npm run deploy     # build the site + wrangler deploy
 
-# these FOUR are checked separately, outside the project references — and
+# these FIVE are checked separately, outside the project references — and
 # they are the only thing that typechecks them at all, because every one is
 # bundled by esbuild, which does not typecheck. A type error here still
 # BUILDS and still ships.
 npx tsc -p examples/inkwell/tsconfig.json
-npx tsc -p site/tsconfig.json          # browser code (DOM lib)
-npx tsc -p site/tsconfig.worker.json   # worker code (workers-types)
-npx tsc -p wallet/tsconfig.json        # the hosted wallet origin app
+npx tsc -p site/tsconfig.json             # browser code (DOM lib)
+npx tsc -p site/tsconfig.worker.json      # worker code (workers-types)
+npx tsc -p wallet/tsconfig.json           # the hosted wallet origin app
+npx tsc -p packages/extension/tsconfig.json --noEmit   # page provider, content script, SW
 ```
 
 Browser and Worker type-check separately on purpose: `@cloudflare/workers-types`
 and the DOM lib define conflicting globals, so mixing them in one project
 produces nonsense errors.
+
+The extension earned its place on that list the expensive way. It was in no
+project for its whole existence, and `npm run check:extension` runs `tsx`,
+which does not typecheck either — so four `Property 'answer' is missing in
+type 'PageSession'` errors sat there from the day `AgentSessionHandle` gained
+`answer()`, and the extension simply could not answer an elicitation. Nothing
+reported anything. **A package that typechecks nowhere is where a shipped bug
+hides**, and the only reliable fix is a command someone runs.
 
 Env: `AGENTPORT_RELAY`, `AGENTPORT_IDENTITY`, `AGENTPORT_RUNTIME`,
 `AGENTPORT_NAME`, `AGENTPORT_LOCATION`.
@@ -352,7 +377,7 @@ Working: pairing, cert issuance and verification, directory + presence,
 capability grants with TTL, prompt streaming, plan reporting, tool-call
 round-trip, approval round-trip, cancellation, reconnect with in-place session
 resume, session teardown, revocation, authority-tagged approvals, the agent
-asking its own user a question, and the full demo UI. 113 e2e checks and 513
+asking its own user a question, and the full demo UI. 136 e2e checks and 515
 wire-validation cases pass.
 
 Not built yet, in rough priority order:
@@ -370,6 +395,16 @@ Not built yet, in rough priority order:
 3. **Extension packaging.** The wallet lives in the page today, which is only
    acceptable for a demo — the page can reach the user key. Move it behind an
    extension boundary with `postMessage`.
+
+   Note what this does *not* block: `#hasTrustedAnswerSurface` keys on
+   DELEGATION, not on the wallet's implementation, so the extension already
+   counts as a trusted answer surface and already gets own-tool approvals and
+   elicitation. The in-page demo wallet is in the same row, and allowing it
+   costs nothing — a page holding the user key can already mint any authority
+   it likes, so refusing to ask it protects nothing (invariant 8's
+   self-referential argument). Extension packaging is what turns that row from
+   *vacuously* safe into *genuinely* safe, and needs no policy change when it
+   lands.
 4. ~~WebMCP interop.~~ **Done.** Both connect.js and the extension harvest
    `document.modelContext` registrations (with the deprecated
    `navigator.modelContext` fallback) into `SiteTool`s at attachment time.
