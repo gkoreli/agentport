@@ -257,8 +257,19 @@ window.addEventListener('message', (event: MessageEvent) => {
       if (webmcpTools.length > 0 && !overlaySuppressed) overlay().show();
       return;
     }
-    default:
+    default: {
+      // EXHAUSTIVE, not a catch-all. bridge.ts already fails the build for a
+      // PageOutbound member nothing VALIDATES; nothing proved a validated
+      // member is HANDLED, so adding one and forgetting a case here was the
+      // identical silent drop, one hop further out — the same bug that guard
+      // was written to fix, at the next boundary.
+      //
+      // Unreachable at runtime: readPageOutbound refused anything outside the
+      // union before this. The return is belt; the annotation is the property.
+      const unhandled: never = body;
+      void unhandled;
       return;
+    }
   }
 });
 

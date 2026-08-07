@@ -1120,8 +1120,15 @@ async function onContentMessage(port: chrome.runtime.Port, message: ContentReque
       if (entry) dropSession(entry, message.reason ?? 'closed');
       return;
     }
-    default:
+    default: {
+      // Exhaustive for the same reason content.ts's is: bridge.ts proves every
+      // ContentToWorker member is VALIDATED and nothing proved one is HANDLED,
+      // so a new member forgotten here is dropped silently at the worker hop
+      // instead of the page hop. Same bug, next boundary out.
+      const unhandled: never = message;
+      void unhandled;
       return;
+    }
   }
 }
 
