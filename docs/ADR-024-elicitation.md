@@ -296,6 +296,55 @@ person finds it stated rather than rediscovers it — and so that nobody reads
 ADR-024 as implying that page-answered approvals are fine in general. They are
 fine in exactly one case, for a reason that does not extend.
 
+### R11. R10's redirect does not exist — the answer is refusal, symmetrically
+
+R10 said a page-answered `runtime_own_tool` approval is wrong and left where
+it should go open. The obvious repair — answer it on the hosted wallet's own
+origin, which already authorised the delegation — **does not work**, and the
+reason is in our own code rather than in principle.
+
+Opening a wallet-origin popup requires **user activation**. An approval
+arrives mid-turn from the agent, with no gesture behind it. `connect.ts`
+proves the constraint rather than asserting it: it pre-opens `about:blank`
+*synchronously* "while this call still has user activation", precisely because
+a popup cannot be summoned later. The surface cannot be opened at the moment
+it is needed.
+
+The fallback of a persistent cross-origin iframe is worse, not better. A page
+cannot **read** it — and can cover, resize and position it deceptively.
+Clickjacking is exactly the attack a real browser window exists to defeat.
+Answering for the user's capability inside a surface the page can cover is not
+meaningfully better than answering in the page.
+
+So the delegated tier has **no** surface that can answer for the user's
+capability at approval time, and the answer is the one this ADR already
+reached for elicitation: **refuse, do not reroute.** The three rows become one
+rule with no special cases:
+
+| | | |
+|---|---|---|
+| `site_tool`, page-answered | the page's own capability | allowed, every tier |
+| `runtime_own_tool`, delegated | the **user's** capability, no trusted surface | refused |
+| elicitation, delegated | answering **as** the user, no trusted surface | refused |
+
+That makes R10 a smaller change than it first looked — a policy-driven refusal
+where approvals fork, not a new answer path — and it removes the wallet and
+client work entirely.
+
+**And it inherits R4.** A refused own-tool must not become an agent that
+silently cannot use its own tools; that is the invisible diminishment again,
+one row down. The user is told "on this site your agent works with the site's
+tools only", in the session surface, for the same reason and by the same
+argument.
+
+**One predicate, not two booleans.** `mayAsk` and any `mayUseOwnTools` turn on
+the *same* question — does a surface exist that the requesting origin cannot
+draw. They are derived from one named predicate
+(`#hasTrustedAnswerSurface`), because two booleans that agree today drift the
+first time somebody changes one, and they drift silently: agreeing is not
+something a compiler can check. When the extension becomes the wallet, one
+predicate flips and everything derived from it flips together.
+
 ## The cost, stated rather than discovered
 
 **A hosted-wallet session gets no elicitation, therefore no
