@@ -224,6 +224,12 @@ nothing. They are cheap to apply and each one has caught a real instance.
 5. **A failure is evidence about the check as often as about the code.** The
    reflex to fix the code first is how a correct implementation gets bent to
    match a wrong expectation.
+5b. **When a new invariant appears, ask whether the existing suite is still
+   shaped like the problem** — not whether you added a check. A suite whose
+   scope was drawn before the constraint existed keeps passing forever and
+   never mentions it. The wire harness had 500 fixture cases, a coverage gate
+   and two exhaustiveness guards, and had never heard of `PROTOCOL_VERSION`,
+   which is the field the wire's compatibility actually depends on.
 6. **When the only available check would lie, do not write it — record the
    gap and its cost.** A gap in the record looks like incompleteness; a
    passing check that proves nothing looks like rigour. Prefer the first.
