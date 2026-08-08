@@ -2449,6 +2449,40 @@ console.log("\n20. the drop-in tier's refusals");
     codes.filter((code) => code === 'connect_unknown').length,
   );
 
+  // The ladder's last rung against a relay that is up and answers nothing.
+  // This is the state a visitor with no extension and no wallet falls to, so
+  // a hang here is a modal that never shows a code and never says why.
+  {
+    const { WebSocketServer: MuteServer } = await import('ws');
+    const mute = new MuteServer({ port: 0, host: '127.0.0.1' });
+    await new Promise<void>((resolve) => mute.once('listening', () => resolve()));
+    const mutePort = (mute.address() as { port: number }).port;
+    const stranded = new AgentWallet({
+      relayUrl: `ws://127.0.0.1:${mutePort}`,
+      userSecretKey: generateKeyPair().secretKey,
+      socketFactory,
+      handshakeTimeoutMs: 400,
+    });
+    // The socket opens; nothing ever replies to hello, so connect() itself is
+    // what hangs — which is the honest shape of "reachable but broken".
+    let stalled = 'hung';
+    await Promise.race([
+      stranded
+        .connect()
+        .then(async () => {
+          await stranded.beginConnect({ surface: { name: 'Stranded' }, tools: [] });
+          stalled = 'opened';
+        })
+        .catch(() => {
+          stalled = 'refused';
+        }),
+      new Promise<void>((resolve) => setTimeout(resolve, 3_000)),
+    ]);
+    check('a relay that answers nothing gives up rather than hanging', stalled !== 'hung', stalled);
+    stranded.close();
+    await new Promise<void>((resolve) => mute.close(() => resolve()));
+  }
+
   refusedPage.close();
   await guesser.stop();
   await daemon20.stop();

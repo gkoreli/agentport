@@ -241,7 +241,28 @@ export class AgentWallet extends Emitter<WalletEvents> {
   async connect(): Promise<void> {
     this.#shutdown = false;
     this.#dial();
-    return this.#ready.promise;
+    // A socket that OPENS and then says nothing is the shape a stranger meets
+    // when a relay is reachable but broken — wrong build, wedged worker, a
+    // proxy that accepts and forwards nowhere. Without a deadline the caller
+    // waits forever on a handshake that already failed, and on the drop-in
+    // tier that is a modal which never shows a code and never says why.
+    //
+    // A refusal the caller never hears is indistinguishable from a hang; this
+    // is the same rule as every other machine-speed round trip here, applied
+    // to the first one of all.
+    const ms = this.#options.handshakeTimeoutMs ?? DEFAULT_HANDSHAKE_TIMEOUT_MS;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error(`the relay accepted the connection but did not answer within ${ms}ms`)),
+        ms,
+      );
+    });
+    try {
+      return await Promise.race([this.#ready.promise, deadline]);
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   #dial(): void {
@@ -493,7 +514,16 @@ export class AgentWallet extends Emitter<WalletEvents> {
         openProofBinding('connect', surface, grant),
       ),
     });
-    const pending = await this.#await('connect.pending');
+    // Deadlined: minting a code is machine-speed — the relay answers
+    // immediately or something is wrong — and this is the LAST RUNG of the
+    // ladder, the one a visitor with no extension and no wallet falls to. A
+    // relay that is reachable but never answers left them looking at a modal
+    // that would never show a code and never say why.
+    //
+    // The `accepted` wait below is deliberately NOT deadlined: that one waits
+    // on a human reading a code aloud, and a deadline there would be a
+    // guess about how long a person takes.
+    const pending = await this.#awaitTimed('connect', 'connect.pending');
 
     const accepted = (async () => {
       // Three ways this ends, and every one of them must settle the promise.
