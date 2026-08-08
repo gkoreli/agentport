@@ -224,6 +224,66 @@ function listElements(): { elements: ElementRow[]; truncated: boolean } {
   return { elements: rows, truncated };
 }
 
+/** Longest we wait for the DOM to stop moving after an action. */
+const SETTLE_CAP_MS = 3_000;
+/** How long nothing may change before we call the page settled. */
+const SETTLE_QUIET_MS = 100;
+
+/**
+ * Wait for the page to stop changing after an action, and SAY whether it did.
+ *
+ * chrome-devtools-mcp's WaitForHelper shape, with the one fix its own
+ * behaviour needs: when the settle times out, report it. Swallowing it and
+ * returning success is how "clicked" comes to mean "we called .click() and
+ * asked no further questions" — the truthful-failure gap ADR-021 names.
+ *
+ * `mutations` is what lets a caller say the page changed WITHOUT guessing.
+ * browser-use's "most likely the page changed" is a guess in an error string;
+ * this is an observation, and the difference is whether the agent can trust it.
+ */
+async function settle(): Promise<{ stable: boolean; mutations: number }> {
+  if (typeof MutationObserver !== 'function') return { stable: true, mutations: 0 };
+  return new Promise((resolve) => {
+    let mutations = 0;
+    let quiet: ReturnType<typeof setTimeout> | undefined;
+    const observer = new MutationObserver((records) => {
+      mutations += records.length;
+      clearTimeout(quiet);
+      quiet = setTimeout(finish, SETTLE_QUIET_MS);
+    });
+    const finish = (stable = true) => {
+      clearTimeout(quiet);
+      clearTimeout(cap);
+      observer.disconnect();
+      resolve({ stable, mutations });
+    };
+    // The cap fires when the page never goes quiet — an animation, a poller, a
+    // spinner that never resolves. That is a real answer, not a failure to
+    // wait: the agent is told the DOM did not settle and can decide.
+    const cap = setTimeout(() => finish(false), SETTLE_CAP_MS);
+    observer.observe(document, { subtree: true, childList: true, characterData: true, attributes: true });
+    quiet = setTimeout(finish, SETTLE_QUIET_MS);
+  });
+}
+
+/**
+ * Why an element cannot be acted on, in the page's own terms — or undefined.
+ *
+ * "covered by <div id=consent-banner>" is a fact the agent can act on;
+ * "not clickable" is not. The check is only made where the browser can answer
+ * it, and says nothing rather than guessing where it cannot.
+ */
+function obstruction(el: Element): string | undefined {
+  if (el instanceof HTMLElement && el.hasAttribute('disabled')) return 'it is disabled';
+  if (typeof document.elementFromPoint !== 'function') return undefined;
+  const rect = el.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) return undefined;
+  const top = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+  if (!top || top === el || el.contains(top) || top.contains(el)) return undefined;
+  const name = top.id ? `#${top.id}` : top.tagName.toLowerCase();
+  return `it is covered by <${top.tagName.toLowerCase()} ${name}>`;
+}
+
 /** Resolve a handle, or explain why it is gone. Never falls back to a guess. */
 export function resolveHandle(value: unknown): Element {
   if (typeof value !== 'string') throw new Error('that is not an element handle');
@@ -349,7 +409,7 @@ export function genericPageTools(): SiteTool[] {
         'they are more precise than filling a rich editor wholesale.',
       requiresApproval: true,
       inputSchema: objectSchema({ element: { type: 'string' }, value: { type: 'string' } }, ['element', 'value']),
-      handler: (args) => {
+      handler: async (args) => {
         const el = resolveHandle(args['element']);
         const value = String(args['value'] ?? '');
         if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
@@ -384,7 +444,19 @@ export function genericPageTools(): SiteTool[] {
         } else {
           throw new Error('that element is not a text field');
         }
-        return { ok: true };
+
+        const settled = await settle();
+        // VERIFIED, not assumed. The contenteditable path goes through
+        // execCommand and a synthetic paste fallback, and a rich editor is
+        // entitled to reject or reformat both — so this reads the field back
+        // and says whether the value is actually there. An editor that
+        // normalises whitespace or masks input will say `false` while having
+        // worked, which is why this is `applied` rather than `ok: false`: a
+        // fact the agent can check against, not a verdict.
+        const now = el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement
+          ? el.value
+          : (el.textContent ?? '');
+        return { ok: true, applied: now === value, stable: settled.stable };
       },
     },
     {
@@ -392,11 +464,18 @@ export function genericPageTools(): SiteTool[] {
       description: 'Click an element identified by a handle from page.listElements.',
       requiresApproval: true,
       inputSchema: objectSchema({ element: { type: 'string' } }, ['element']),
-      handler: (args) => {
+      handler: async (args) => {
         const el = resolveHandle(args['element']);
         if (!(el instanceof HTMLElement)) throw new Error('that element cannot be clicked');
+        // Refused BEFORE acting, and named. A click on a covered element is
+        // one a person could not have made, and `{ok:true}` for it is the
+        // harness lying about having done something.
+        const blocked = obstruction(el);
+        if (blocked) throw new Error(`that element cannot be clicked: ${blocked}`);
         el.click();
-        return { ok: true };
+        // "Clicked" now means something happened, or says that nothing did.
+        const settled = await settle();
+        return { ok: true, changed: settled.mutations > 0, stable: settled.stable };
       },
     },
   ];

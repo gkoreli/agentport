@@ -665,6 +665,34 @@ console.log('extension elicitation round-trip check passed');
   const beforeRelist = listed.elements[0]!.handle;
   await tools.get('page.listElements')!.handler({});
   assert.throws(() => resolveHandle(beforeRelist), /from an earlier listing/);
+
+  // Truthful results. "Clicked" used to mean "we called .click() and asked no
+  // further questions" — {ok:true} was unconditional for click, fill and
+  // scroll, including on a disabled control that does nothing at all.
+  globals['MutationObserver'] = (pageWin as unknown as Record<string, unknown>)['MutationObserver'];
+  const fresh = (await tools.get('page.listElements')!.handler({})) as {
+    elements: { handle: string; kind: string; label: string }[];
+  };
+  const emailHandle = fresh.elements.find((row) => row.kind === 'input:email')!.handle;
+  const filled = (await tools.get('page.fill')!.handler({ element: emailHandle, value: 'a@b.test' })) as {
+    ok: boolean;
+    applied: boolean;
+  };
+  assert.equal(filled.applied, true, 'fill did not verify that the value actually landed');
+
+  const disabled = pageWin.document.createElement('button');
+  disabled.textContent = 'Locked';
+  disabled.setAttribute('disabled', '');
+  pageWin.document.body.appendChild(disabled);
+  const withDisabled = (await tools.get('page.listElements')!.handler({})) as {
+    elements: { handle: string; label: string }[];
+  };
+  const lockedHandle = withDisabled.elements.find((row) => row.label === 'Locked')!.handle;
+  await assert.rejects(
+    async () => tools.get('page.click')!.handler({ element: lockedHandle }),
+    /disabled/,
+    'a click on a disabled control reported success',
+  );
 }
 
 console.log('page harness check passed');
