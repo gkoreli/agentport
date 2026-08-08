@@ -24,8 +24,9 @@ Tailscale has DERP servers and a coordination server; WebRTC has signaling
 servers; WalletConnect has its relay. The achievable property is not *no relay*
 but *no trusted relay* (ADR-003) plus *direct when possible* (ADR-011).
 
-**Consequences.** The relay is ~200 lines of "match two websockets, check
-signatures" (`RelayCore`), portable across Node and Cloudflare. Anyone can
+**Consequences.** The relay is one file of "match two websockets, check
+signatures" (`RelayCore`, ~740 lines and growing mostly in bounds and rate
+limits, not in state), portable across Node and Cloudflare. Anyone can
 self-host it; the daemon's `AGENTPORT_RELAY` env var is the only coupling.
 
 ---
@@ -87,9 +88,14 @@ prologue, and failure rules are the normative design reference; libsodium's
 - **Drop-in first contact is TOFU**, honestly labeled: the page key is
   ephemeral and first seen through the relay, so a malicious relay could MITM
   first contact. A six-word, 48-bit short authentication string derived from
-  both epks is shown in the browser modal *and* the daemon consent screen for
-  deliberate out-of-band comparison. Paired wallets know the agent key and
-  authenticate the exchange without relying on that comparison.
+  both epks is shown on the daemon consent screen *before* the owner approves,
+  and in the page's own session panel (`session.info.verify`) *after* the
+  attachment opens. **The connect modal does not show it**, so the two
+  surfaces are never on screen together and the comparison is a
+  detect-and-detach check rather than a pre-approval one — a real weakness in
+  the tier that relies on it most, recorded here rather than implied away.
+  Paired wallets know the agent key and authenticate the exchange without
+  relying on that comparison.
 
 **Consequences.** Relay-side `mayOriginate()` per-frame-type enforcement cannot
 see inside ciphertext; type-level policy moves to the endpoints, which already
@@ -118,7 +124,9 @@ whole design:
   is a *native ACP concept*, not a hack.
 - `loadSession: true` — the agent persists conversations on the user's disk.
   History restoration replays from there. We wrote zero agent code and zero
-  transcript store.
+  *durable* transcript store — the daemon keeps a bounded in-memory transcript
+  per session as a fallback for runtimes that persist nothing, and the
+  runtime's own `replayHistory()` wins whenever it returns non-null.
 
 **Consequences.** Any ACP-speaking agent is a supported runtime. The daemon
 stays an orchestrator. Known gap: the daemon's session-id ↔ ACP-session-id
@@ -135,10 +143,11 @@ frames in the relay. Both were rejected as provenance violations.
 
 **Decision.** Exactly one durable copy of the conversation exists: the agent's
 own ACP session store on the user's disk. The site keeps only a resume record
-`{sessionId, token, relay, surface}` — no content. The relay, when a client
-drops, holds the session open (5-minute orphan grace) but **counts and drops**
-agent frames rather than buffering them: a count is routing metadata; the
-frames are the user's data. On refresh, the page re-attaches with the token and
+`{id, agent, token, relay, surface}` — no content. The DAEMON, when a client
+drops, holds the session open (`DETACH_GRACE_MS`, 30 minutes) but **counts and
+drops** agent frames rather than buffering them: a count is routing metadata;
+the frames are the user's data. The relay only clears its routing entry and
+sends `session.detach`, which is why the count has to be the daemon's. On refresh, the page re-attaches with the token and
 hydrates history *from the agent side* (`history.request` → ACP `loadSession`
 replay).
 
@@ -289,8 +298,9 @@ and session-opening to live in the browser. The per-site terminal command
    once, then connect.js detects it and routes `session.open` + approvals
    through it. Picker → tap → session. No terminal, no codes.
 3. **Hosted wallet popup** (Shop Pay tier) — browser-side memory with no
-   install. **Deferred** until tiers 1–2 are complete; only needed for
-   remembered-agents on machines with neither extension nor phone.
+   install. **Shipped** (`wallet/`, `npm run wallet:build`) and now tried
+   FIRST in `connect.ts`'s ladder when no extension is present — the
+   deferral below was written before it existed.
 
 **Consequences.** The Chrome Web Store is never a gate: tier 1 needs no
 install, and tier 2 develops and daily-drives as an unpacked extension.
@@ -402,7 +412,9 @@ Recorded so nobody mistakes silence for safety:
    and self-reported origin in connect mode means a malicious site can lie
    about its name on the consent screen; only the extension gets attested
    `port.sender.origin`.
-3. **No revocation UI** — `CertStore.remove` exists; nothing calls it.
+3. **Revocation is CLI-only** — `agentport status | revoke <origin> |
+   unpair` (ADR-022); no wallet or extension surface lists what holds your
+   agent. (`CertStore` itself is gone: ADR-016 made the relay stateless.)
 4. **Daemon restart loses the ACP session-id mapping** (ADR-004).
 
 ---
@@ -548,8 +560,9 @@ format:
   is how you drift silently. This repo has now been bitten twice — the
   hand-rolled AG-UI types above, and the WebMCP harvester, which by its own
   report "follows the repository's existing extension integration, not an
-  independently fetched specification"
-  (`docs/webmcp-harvest-report.md`). Take the dependency; pin it; let the
+  independently fetched specification" — a quotation whose source is no
+  longer in the tree, so read it as recorded history rather than a citation;
+  `npm run webmcp:harvest` is the live check and writes no report. Take the dependency; pin it; let the
   package's own schemas fail the check when we drift (`npm run agui:check`
   parses every emitted event with `EventSchemas`).
 
@@ -815,10 +828,11 @@ assertion cannot fail for the claimed property does not count as evidence.
 
 ### Known blocking gaps
 
-- `decodeFrame()` currently validates only JSON, an object envelope, and a
-  string `t`; TypeScript wire types do not validate hostile runtime input.
-  Exhaustive, size-bounded schemas for every frame must replace that shallow
-  boundary before the protocol is called production-hardened.
+- ~~`decodeFrame()` validates only JSON, an object envelope, and a string
+  `t`.~~ **Closed by ADR-019 §1.** It is now a six-stage pipeline — byte cap,
+  raw depth scan, parse, canonical-form check, exact-`t` registry, strict
+  schema — with the frame schemas as the single source of truth and the
+  TypeScript types inferred from them.
 - The E2E suite covers ownership denial, grant restriction, approval refusal,
   on-path observation, tampering, replay, proof stripping, grant rewriting,
   resume-token theft, and edge-owned history. It does not yet directly attack
@@ -1065,7 +1079,9 @@ thing every consent surface must *say*, before anything the agent wrote. The
 daemon stamps it and the runtime gets no parameter: `TurnContext`'s
 `requestApproval` is the only path a runtime can reach, so everything arriving
 there is its own capability by construction, and a parameter would have made
-it a self-declared field. The set is closed at two, and the sizing rule is the
+it a self-declared field. The set is closed at three (`generic_page_tool`
+joined in wire v4, for tools the EXTENSION synthesised over a page that
+declared none), and the sizing rule is the
 rendering rule — a member that cannot be explained to a user in one clause is
 probably two domains.
 
