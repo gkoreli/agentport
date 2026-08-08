@@ -13,6 +13,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { Relay } from '../packages/relay/src/relay.js';
 import { AgentDaemon } from '../packages/daemon/src/daemon.js';
 import { memoryRevocations } from '../packages/daemon/src/revocations.js';
+import { createTerminalAsk } from '../packages/daemon/src/terminal-ask.js';
 import { McpBridge } from '../packages/daemon/src/mcp-bridge.js';
 import { AcpRuntime } from '../packages/daemon/src/runtimes/acp.js';
 import {
@@ -2033,6 +2034,86 @@ console.log('\n17. the agent asks its own user (ADR-024)');
   dropInB.close();
   page17b.close();
   await daemon17b.stop();
+
+  // --- the terminal form itself --------------------------------------------
+  // `daemon17b` proved the ROUTING with a stub. This proves the thing the two
+  // CLIs actually install, because a stub cannot be wrong about what a blank
+  // line means and the real one can. The distinction that matters: "nobody was
+  // there" must not become "the user chose nothing" — the agent is told those
+  // apart, and only one of them is an answer.
+  const fakeRl = (replies: (string | 'EOF')[]) => {
+    let i = 0;
+    const closeHandlers: (() => void)[] = [];
+    return {
+      question: (_prompt: string, cb: (answer: string) => void) => {
+        const next = replies[i++];
+        if (next === undefined || next === 'EOF') {
+          for (const h of closeHandlers.splice(0)) h();
+          return;
+        }
+        cb(next);
+      },
+      once: (_event: string, handler: () => void) => closeHandlers.push(handler),
+      removeListener: (_event: string, handler: () => void) => {
+        const at = closeHandlers.indexOf(handler);
+        if (at >= 0) closeHandlers.splice(at, 1);
+      },
+    };
+  };
+  const askAt = async (replies: (string | 'EOF')[], question: AskQuestion, closed = false) => {
+    const quiet = console.log;
+    console.log = () => {};
+    try {
+      return await createTerminalAsk(fakeRl(replies) as never, () => closed)(question);
+    } finally {
+      console.log = quiet;
+    }
+  };
+  const choice: AskQuestion = {
+    message: 'Which draft?',
+    fields: [{ key: 'draft', label: 'Draft', options: ['The first', 'The second'] }],
+  };
+
+  check(
+    'the terminal maps a chosen number to the option label, not the number',
+    (await askAt(['2'], choice))?.['draft'] === 'The second',
+    await askAt(['2'], choice),
+  );
+  check(
+    'a multi-select joins the labels it was given',
+    (await askAt(['1,2'], { message: 'Which?', fields: [{ ...choice.fields[0]!, multi: true }] }))?.['draft'] ===
+      'The first, The second',
+  );
+  check(
+    'a mistyped choice is re-offered rather than silently dropped',
+    (await askAt(['9', '1'], choice))?.['draft'] === 'The first',
+  );
+  check(
+    'a blank answer omits the field instead of answering empty',
+    Object.keys((await askAt([''], choice)) ?? { notrun: 1 }).length === 0,
+  );
+  // The two ways to say nothing, which must NOT look alike.
+  check(
+    'a closed stdin is a skip, not an empty answer',
+    (await askAt([], choice, true)) === undefined,
+  );
+  check(
+    'stdin closing mid-form is also a skip, not a partial answer',
+    (await askAt(['EOF'], choice)) === undefined,
+  );
+  // `fields: arr(...)` has no minimum, so a runtime can legally ask with none.
+  // Returning `{}` there would tell the agent the user answered and chose
+  // nothing; nobody was asked anything at all.
+  check(
+    'a question with no fields is a skip, not an empty answer',
+    (await askAt([], { message: 'Anything?', fields: [] })) === undefined,
+  );
+  check(
+    'a free-text field returns what was typed',
+    (await askAt(['  Call it Tide  '], { message: 'Name?', fields: [{ key: 'title', label: 'Title' }] }))?.[
+      'title'
+    ] === 'Call it Tide',
+  );
   directAsker.close();
   delegatedSession.close();
   dropIn.close();

@@ -2,6 +2,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { AgentDaemon } from './daemon.js';
+import { createTerminalAsk } from './terminal-ask.js';
 import { loadIdentity, saveIdentity } from './identity.js';
 import { pairingControlPath, readPairingControl, writePairingControl } from './pairing-control.js';
 import { fileRevocations, revocationsPath } from './revocations.js';
@@ -114,6 +115,11 @@ const daemon = new AgentDaemon({
     console.log('');
     return ask('  Allow?');
   },
+
+  // Supplying this is what grants the connect tier elicitation at all
+  // (ADR-024 R12) — without it the daemon refuses rather than routing the
+  // question to the requesting page.
+  onLocalAsk: createTerminalAsk(rl, () => stdinClosed),
 
   onLocalApproval: async (domain, summary, call) => {
     console.log('');

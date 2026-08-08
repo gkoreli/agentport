@@ -11,6 +11,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { AgentDaemon } from './daemon.js';
+import { createTerminalAsk } from './terminal-ask.js';
 import { loadIdentity, saveIdentity } from './identity.js';
 import { RUNTIMES, registerRuntime } from './runtime.js';
 import { McpBridge } from './mcp-bridge.js';
@@ -127,6 +128,11 @@ const daemon = new AgentDaemon({
     if (!allowed) setTimeout(() => process.exit(0), 100);
     return allowed;
   },
+
+  // Supplying this is what grants the connect tier elicitation at all
+  // (ADR-024 R12) — without it the daemon refuses rather than routing the
+  // question to the requesting page.
+  onLocalAsk: createTerminalAsk(rl, () => stdinClosed, { bold, dim }),
 
   onLocalApproval: async (domain, summary, call) => {
     console.log('');
