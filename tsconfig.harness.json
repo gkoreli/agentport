@@ -1,0 +1,35 @@
+// Everything that CHECKS this repo but is not shipped by it.
+//
+// `scripts/` was in no project at all: a deliberate `const x: number = "s"`
+// appended to `scripts/e2e.ts` passed `npm run typecheck`, and `tsx` strips
+// types without checking them, so the 170-check suite AGENTS.md calls "the
+// real test" had never been typechecked. It was hiding six defects.
+// `packages/agui/check.ts` was the same, found the next hour: its package
+// tsconfig includes only `src/**`, so the AG-UI adapter's approval path was
+// exercised with an `approval.request` carrying no `domain` — a frame the
+// wire rejects and no real peer can send.
+//
+// This is wired into `npm run typecheck` rather than being a command someone
+// remembers, because AGENTS.md's list of separately-checked projects exists
+// precisely because separate commands get forgotten.
+//
+// The one exclusion is not an exemption: `packages/extension/check.ts` is
+// already in its own package project, which gives it the `chrome` types this
+// one deliberately does not have.
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "verbatimModuleSyntax": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "types": ["node"],
+    "lib": ["ES2024", "DOM", "DOM.Iterable"]
+  },
+  "include": ["scripts/**/*.ts", "packages/*/check.ts"],
+  "exclude": ["packages/extension/check.ts"]
+}

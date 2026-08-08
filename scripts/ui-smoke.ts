@@ -476,5 +476,38 @@ check(
   rendered().slice(0, 260),
 );
 
+// And the OTHER domain, because a check that only ever feeds one value cannot
+// see the property it names. The renderer was a two-branch ternary whose else
+// was the string asserted above, so returning it unconditionally — or dropping
+// `domain` on the way through the client — passed this section while every
+// site-tool approval claimed to be the user's own machine. The claim is
+// distinguishability; feeding one domain cannot test it.
+{
+  const before = rendered();
+  FakeRelay.latest?.sealedReply({
+    t: 'approval.request',
+    s: 'sess_test',
+    id: 'approval_site',
+    domain: 'site_tool',
+    summary: 'Write the document',
+    call: { name: 'inkwell.document.write', arguments: { text: 'changed' } },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  flush();
+  check(
+    'a site tool is named as the SITE lending it, not as the user machine',
+    rendered().includes('A tool this site lent your agent') &&
+      !rendered().includes("Your agent's own tool, on your machine"),
+    { before: before.slice(0, 120), after: rendered().slice(0, 400) },
+  );
+  const decline = (clickMount as unknown as { querySelector(s: string): { click(): void } | null }).querySelector(
+    '.ap-approval-actions button:first-child',
+  );
+  decline?.click();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  flush();
+}
+
+
 console.log(failures === 0 ? '\nUI smoke passed' : `\n${failures} failed`);
 process.exit(failures === 0 ? 0 : 1);

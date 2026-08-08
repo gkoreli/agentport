@@ -541,11 +541,29 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
           // it has been reading, so it can be made to read like one of this
           // site's own tools; this line is the only part of the card the
           // agent does not write.
-          const authority = computed(() =>
-            approval.value.prompt.domain === 'site_tool'
-              ? 'A tool this site lent your agent'
-              : "Your agent's own tool, on your machine",
-          );
+          //
+          // Exhaustive, and matching the extension's consent window rather
+          // than diverging from it. As a two-branch ternary the ELSE was
+          // "your agent's own tool", so `generic_page_tool` — a tool the
+          // extension synthesised over a page that declared nothing — would
+          // have been described here as the user's own machine. That domain
+          // cannot reach this panel today, since only the extension stamps
+          // it, but "cannot reach it today" is how the other five of these
+          // were introduced.
+          const authority = computed(() => {
+            switch (approval.value.prompt.domain) {
+              case 'site_tool':
+                return 'A tool this site lent your agent';
+              case 'generic_page_tool':
+                return 'A tool your extension built for this page';
+              case 'runtime_own_tool':
+                return "Your agent's own tool, on your machine";
+              default: {
+                const unhandled: never = approval.value.prompt.domain;
+                return 'An authority this panel cannot name — decline unless you know why it is here';
+              }
+            }
+          });
           return html`<section class="ap-approval" aria-live="polite">
             <div class="ap-approval-label">${authority}</div>
             <strong>${summary}</strong>

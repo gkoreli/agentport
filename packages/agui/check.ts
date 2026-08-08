@@ -44,7 +44,7 @@ function lastPromptId(): string {
     const frame = sent[index];
     if (typeof frame === 'object' && frame !== null && 't' in frame && frame.t === 'prompt' && 'id' in frame) {
       assert.equal(typeof frame.id, 'string');
-      return frame.id;
+      return frame.id as string;
     }
   }
   throw new Error('prompt frame was not sent');
@@ -119,6 +119,12 @@ await session.handle({
   t: 'approval.request',
   s: session.id,
   id: 'approval-1',
+  // `domain` is REQUIRED on the wire, and this check omitted it — so the
+  // adapter's approval path was exercised on a frame `decodeFrame` rejects
+  // and no real peer can send. `site_tool` deliberately: it is the domain the
+  // whole repo renders least, and until this line it was rendered by no check
+  // on any surface.
+  domain: 'site_tool',
   summary: 'Continue?',
 });
 await session.handle({ t: 'done', s: session.id, promptId: firstPrompt, stopReason: 'end_turn' });
@@ -136,7 +142,7 @@ await session.handle({
 await assert.rejects(errorRun, /fake failure/);
 
 // A reconnect is a visible event, not a silent rekey: the words change.
-session.reattached({ agentName: 'Fake agent', runtime: 'fake', verify: 'ember-slate-quill-tide-fern-owl' });
+session.reattached({ agentName: 'Fake agent', runtime: 'fake', ownTools: false, verify: 'ember-slate-quill-tide-fern-owl' });
 
 session.close('check_complete');
 await collecting;

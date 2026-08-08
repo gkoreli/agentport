@@ -202,10 +202,20 @@ option that does not exist, quietly logging when the check meant to silence
 them; `AskQuestion` used as a type and never imported; a `socketFactory` a
 daemon never reads. All green, all invisible.
 
-So it is NOT a seventh line on that list. `npm run typecheck` now runs
-`tsconfig.scripts.json` too, because the lesson of the list is that a separate
-command is what gets forgotten — the extension's four errors survived a year
-of people running the commands they remembered.
+`packages/agui/check.ts` was the SEVENTH, found within the hour: that
+package's tsconfig includes only `src/**`, so its check drove an
+`approval.request` carrying no `domain` — a frame `decodeFrame` rejects and no
+real peer can send. The AG-UI adapter's approval path was therefore exercised
+only on a shape that does not occur, which is the same defect as testing the
+ACP short-circuit with a field the agent never populates.
+
+So neither is a new line on that list. `npm run typecheck` runs
+`tsconfig.harness.json` — everything that CHECKS this repo but is not shipped
+by it — because the lesson of the list is that a separate command is what gets
+forgotten: the extension's four errors survived a year of people running the
+commands they remembered. When you add a check harness, it belongs to that
+config, and the one exclusion in it is a file that already has its own
+project, not an exemption.
 
 Env: `AGENTPORT_RELAY`, `AGENTPORT_IDENTITY`, `AGENTPORT_RUNTIME`,
 `AGENTPORT_NAME`, `AGENTPORT_LOCATION`.
