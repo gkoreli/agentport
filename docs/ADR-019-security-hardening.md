@@ -1,6 +1,8 @@
 # ADR-019: Security hardening gates customer adoption
 
-- **Status:** accepted; implementation pending
+- **Status:** accepted; Gate B §1 shipped (see the delivery log), §5
+  shipped as ADR-022, §2 largely shipped; §3 and §4 partial; Gate C not
+  started. "Implementation pending" was written before any of it landed.
 - **Date:** 2026-08-02
 - **Owners:** AgentPort maintainers
 - **Depends on:** ADR-003, ADR-005, ADR-009, ADR-014, ADR-016, ADR-018

@@ -1,6 +1,9 @@
 # ADR-021: The web harness — your own agent drives any website
 
-- **Status:** proposed
+- **Status:** accepted; ship-order 1, 2 and 4 delivered (navigation
+  survival and truthful page tools, separated authority domains, the read
+  boundary). 3 is ADR-019 Gate C and is blocked; 5-7 outstanding, and
+  `page.navigate` is still proposed rather than built.
 - **Date:** 2026-08-06
 - **Depends on:** ADR-006 (WebMCP harvest), ADR-008/009 (extension tiers and
   custody), ADR-018 (security architecture), ADR-019 (hardening gates)

@@ -1,6 +1,8 @@
 # ADR-023: An approval says what it is for
 
-- **Status:** proposed
+- **Status:** accepted; implemented — the domain is on the wire, stamped by
+  the daemon, and rendered above the agent-authored summary. R9 remains a
+  deliberately recorded gap rather than a delivered check.
 - **Date:** 2026-08-06
 - **Depends on:** ADR-003 (approval frames are sealed content), ADR-019 Gate B
   (wire schemas) and Gate C (runtime containment), ADR-022 (the same theme:
