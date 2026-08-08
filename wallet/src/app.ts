@@ -252,6 +252,15 @@ const WalletApp = component('agentport-wallet-app', () => {
         </section>`;
       case 'done':
         return html`<section class="center"><div class="check">✓</div><h1>Connected</h1><p>${status}</p></section>`;
+      default: {
+        // `noImplicitReturns` is off here, so a sixth `View` member would have
+        // fallen out of this switch returning undefined — a wallet window that
+        // renders NOTHING while a site waits on it. The `never` makes that a
+        // build error, and the branch renders a legible dead end rather than a
+        // blank pane if one ever slips through.
+        const unhandled: never = view.value;
+        return html`<section class="center"><h1>AgentPort Wallet</h1><p>This wallet cannot show this step. Close the window and try again.</p></section>`;
+      }
     }
   });
 

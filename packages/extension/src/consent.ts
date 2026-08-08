@@ -127,12 +127,28 @@ const Approve = component('ap-consent-approve', () => {
   // synthesised over a page that declared nothing used to be described as
   // something the site lent, which is false whatever the site could have done
   // itself.
-  const authority =
-    state.domain === 'runtime_own_tool'
-      ? "Your agent's own tool, on your machine"
-      : state.domain === 'generic_page_tool'
-        ? `A tool your extension built for this page — ${state.origin} did not provide it`
-        : `A tool ${state.origin} lent your agent`;
+  //
+  // A switch with a `never`, not a ternary chain, and the direction matters:
+  // a chain's fallthrough was `site_tool`, the LEAST alarming of the three. So
+  // a fourth domain would have been described to the user as something the
+  // site lent — on the one line of this card that exists to be trusted, and
+  // failing toward "harmless". An authority this window cannot name is the one
+  // a user most needs telling about, so the default says exactly that, and the
+  // `never` makes adding a domain without a sentence a build error.
+  const authority = ((): string => {
+    switch (state.domain) {
+      case 'runtime_own_tool':
+        return "Your agent's own tool, on your machine";
+      case 'generic_page_tool':
+        return `A tool your extension built for this page — ${state.origin} did not provide it`;
+      case 'site_tool':
+        return `A tool ${state.origin} lent your agent`;
+      default: {
+        const unhandled: never = state.domain;
+        return 'An authority this window cannot name — decline unless you know why it is here';
+      }
+    }
+  })();
 
   return html`
     <main>
