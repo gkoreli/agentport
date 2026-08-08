@@ -301,8 +301,9 @@ fine in general. They are fine in exactly one case, for a reason that does not
 extend.
 
 **Shipped, as R11 rather than as a redirect.** `AttachmentPolicy` gained
-`mayUseOwnTools`, derived from the same `#hasTrustedAnswerSurface` call that
-produces `mayAsk` — one input, so the two cannot disagree — and
+`mayUseOwnTools`, derived at the time from the same `#hasTrustedAnswerSurface`
+call that produced `mayAsk` — one input, so the two could not disagree, which
+R12 later shows was the defect rather than the guarantee — and
 `AgentDaemon#requestApproval` refuses before the fork rather than routing.
 e2e section 18 is the adversarial check: a delegated session, a
 `runtime_own_tool` approval, and the page's decider never consulted. It fails
@@ -383,6 +384,11 @@ stopped writing on the tier the site uses. The real adapter never asked
 either — `AcpRuntime` short-circuits granted MCP names — and the browser's own
 `requiresApproval` gate was already asking the same question, once, on the
 surface that owns the tool.
+
+> **Superseded by R12.** The argument below is wrong in a way worth leaving
+> visible: the two fields did not agree, and making disagreement
+> unrepresentable is what stopped anyone noticing. `attachmentPolicy()` now
+> takes two inputs and `#hasTrustedAnswerSurface` is `#trustedSurfaces`.
 
 **One predicate, not two booleans.** `mayAsk` and any `mayUseOwnTools` turn on
 the *same* question — does a surface exist that the requesting origin cannot

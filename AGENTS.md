@@ -111,17 +111,30 @@ section is the short implementation checklist, not a second protocol spec.
    function, so a site forging one gains nothing it did not already have —
    self-referential, not escalation. A `runtime_own_tool` approval is the
    user's machine, and a page that does **not** hold the user key answering
-   for it *is* escalation. So `#hasTrustedAnswerSurface` keys on delegation:
-   a **delegated** attachment is refused outright — never rerouted, because
-   the wallet popup needs a user gesture the agent does not have and an iframe
-   the page can cover is not a consent surface — while `viaConnect` (the
-   daemon's terminal) and direct-key (the wallet holds the user key) are
-   asked. The refusal is stated to the page in
+   for it *is* escalation. So `#trustedSurfaces` keys first on delegation: a
+   **delegated** attachment is refused both capabilities outright — never
+   rerouted, because the wallet popup needs a user gesture the agent does not
+   have and an iframe the page can cover is not a consent surface — while
+   `viaConnect` (the daemon's terminal) and direct-key (the client holds the
+   user key) are trusted. The refusal is stated to the page in
    `session.opened`/`session.resumed` and rendered, so the user is told rather
-   than quietly given a diminished agent. Every field of `AttachmentPolicy`
-   comes from that ONE predicate through `attachmentPolicy()`, which takes a
-   single boolean; add a field by deriving it too, and never special-case one
-   field back when the predicate moves.
+   than quietly given a diminished agent.
+
+   **`attachmentPolicy()` takes TWO inputs, `{decisions, questions}`, and the
+   reason is the invariant** (ADR-024 R12). It took one boolean, on the
+   argument that fields which agree cannot drift. They did not agree: a
+   *decision* forks to the daemon's terminal on the connect tier and a
+   *question* had nowhere to fork to, so the single input made the
+   disagreement unrepresentable and the gap lived in a comment instead —
+   `viaConnect` was granted elicitation on the stated grounds that the
+   terminal answered, while the frame went to a page key with no cert behind
+   it. `questions` is now false there unless the embedder supplies
+   `onLocalAsk`, so *building the surface* grants the capability rather than
+   *asserting* it does. The general rule: **a policy whose justification names
+   a destination must be produced by the same code that routes there, or
+   asserted by a check that observes where the frame went.** A check that
+   reads `policy.mayAsk` passes just as happily on a daemon that hands the
+   question to the requesting site.
 
 These are mandatory acceptance properties. ADR-018 maps them to current
 evidence and names the remaining blocking coverage gaps. If you change routing
@@ -141,9 +154,9 @@ Open the demo, hit **Pair a new agent**, paste the code, then **Connect
 agent**. The daemon's pairing link (`/pair#code=…`) auto-fills the dialog.
 
 ```bash
-npm run e2e        # full loop over real sockets, no browser, 150 checks
+npm run e2e        # full loop over real sockets, no browser, 162 checks
 npm run webmcp:harvest # our belief about the WebMCP draft, checked
-npm run wire:check # wire validation: 515 fixture cases across all 45 frames
+npm run wire:check # wire validation: 521 fixture cases across all 45 frames
 npm run agui:check # every emitted AG-UI event parsed by @ag-ui/core's schemas
 npm run source:check # no invisible control characters in source (a NUL got in)
 npm run typecheck  # tsc -b over all packages
@@ -426,7 +439,7 @@ Working: pairing, cert issuance and verification, directory + presence,
 capability grants with TTL, prompt streaming, plan reporting, tool-call
 round-trip, approval round-trip, cancellation, reconnect with in-place session
 resume, session teardown, revocation, authority-tagged approvals, the agent
-asking its own user a question, and the full demo UI. 150 e2e checks and 515
+asking its own user a question, and the full demo UI. 162 e2e checks and 521
 wire-validation cases pass.
 
 Not built yet, in rough priority order:
@@ -445,10 +458,12 @@ Not built yet, in rough priority order:
    acceptable for a demo — the page can reach the user key. Move it behind an
    extension boundary with `postMessage`.
 
-   Note what this does *not* block: `#hasTrustedAnswerSurface` keys on
-   DELEGATION, not on the wallet's implementation, so the extension already
-   counts as a trusted answer surface and already gets own-tool approvals and
-   elicitation. The in-page demo wallet is in the same row, and allowing it
+   Note what this does *not* block: `#trustedSurfaces` keys on DELEGATION, not
+   on the wallet's implementation, so the extension already counts as a
+   trusted surface and already gets own-tool approvals. It is *permitted*
+   elicitation too — but nothing in extension chrome renders a question yet,
+   so `content.ts` skips every one rather than handing it to the page
+   (ADR-024 R12). The in-page demo wallet is in the same row, and allowing it
    costs nothing — a page holding the user key can already mint any authority
    it likes, so refusing to ask it protects nothing (invariant 8's
    self-referential argument). Extension packaging is what turns that row from
