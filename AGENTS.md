@@ -263,7 +263,22 @@ nothing. They are cheap to apply and each one has caught a real instance.
    switch produced three errors, none of them the guard — a renamed case is
    not a missing case. Everything else here assumes the failure you observe
    is the failure you caused; this is the line that checks the assumption.
-7. **When the only available check would lie, do not write it — record the
+7. **A check that skips itself when its subject is unavailable is an
+   anti-check.** It reports green precisely when it cannot look — unavailable
+   in exactly the situation it existed for. `.catch(() => skip)` in a harness
+   is `catch {}` wearing different clothes: forbidden in source since these
+   tenets were written, and worse here, because in source a swallowed error
+   loses information while in a check it manufactures a pass. This is rule 1
+   with an extra step — not merely never watched failing, but structurally
+   incapable of failing in the environment where it runs. The one instance was
+   caught by re-reading, not by any failure, which is the least reliable
+   detection method there is and was the only one left.
+7b. **When something is hard to test where it sits, the difficulty is usually
+   telling you where it belongs.** The classifier that could not be imported
+   because its module touched `self` at load did not need a stubbed `self`; it
+   needed to move to the file where the other pure rules already lived. The
+   awkwardness was information, not an obstacle.
+8. **When the only available check would lie, do not write it — record the
    gap and its cost.** A gap in the record looks like incompleteness; a
    passing check that proves nothing looks like rigour. Prefer the first.
    ADR-023 R9 is the worked example.
