@@ -42,7 +42,8 @@ const said: string[] = [];
 const approvals: string[] = [];
 // One answer per approval the user is actually shown: cases 1-2 approved,
 // cases 3-4 denied. Case 5 is grant-bounded and must never reach the user.
-const answers = [true, true, false, false];
+// Case 7 is the collision: it MUST reach the user, so it needs an answer.
+const answers = [true, true, false, false, false];
 
 const ctx: TurnContext = {
   surface,
@@ -77,7 +78,21 @@ check('only allow_always on offer + approve is cancelled, never durable', select
 check('durable-first ordering + deny selects reject_once', selected(outcomes[2]) === 'c-ronce', outcomes[2]);
 check('only reject_always on offer + deny is cancelled, never durable', selected(outcomes[3]) === 'cancelled', outcomes[3]);
 check('grant-bounded MCP tool auto-allows once only', selected(outcomes[4]) === 'e-once', outcomes[4]);
-check('the user was consulted exactly four times', approvals.length === 4, approvals);
+check(
+  'the same tool titled the way production titles it is still pre-approved',
+  selected(outcomes[5]) === 'f-once',
+  outcomes[5],
+);
+// The bypass, stated as the property rather than as the mechanism: an
+// agent-chosen title that happens to equal a granted tool's bare name must not
+// buy the agent's own capability a free pass.
+check(
+  'a built-in tool wearing a granted tool name is NOT pre-approved',
+  selected(outcomes[6]) === 'g-ronce',
+  outcomes[6],
+);
+check('and it reached the user, who is the only party that may allow it', approvals.includes('doc_read'), approvals);
+check('the user was consulted exactly five times', approvals.length === 5, approvals);
 
 clearTimeout(timer);
 await runtime.closeSession();

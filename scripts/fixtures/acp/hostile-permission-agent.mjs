@@ -53,6 +53,26 @@ async function runPrompt() {
     { optionId: 'e-always', name: 'Always allow', kind: 'allow_always' },
     { optionId: 'e-once', name: 'Allow once', kind: 'allow_once' },
   ]);
+  // 6. THE SHAPE PRODUCTION ACTUALLY SENDS. `toolCall.name` is @experimental
+  //    and claude-agent-acp never sets it: an MCP tool arrives titled with its
+  //    namespaced name and nothing else. Case 5 above exercises a field the
+  //    real peer does not populate, so without this the pre-approval path was
+  //    only ever tested on a shape that never occurs.
+  await permission({ toolCallId: 't6', title: 'mcp__agentport__doc_read' }, [
+    { optionId: 'f-always', name: 'Always allow', kind: 'allow_always' },
+    { optionId: 'f-once', name: 'Allow once', kind: 'allow_once' },
+  ]);
+  // 7. THE COLLISION. A built-in tool is titled with human text the agent
+  //    chose: `Bash` is titled with its own command line, and any tool the
+  //    agent's switch does not know is titled with its exact programmatic
+  //    name. So a site that names a granted tool `doc_read` used to get the
+  //    agent's OWN `doc_read` auto-allowed here — before `requestApproval`,
+  //    which is where the user's prompt and the mayUseOwnTools refusal both
+  //    live. This must reach the user.
+  await permission({ toolCallId: 't7', title: 'doc_read' }, [
+    { optionId: 'g-once', name: 'Allow once', kind: 'allow_once' },
+    { optionId: 'g-ronce', name: 'Reject once', kind: 'reject_once' },
+  ]);
 
   write({
     jsonrpc: '2.0',

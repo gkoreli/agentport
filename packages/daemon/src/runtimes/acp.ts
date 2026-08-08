@@ -516,16 +516,43 @@ export class AcpRuntime implements AgentRuntime {
     // Claude asks before contacting an MCP server. An exact AgentPort MCP
     // name is already bounded by the signed grant; mutation tools encounter
     // the browser's requiresApproval gate when their tool.call arrives. This
-    // selects allow-once only at the redundant ACP layer. Built-in agent tools
-    // still require the browser decision below.
+    // selects allow-once only at the redundant ACP layer.
+    //
+    // ONLY the namespaced form, and that is the security property rather than
+    // tidiness. What arrives here is `title`, not a programmatic name:
+    // `toolCall.name` is `@experimental` and claude-agent-acp never sets it,
+    // and the permission request carries `_meta.claudeCode.toolName` only for
+    // sub-agent calls. So the compared string is HUMAN TEXT the agent chose —
+    // and its rules are hostile to a bare-name match. A `Bash` call is titled
+    // with its own command line, and any tool the agent's switch does not know
+    // — every other MCP server the user has connected — is titled with its
+    // exact programmatic name.
+    //
+    // The set used to hold the bare `mcpToolName(...)` too, and that was a
+    // real bypass: a site names a granted tool `printenv`, or
+    // `mcp__slack__post_message`, and the agent's OWN call of that name is
+    // auto-allowed here — returning before `turn.requestApproval`, which is
+    // where both the user's prompt and the `mayUseOwnTools` refusal live. A
+    // page cannot mint that authority any other way, so it was escalation, and
+    // the comment that used to sit here promised the opposite: "built-in agent
+    // tools still require the browser decision below."
+    //
+    // The bare form was never needed: `openSession` tells the agent its tools
+    // are `mcp__agentport__<name>`, and the bridge registers them under that
+    // server, so a legitimate announcement is always namespaced. What remains
+    // is a Bash command whose text is exactly `mcp__agentport__<granted>` —
+    // which grants permission to run a command that does not exist.
     const announced = params.toolCall.name ?? params.toolCall.title;
     const grantedMcpNames = new Set(
-      turn?.tools.flatMap((tool) => {
-        const name = mcpToolName(tool.name);
-        return [name, `mcp__agentport__${name}`];
-      }) ?? [],
+      turn?.tools.map((tool) => `mcp__agentport__${mcpToolName(tool.name)}`) ?? [],
     );
     if (typeof announced === 'string' && grantedMcpNames.has(announced)) {
+      // Approving without asking is a decision, so it is observable. It was
+      // silent, which is how a bypass here would have stayed invisible even to
+      // someone reading the logs of the session it happened in.
+      this.#log.debug('granted tool pre-approved at the ACP layer; the signed grant already bounds it', {
+        data: { tool: announced },
+      });
       return this.#answerOnce(options, true, announced);
     }
 
