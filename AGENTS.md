@@ -37,7 +37,7 @@ capabilities to whatever agent the platform supplies. AgentPort lets the
    |     approvals. Ships as a browser extension; in the demo it is in-page.
    v
 [RELAY]  @agentport/relay — pairing, presence, directory, opaque forwarding.
-   |     Holds certs and nothing else. Cannot mint certs.
+   |     Verifies certs per connection, stores none. Cannot mint certs.
    v
 [AGENT]  @agentport/daemon — on the user's VPS. Device key, session policy,
          runtime adapter (Claude Code / goose / codex / anything).
@@ -58,7 +58,7 @@ issuedAt}`. That is the whole ownership model.
 
 ```
 packages/protocol/   wire types, Ed25519 helpers, canonical JSON. No I/O.
-packages/relay/      WebSocket relay + cert store. Node only.
+packages/relay/      WebSocket relay; stateless by design. Node only.
 packages/daemon/     VPS-side agent host + AgentRuntime interface.
 packages/client/     wallet, session, navigator.agent provider. Isomorphic.
 site/                the deployed demo: landing + two surfaces + CF Worker/DO.
@@ -414,7 +414,7 @@ Working: pairing, cert issuance and verification, directory + presence,
 capability grants with TTL, prompt streaming, plan reporting, tool-call
 round-trip, approval round-trip, cancellation, reconnect with in-place session
 resume, session teardown, revocation, authority-tagged approvals, the agent
-asking its own user a question, and the full demo UI. 149 e2e checks and 515
+asking its own user a question, and the full demo UI. 150 e2e checks and 515
 wire-validation cases pass.
 
 Not built yet, in rough priority order:
@@ -540,12 +540,14 @@ The daemon keeps an in-memory transcript too, but only as a fallback for
 runtimes that persist nothing — `replayHistory()` on the runtime wins whenever
 it returns non-null.
 
-The relay holds sessions open for `ORPHAN_GRACE_MS` after a client drops so a
-refresh can re-attach, but it does **not** buffer the agent output that
-arrives meanwhile — it counts the frames and drops them. A count is routing
-metadata; the frames are the user's data. An earlier version of this buffered
-500 frames in the Durable Object; that was a privacy regression and was
-removed.
+The **daemon** — not the relay — holds a session open for `DETACH_GRACE_MS`
+(30 minutes) after its client drops, so a refresh can re-attach. It does
+**not** buffer the agent output that arrives meanwhile: it counts the frames
+and drops them. A count is routing metadata; the frames are the user's data.
+The relay's whole part is to notice the socket went away and send
+`session.detach` — it keeps a routing entry and nothing else, which is exactly
+why the count has to be the daemon's. An earlier version buffered 500 frames
+in the Durable Object; that was a privacy regression and was removed.
 
 ## Prompt injection
 
