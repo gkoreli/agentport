@@ -128,9 +128,15 @@ section is the short implementation checklist, not a second protocol spec.
    disagreement unrepresentable and the gap lived in a comment instead —
    `viaConnect` was granted elicitation on the stated grounds that the
    terminal answered, while the frame went to a page key with no cert behind
-   it. `questions` is now false there unless the embedder supplies
-   `onLocalAsk`, so *building the surface* grants the capability rather than
-   *asserting* it does. The general rule: **a policy whose justification names
+   it. BOTH fields now check the handler that reaches their surface —
+   `decisions` on `onLocalApproval`, `questions` on `onLocalAsk` — so
+   *building the surface* grants the capability rather than *asserting* it
+   does. `decisions` was the one that did not, and the asymmetry had a
+   user-visible cost: an embedder with no `onLocalApproval` was told
+   `mayUseOwnTools: true`, the page was told `ownTools: true`, and every
+   request was then refused by a bare `return false` that logged nothing —
+   the invisible diminishment R4 exists to prevent, produced by the field
+   meant to prevent it. The general rule: **a policy whose justification names
    a destination must be produced by the same code that routes there, or
    asserted by a check that observes where the frame went.** A check that
    reads `policy.mayAsk` passes just as happily on a daemon that hands the

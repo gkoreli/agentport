@@ -1354,10 +1354,20 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     decisions: boolean;
     questions: boolean;
   } {
-    const decisions = session.delegation === undefined;
+    // Both fields ask the same shape of question — is there a surface, and can
+    // this daemon actually reach it — so both check the handler that reaches
+    // it. `questions` guarded on `onLocalAsk` from the start and `decisions`
+    // did not, which was an asymmetry with a user-visible cost: an embedder
+    // with no `onLocalApproval` was told `mayUseOwnTools: true`, the page was
+    // told `ownTools: true`, and then every request was refused by a bare
+    // `return false` that logged nothing. The runtime believes it may, the
+    // user is told it may, and it silently may not — the invisible
+    // diminishment ADR-024 R4 exists to prevent, produced by the field meant
+    // to prevent it.
+    const owned = session.delegation === undefined;
     return {
-      decisions,
-      questions: decisions && (!session.viaConnect || this.#options.onLocalAsk !== undefined),
+      decisions: owned && (!session.viaConnect || this.#options.onLocalApproval !== undefined),
+      questions: owned && (!session.viaConnect || this.#options.onLocalAsk !== undefined),
     };
   }
 
@@ -1512,7 +1522,16 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     // extension's consent window when the extension is the wallet.
     if (session.viaConnect) {
       const ask = this.#options.onLocalApproval;
-      if (!ask) return Promise.resolve(false);
+      if (!ask) {
+        // `#trustedSurfaces` cannot set `decisions` on this tier without it, so
+        // this is a second lock rather than a reachable branch — but it used to
+        // be the FIRST lock and it denied in silence, which is how an embedder
+        // could be refused every own-tool call without anything saying why.
+        this.#log.warn('no local approval surface on this tier; refusing the agent its own tool', {
+          sessionId: session.id,
+        });
+        return Promise.resolve(false);
+      }
       return ask('runtime_own_tool', summary, call);
     }
 

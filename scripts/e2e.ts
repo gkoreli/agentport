@@ -2032,6 +2032,54 @@ console.log('\n17. the agent asks its own user (ADR-024)');
     saidB,
   );
 
+  // --- the mirror: a question surface but no approval surface ---------------
+  // `decisions` and `questions` ask the same shape of question, so they check
+  // the same shape of thing. `questions` guarded on `onLocalAsk` from the
+  // start; `decisions` did not, and the cost was user-visible — the page was
+  // told `ownTools: true`, the runtime was told it may, and every request was
+  // then refused by a bare `return false` that logged nothing. This is the
+  // tier reporting what it can actually do.
+  const agent17c = generateKeyPair();
+  const daemon17c = new AgentDaemon({
+    relayUrl: url17,
+    identity: {
+      secretKey: agent17c.secretKey,
+      publicKey: agent17c.publicKey,
+      name: 'Half Surfaced Agent',
+      runtime: 'asking',
+      cert: signCert(owner17.secretKey, {
+        user: owner17.publicKey,
+        agent: agent17c.publicKey,
+        name: 'Half Surfaced Agent',
+        runtime: 'asking',
+        issuedAt: Date.now(),
+      }),
+    },
+    createRuntime: () => new AskingRuntime(),
+    onConnectOffer: async () => true,
+    // A terminal that can render a QUESTION and cannot render a DECISION.
+    onLocalAsk: async () => ({ draft: 'The second' }),
+  });
+  await daemon17c.start();
+  const page17c = new AgentWallet({ relayUrl: url17, userSecretKey: generateKeyPair().secretKey, socketFactory });
+  await page17c.connect();
+  const offer17c = await page17c.beginConnect({
+    surface: { name: 'Half Surfaced', origin: 'https://half.test' },
+    tools: [],
+    decide: () => true,
+  });
+  daemon17c.claimConnect(offer17c.code);
+  const dropInC = await offer17c.accepted;
+  check(
+    'a tier with no approval surface says so instead of claiming own tools',
+    dropInC.info.ownTools === false,
+    dropInC.info,
+  );
+  check('and it may still be asked, because that surface does exist', policies[4] === true, policies);
+  dropInC.close();
+  page17c.close();
+  await daemon17c.stop();
+
   dropInB.close();
   page17b.close();
   await daemon17b.stop();
