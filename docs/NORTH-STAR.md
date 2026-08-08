@@ -171,6 +171,35 @@ In rough order of how load-bearing they are:
 6. **Integration is one call.** If a site needs to understand our protocol to
    adopt us, we have failed at the only thing that drives adoption.
 
+### Why the sixth one is the one that breaks
+
+Five of those are about what happens *after* a site adopts. The sixth is about
+whether it ever does — and it is the only one that binds at the edge of the
+system, where nobody working on the system ever stands.
+
+This is not hypothetical. For a long stretch of this repo's history the
+README's first code block — the thing GitHub renders above everything else —
+called `navigator.agent.connect(...)`. `connect.js` only ever *reads* that
+property; nothing but the extension installs it. So the documented integration
+threw a bare `TypeError` for every visitor without our extension, which is
+precisely the population the whole fallback ladder exists to serve. Five
+requirements had adversarial e2e checks; this one had a broken first line.
+
+The reason it survived is worth more than the bug: **a requirement about
+people who have not arrived yet cannot be verified by people who are already
+here.** Everyone working on this has a wallet, an extension, a daemon and a
+checkout. Nobody is ever in the state where that snippet is the first thing
+they read, so nobody was ever in a position to notice.
+
+And it does not have a check. You cannot assert your way to a good front door
+— an assertion encodes what we already believe the path is, which is the same
+blind spot in executable form. What it has instead is an obligation:
+**periodically arrive as a stranger.** Walk the path in order, from the
+outside, with nothing installed — README, script tag, first call, first
+failure — and fix whatever a stranger would hit. That is a thing a person
+does, not a thing a suite proves, and it is the only one of the six that
+works that way.
+
 ## How we would know it worked
 
 Not metrics — signals, roughly in the order we would expect to see them:
