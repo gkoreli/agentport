@@ -137,6 +137,19 @@ const MAX_RESUME_ATTEMPTS = 10;
 const ASK_TIMEOUT_MS = 5 * 60 * 1000;
 
 /**
+ * How long `start()` waits for the relay to finish the handshake.
+ *
+ * The wallet has had this since it learned that a reachable-but-silent relay
+ * hangs the last rung of the connect ladder; the daemon never got the same
+ * treatment, and it is the side a stranger runs from a terminal. Without it a
+ * relay that answers with a protocol error — a version mismatch, say — leaves
+ * the process sitting forever after printing a perfectly good explanation of
+ * why it cannot proceed. Tenet 3: a hang is indistinguishable from slowness,
+ * and nobody waits to find out.
+ */
+const HANDSHAKE_TIMEOUT_MS = 20_000;
+
+/**
  * Char budget for one history frame's entries. UTF-8 never exceeds 3 bytes
  * per UTF-16 code unit, so a char budget of bytes/3 cannot overflow the
  * sealed-plaintext byte bound however the text encodes; the subtraction
@@ -210,6 +223,11 @@ export interface DaemonOptions {
    * without it is the one that matters most.
    */
   now?: () => number;
+  /**
+   * Test seam, and the same name the wallet uses so there is one dialect for
+   * "how long do we wait for a relay to say something".
+   */
+  handshakeTimeoutMs?: number;
   sink?: LogSink;
 }
 
@@ -243,6 +261,7 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
   #offerSeals = new Map<string, { keys: KeyPair; at: number }>();
   #log: Logger;
   #readyDeferred = new Deferred<{ bound: boolean }>();
+  #readyTimer: ReturnType<typeof setTimeout> | undefined;
   #authenticated = false;
   #stopped = false;
   #retryMs = 1000;
@@ -271,8 +290,28 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
    * zombie after the first deploy — running, but reachable by nobody.
    */
   async start(): Promise<{ bound: boolean }> {
+    // Armed here rather than in `#dial`, because `#dial` also runs for every
+    // later redial and those are the close handler's business, not the
+    // caller's — `start()` has long since settled by then.
+    const handshakeMs = this.#options.handshakeTimeoutMs ?? HANDSHAKE_TIMEOUT_MS;
+    this.#readyTimer = setTimeout(() => {
+      this.#failStart(new Error(`the relay did not finish the handshake within ${handshakeMs}ms`));
+    }, handshakeMs);
     this.#dial();
     return this.#readyDeferred.promise;
+  }
+
+  /**
+   * Settle a pending `start()` as failed, once.
+   *
+   * A no-op after the handshake succeeded: the Deferred is settle-once, so a
+   * relay error arriving at a running daemon stays what it already was — a
+   * logged frame, not a reason to tear anything down.
+   */
+  #failStart(err: Error): void {
+    clearTimeout(this.#readyTimer);
+    this.#readyTimer = undefined;
+    this.#readyDeferred.reject(err);
   }
 
   #dial(): void {
@@ -477,6 +516,8 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
   async stop(): Promise<void> {
     this.#stopped = true;
     clearInterval(this.#heartbeat);
+    clearTimeout(this.#readyTimer);
+    this.#readyTimer = undefined;
     for (const session of this.#sessions.values()) await this.#closeSession(session, 'daemon_stopping');
     this.#socket?.close();
   }
@@ -530,6 +571,8 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
       case 'ready': {
         this.#retryMs = 1000;
         this.#authenticated = true;
+        clearTimeout(this.#readyTimer);
+        this.#readyTimer = undefined;
         const bound = Boolean(frame.bound);
         this.emit('ready', { bound });
         this.#readyDeferred.resolve({ bound });
@@ -783,6 +826,14 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
 
       case 'error':
         this.#log.error('relay rejected a frame', { data: { code: frame.code, message: frame.message } });
+        // Before the handshake completes this is terminal for the caller, and
+        // saying so is the whole point: the relay has just explained itself
+        // ("relay speaks agentport/1"), and that explanation used to be
+        // printed to a process which then waited forever. The message is
+        // already good; it only needed to reach the exit.
+        if (!this.#authenticated) {
+          this.#failStart(new Error(`the relay refused this daemon: ${frame.code}${frame.message ? ` — ${frame.message}` : ''}`));
+        }
         return;
 
       default:

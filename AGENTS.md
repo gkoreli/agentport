@@ -154,7 +154,7 @@ Open the demo, hit **Pair a new agent**, paste the code, then **Connect
 agent**. The daemon's pairing link (`/pair#code=…`) auto-fills the dialog.
 
 ```bash
-npm run e2e        # full loop over real sockets, no browser, 162 checks
+npm run e2e        # full loop over real sockets, no browser, 165 checks
 npm run webmcp:harvest # our belief about the WebMCP draft, checked
 npm run wire:check # wire validation: 521 fixture cases across all 45 frames
 npm run agui:check # every emitted AG-UI event parsed by @ag-ui/core's schemas
@@ -439,7 +439,7 @@ Working: pairing, cert issuance and verification, directory + presence,
 capability grants with TTL, prompt streaming, plan reporting, tool-call
 round-trip, approval round-trip, cancellation, reconnect with in-place session
 resume, session teardown, revocation, authority-tagged approvals, the agent
-asking its own user a question, and the full demo UI. 162 e2e checks and 521
+asking its own user a question, and the full demo UI. 165 e2e checks and 521
 wire-validation cases pass.
 
 Not built yet, in rough priority order:

@@ -2632,6 +2632,79 @@ console.log("\n20. the drop-in tier's refusals");
     await new Promise<void>((resolve) => mute.close(() => resolve()));
   }
 
+  // The same rung from the DAEMON's side, which is the side a stranger runs in
+  // a terminal — and the side that had no deadline at all. Both shapes, because
+  // they fail differently: a relay that explains itself, and one that says
+  // nothing. The first is the deployed state today (a relay four wire versions
+  // behind), where the daemon printed a perfect explanation and then waited
+  // forever.
+  {
+    const { WebSocketServer: RefuseServer } = await import('ws');
+    const refuser = new RefuseServer({ port: 0, host: '127.0.0.1' });
+    await new Promise<void>((resolve) => refuser.once('listening', () => resolve()));
+    const refusePort = (refuser.address() as { port: number }).port;
+    refuser.on('connection', (socket) => {
+      socket.on('message', () => {
+        socket.send(
+          canonicalJson({ t: 'error', code: 'version', message: 'relay speaks agentport/1' }),
+        );
+      });
+    });
+    const mismatched = new AgentDaemon({
+      relayUrl: `ws://127.0.0.1:${refusePort}`,
+      identity: { ...generateKeyPair(), name: 'Stranded Agent', runtime: 'mock' },
+      createRuntime: () => new DemoWriterRuntime(),
+      socketFactory,
+      handshakeTimeoutMs: 5_000,
+    });
+    let refused = 'hung';
+    await Promise.race([
+      mismatched.start().then(
+        () => {
+          refused = 'started';
+        },
+        (err: Error) => {
+          refused = err.message;
+        },
+      ),
+      new Promise<void>((resolve) => setTimeout(resolve, 3_000)),
+    ]);
+    check('a relay that refuses the daemon fails start() instead of hanging', refused !== 'hung', refused);
+    check(
+      'and the reason the relay gave is what the caller receives',
+      refused.includes('version') && refused.includes('agentport/1'),
+      refused,
+    );
+    await mismatched.stop();
+    await new Promise<void>((resolve) => refuser.close(() => resolve()));
+
+    const silent = new RefuseServer({ port: 0, host: '127.0.0.1' });
+    await new Promise<void>((resolve) => silent.once('listening', () => resolve()));
+    const silentPort = (silent.address() as { port: number }).port;
+    const stalledDaemon = new AgentDaemon({
+      relayUrl: `ws://127.0.0.1:${silentPort}`,
+      identity: { ...generateKeyPair(), name: 'Patient Agent', runtime: 'mock' },
+      createRuntime: () => new DemoWriterRuntime(),
+      socketFactory,
+      handshakeTimeoutMs: 400,
+    });
+    let quiet = 'hung';
+    await Promise.race([
+      stalledDaemon.start().then(
+        () => {
+          quiet = 'started';
+        },
+        (err: Error) => {
+          quiet = err.message;
+        },
+      ),
+      new Promise<void>((resolve) => setTimeout(resolve, 3_000)),
+    ]);
+    check('a relay that answers nothing gives the daemon up rather than hanging', quiet !== 'hung', quiet);
+    await stalledDaemon.stop();
+    await new Promise<void>((resolve) => silent.close(() => resolve()));
+  }
+
   refusedPage.close();
   await guesser.stop();
   await daemon20.stop();
