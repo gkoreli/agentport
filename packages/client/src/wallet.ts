@@ -149,14 +149,46 @@ type WalletEvents = {
  * equivalent one minted later — must reach `session.open`.
  */
 export function buildGrant(request: Omit<SessionRequest, 'agent'>): CapabilityGrant {
-  return CapabilityGrant(
-    {
-      tools: request.tools.map(({ handler: _handler, ...definition }) => definition),
-      alwaysAsk: request.alwaysAsk ?? [],
-      expiresAt: Date.now() + (request.ttlMs ?? DEFAULT_SESSION_TTL_MS),
-    },
-    'grant',
-  );
+  try {
+    return CapabilityGrant(
+      {
+        tools: request.tools.map(({ handler: _handler, ...definition }) => definition),
+        alwaysAsk: request.alwaysAsk ?? [],
+        expiresAt: Date.now() + (request.ttlMs ?? DEFAULT_SESSION_TTL_MS),
+      },
+      'grant',
+    );
+  } catch (err) {
+    if (!(err instanceof WireViolation)) throw err;
+    // Translate at the DEVELOPER boundary, which is what this function is for.
+    // `WireViolation{code, path}` is exactly right on the wire — minimal, and
+    // it never reflects input — but "mismatch at grant" tells someone who
+    // typed a tool name wrong nothing they can act on, and this is the one
+    // place the message is read by a person who can fix it.
+    //
+    // The rule is stated; the offending VALUE is never echoed. That is the
+    // no-reflection property, and it holds here too: these tools may have been
+    // harvested from a page, so the input is not ours to repeat.
+    throw new Error(`${explainGrantViolation(err)} (${err.code} at ${err.path})`);
+  }
+}
+
+/** What the developer should change, in terms of the rule rather than their input. */
+function explainGrantViolation(err: WireViolation): string {
+  if (err.path.endsWith('.name')) {
+    return 'a tool name may use only letters, digits, dot, underscore and hyphen, up to 128 characters — no spaces';
+  }
+  if (err.code === 'missing_key') return `a required field is missing: ${err.path}`;
+  if (err.path === 'grant' && err.code === 'mismatch') {
+    return 'every name in alwaysAsk must also be the name of a tool you passed';
+  }
+  if (err.path === 'grant' && err.code === 'duplicate') {
+    return 'two tools share a name, or alwaysAsk repeats one';
+  }
+  if (err.code === 'too_long' && err.path === 'grant') {
+    return 'the tool definitions are too large in total — shorten descriptions or lend fewer tools';
+  }
+  return `this grant is not valid at ${err.path}`;
 }
 
 function buildSurface(request: Omit<SessionRequest, 'agent'>): SurfaceDescriptor {
