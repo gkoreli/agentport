@@ -18,6 +18,7 @@
 import {
   arr,
   bool,
+  display,
   en,
   hex,
   hexRange,
@@ -100,7 +101,7 @@ export function wireFingerprint(): string {
  * commit as the version, deliberately by hand — but unlike the version, a
  * stale value here CANNOT pass, because the check recomputes it.
  */
-export const WIRE_FINGERPRINT = '607c5d4ae8e55702d3d15121';
+export const WIRE_FINGERPRINT = 'e26265ee0c54cf583ca452bc';
 
 /**
  * The wire dialect both ends must agree on, checked at `hello` before
@@ -118,13 +119,22 @@ export const WIRE_FINGERPRINT = '607c5d4ae8e55702d3d15121';
  *
  * v4: `generic_page_tool` joins the AuthorityDomain set.
  *
+ * v5: every string a human reads in order to DECIDE something — tool
+ * descriptions, surface names and routes, approval summaries, question
+ * messages and form labels, errors and denial reasons — moved from `str` to
+ * `display`, which rejects C0/DEL/C1. A tightening rather than a new field,
+ * and still a wire change: a peer that used to get a session now gets
+ * `bad_format`. That peer was sending terminal escape sequences into the
+ * daemon owner's consent screen, so the break is the point. Content fields
+ * (`text`, plan step bodies, a user's own typed answers) stay `str`.
+ *
  * This is no longer hand-maintained on its own: `WIRE_FINGERPRINT` above is
  * recomputed from the schemas on every `wire:check` run, so a wire change that
  * forgot this constant is a red build. It caught the v4 change on the first
  * run after it was written — which is the only evidence worth having that a
  * guard works.
  */
-export const PROTOCOL_VERSION = 'agentport/4';
+export const PROTOCOL_VERSION = 'agentport/5';
 
 export type Hex = string;
 
@@ -142,8 +152,14 @@ const codeField = pattern(CODE_PATTERN, 9);
 const tokenField = pattern(TOKEN_PATTERN, 128);
 /** Unix ms inside the protocol's operating domain. */
 const timestamp = int(TIMESTAMP_MIN, TIMESTAMP_MAX);
-const name = str(1, MAX_NAME_CHARS);
-const reason = str(0, MAX_REASON_CHARS);
+const name = display(1, MAX_NAME_CHARS);
+const reason = display(0, MAX_REASON_CHARS);
+/**
+ * CONTENT, not chrome — so `str`, not `display`. Prompt text and agent output
+ * are payload a surface renders as data; newlines are ordinary and a control
+ * character in them cannot redraw a consent screen, because no consent screen
+ * prints them. `display` is for the strings a human reads in order to decide.
+ */
 const text = str(0, MAX_TEXT_CHARS);
 /** Bounded arbitrary JSON: tool results may be any JSON value… */
 const json = jsonValue(MAX_JSON_DEPTH, MAX_JSON_NODES, MAX_JSON_LEAF_CHARS);
@@ -193,7 +209,7 @@ export const SessionDelegation = obj({
   /** Ed25519 public key of the one agent this authority may reach. */
   agent: pubkey,
   /** Browser-verified origin this authority may attach from. */
-  origin: str(1, MAX_ORIGIN_CHARS),
+  origin: display(1, MAX_ORIGIN_CHARS),
   /**
    * SHA-256 of the canonical CapabilityGrant the user approved (`hashGrant`).
    * `session.open` must present a grant with exactly this hash: the daemon
@@ -243,7 +259,7 @@ export type AgentSummary = Infer<typeof AgentSummary>;
 export const ToolDefinition = obj({
   /** Namespaced, e.g. "inkwell.document.replaceSelection". */
   name: toolName,
-  description: str(0, MAX_DESCRIPTION_CHARS),
+  description: display(0, MAX_DESCRIPTION_CHARS),
   /** JSON Schema for the arguments object, bounded like any embedded JSON. */
   inputSchema: record,
   /** If true the client must obtain explicit user approval per invocation. */
@@ -256,9 +272,9 @@ export const SurfaceDescriptor = obj({
   /** Display name, e.g. "Inkwell". */
   name,
   /** Origin of the page requesting the session. Set by the client SDK. */
-  origin: str(1, MAX_ORIGIN_CHARS),
+  origin: display(1, MAX_ORIGIN_CHARS),
   /** Optional route/resource the session is scoped to. */
-  route: opt(str(0, MAX_ROUTE_CHARS)),
+  route: opt(display(0, MAX_ROUTE_CHARS)),
   /** Free-form context the site wants the agent to have at session start. */
   context: opt(record),
 });
@@ -306,7 +322,7 @@ export const Hello = obj({
    * incompatible peer gets a clear "unsupported version" error instead of a
    * schema rejection.
    */
-  v: str(1, 32),
+  v: display(1, 32),
   role,
 });
 export type Hello = Infer<typeof Hello>;
@@ -347,7 +363,7 @@ export const ProtocolError = obj({
   t: lit('error'),
   /** Stable public code; never derived from peer input. */
   code: pattern(ERROR_CODE_PATTERN, 64),
-  message: str(0, MAX_REASON_CHARS),
+  message: display(0, MAX_REASON_CHARS),
   /** Set when the error refers to a specific session or request. */
   ref: opt(idField),
 });
@@ -493,7 +509,7 @@ export const Revoke = obj({
   t: lit('revoke'),
   agent: pubkey,
   /** Every delegation this origin holds, issued before now, stops working. */
-  origin: str(1, MAX_ORIGIN_CHARS),
+  origin: display(1, MAX_ORIGIN_CHARS),
   /**
    * Stamped by the relay from the authenticated socket; ignored if a client
    * sends it. The daemon re-checks it against its own cert, so a lying relay
@@ -506,7 +522,7 @@ export type Revoke = Infer<typeof Revoke>;
 export const Revoked = obj({
   t: lit('revoked'),
   agent: pubkey,
-  origin: str(1, MAX_ORIGIN_CHARS),
+  origin: display(1, MAX_ORIGIN_CHARS),
   /** Live attachments the agent ended. Feedback for the user, not authority. */
   sessions: int(0, MAX_SESSIONS_REPORTED),
 });
@@ -717,7 +733,7 @@ export type Thought = Infer<typeof Thought>;
  * reporting the agent already produces and we previously discarded.
  */
 export const PlanStep = obj({
-  text: str(1, MAX_PLAN_STEP_CHARS),
+  text: display(1, MAX_PLAN_STEP_CHARS),
   status: en('pending', 'active', 'done'),
   /** The runtime's own ranking, when it offers one. Display only. */
   priority: opt(en('high', 'medium', 'low')),
@@ -752,9 +768,9 @@ export const FormField = refined(
   obj({
     /** Stable key the answer is returned under. */
     key: idField,
-    label: str(1, MAX_FORM_LABEL_CHARS),
+    label: display(1, MAX_FORM_LABEL_CHARS),
     /** Absent means free text; present means choose from exactly these. */
-    options: opt(arr(str(1, MAX_FORM_LABEL_CHARS), MAX_FORM_OPTIONS)),
+    options: opt(arr(display(1, MAX_FORM_LABEL_CHARS), MAX_FORM_OPTIONS)),
     /** More than one option may be chosen. Only meaningful with `options`. */
     multi: opt(bool()),
   }),
@@ -783,7 +799,7 @@ export const Ask = obj({
   s: idField,
   id: idField,
   /** What the agent needs to know, in its own words. Agent-authored. */
-  message: str(1, MAX_DESCRIPTION_CHARS),
+  message: display(1, MAX_DESCRIPTION_CHARS),
   fields: arr(FormField, MAX_FORM_FIELDS),
 });
 export type Ask = Infer<typeof Ask>;
@@ -822,7 +838,7 @@ export const Done = obj({
   s: idField,
   promptId: idField,
   stopReason: en('end_turn', 'cancelled', 'error'),
-  error: opt(str(0, MAX_ERROR_CHARS)),
+  error: opt(display(0, MAX_ERROR_CHARS)),
 });
 export type Done = Infer<typeof Done>;
 
@@ -841,7 +857,7 @@ export const ToolResult = obj({
   id: idField,
   ok: bool(),
   result: opt(json),
-  error: opt(str(0, MAX_ERROR_CHARS)),
+  error: opt(display(0, MAX_ERROR_CHARS)),
 });
 export type ToolResult = Infer<typeof ToolResult>;
 
@@ -894,7 +910,7 @@ export const ApprovalRequest = obj({
    * and therefore untrusted — a renderer must not present it as a verified
    * statement of what will happen.
    */
-  summary: str(0, MAX_DESCRIPTION_CHARS),
+  summary: display(0, MAX_DESCRIPTION_CHARS),
   /** The tool call this approval gates, when applicable. */
   call: opt(obj({ name: toolName, arguments: record })),
   /**

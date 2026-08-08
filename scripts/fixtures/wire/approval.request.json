@@ -251,6 +251,17 @@
         },
         "callHash": "b7b7"
       }
+    },
+    {
+      "name": "approval summary carries an ANSI escape that would overwrite the line above",
+      "expect": "bad_format",
+      "frame": {
+        "t": "approval.request",
+        "s": "s1",
+        "id": "a1",
+        "domain": "runtime_own_tool",
+        "summary": "Harmless\u001b[1A\u001b[2K  Approve?"
+      }
     }
   ]
 }

@@ -2,7 +2,7 @@
   "type": "ask",
   "cases": [
     {
-      "name": "minimal valid \u2014 one free-text question",
+      "name": "minimal valid — one free-text question",
       "expect": "ok",
       "frame": {
         "t": "ask",
@@ -18,7 +18,7 @@
       }
     },
     {
-      "name": "maximal valid \u2014 a bounded multi-select",
+      "name": "maximal valid — a bounded multi-select",
       "expect": "ok",
       "frame": {
         "t": "ask",
@@ -259,6 +259,38 @@
       "name": "raw: __proto__ smuggle is just an unknown key",
       "expect": "unexpected_key",
       "raw": "{\"__proto__\":{},\"fields\":[],\"id\":\"ask_0123456789abcdef01234567\",\"message\":\"hi\",\"s\":\"sess_0123456789abcdef01234567\",\"t\":\"ask\"}"
+    },
+    {
+      "name": "question message carries an ANSI escape",
+      "expect": "bad_format",
+      "frame": {
+        "t": "ask",
+        "s": "sess_0123456789abcdef01234567",
+        "id": "ask_0123456789abcdef01234567",
+        "message": "Which draft?\u001b[31m",
+        "fields": [
+          {
+            "key": "f_0123456789abcdef01234567",
+            "label": "Name"
+          }
+        ]
+      }
+    },
+    {
+      "name": "form field label carries an ANSI escape",
+      "expect": "bad_format",
+      "frame": {
+        "t": "ask",
+        "s": "sess_0123456789abcdef01234567",
+        "id": "ask_0123456789abcdef01234567",
+        "message": "What should I call it?",
+        "fields": [
+          {
+            "key": "f_0123456789abcdef01234567",
+            "label": "Draft\u001b[7m"
+          }
+        ]
+      }
     }
   ]
 }

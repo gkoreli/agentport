@@ -328,7 +328,19 @@ means touching them and nothing else:
   structurally impossible), no coercion anywhere, validated values rebuilt onto
   fresh objects, and `WireViolation{code, path}` whose code comes from a closed
   set and whose path contains only schema-defined names. Attacker bytes never
-  reach a log, an error frame, or a metric.
+  reach a log, an error frame, or a metric — **nor a consent surface**, which
+  is what `display()` is for. Every string a human reads *in order to decide
+  something* uses `display`, not `str`: tool descriptions, surface names and
+  routes, approval summaries, question messages and form labels, errors and
+  denial reasons. It rejects C0/DEL/C1, because a site-authored tool
+  description carrying `ESC[2J ESC[H` used to survive the decoder and reach
+  the daemon owner's terminal, where it clears the screen and lets the page
+  redraw the consent screen it was supposed to be consenting to — forged
+  `verify:` line included. Content stays `str`: prompt text, agent output,
+  plan step bodies and a user's own typed answers legitimately contain
+  newlines, and they are rendered as data rather than read as truth. If you
+  add a field, the question is not "is it a string" but **"will someone read
+  this to decide whether to trust something?"**
 - `packages/protocol/src/limits.ts` — every bound, each with the reasoning that
   chose it. Change a limit here, not at a call site.
 - `packages/protocol/src/messages.ts` — one schema per frame, `FRAME_SCHEMAS`

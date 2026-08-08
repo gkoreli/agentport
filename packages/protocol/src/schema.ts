@@ -88,6 +88,7 @@ export type WireShape =
   | { k: 'bool' }
   | { k: 'int'; min: number; max: number }
   | { k: 'str'; min: number; max: number }
+  | { k: 'display'; min: number; max: number }
   | { k: 'pattern'; re: string; max: number }
   | { k: 'hex'; min: number; max: number }
   | { k: 'hexRange'; min: number; max: number }
@@ -196,6 +197,58 @@ export function str(min: number, max: number): Schema<string> {
     if (typeof value !== 'string') throw new WireViolation('wrong_type', path);
     if (value.length < min) throw new WireViolation('too_short', path);
     if (value.length > max) throw new WireViolation('too_long', path);
+    return wellFormed(value, path);
+  });
+}
+
+/**
+ * C0 controls, DEL, and C1. Never typed on purpose, and the set that lets a
+ * string rewrite a surface instead of appearing on it.
+ */
+const CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/;
+
+/**
+ * A string a human will READ IN ORDER TO DECIDE something — a tool
+ * description on a consent screen, a surface name, an approval summary, the
+ * label on a question.
+ *
+ * Separate from `str` because the threat is separate. A site authors the tool
+ * descriptions in its own grant, and the daemon prints them to the owner's
+ * terminal at the connect-tier consent moment. `str` bounds length and rejects
+ * unpaired surrogates; it says nothing about control characters, so
+ * `ESC[2J ESC[H` in a description survived the decoder intact and reached
+ * `console.log`. That clears the screen and homes the cursor: the site can
+ * erase what the daemon just printed and draw its own consent screen in its
+ * place — including a forged `verify:` line, which is the drop-in tier's only
+ * defence against a relay in the middle of the key exchange. The terminal is
+ * the trusted surface precisely BECAUSE the page cannot draw it, and escape
+ * sequences were handing the page a pen.
+ *
+ * Rejecting at the wire rather than escaping at each print, because there is
+ * no list of print sites to keep current — the daemon CLI, the connect CLI,
+ * logs, and every surface not written yet all consume the same field. Bytes
+ * that can only be an attack should not become values.
+ *
+ * NOT applied to content: prompt text, agent output, plan steps and a user's
+ * own typed answers legitimately contain newlines, and they are payload
+ * rendered as data rather than chrome read as truth. The split is the whole
+ * design — see `messages.ts`, where `text` stays `str`.
+ *
+ * Scope, stated rather than assumed. This rejects the set whose attack was
+ * demonstrated. Bidi overrides (U+202A-202E, U+2066-2069) can reorder
+ * rendered text and are a plausible second vector on the same surfaces; they
+ * are NOT rejected here, because "plausible" and "demonstrated" are different
+ * evidentiary standards and bundling them would hide which one this bound
+ * rests on. Zero-width joiners are deliberately allowed regardless — U+200D
+ * is load-bearing inside ordinary emoji, so banning it would break correct
+ * text to prevent nothing yet shown.
+ */
+export function display(min: number, max: number): Schema<string> {
+  return described({ k: 'display', min, max }, (value, path) => {
+    if (typeof value !== 'string') throw new WireViolation('wrong_type', path);
+    if (value.length < min) throw new WireViolation('too_short', path);
+    if (value.length > max) throw new WireViolation('too_long', path);
+    if (CONTROL_CHARS.test(value)) throw new WireViolation('bad_format', path);
     return wellFormed(value, path);
   });
 }
