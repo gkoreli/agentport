@@ -66,8 +66,9 @@ scripts need a page reload too.
 
 Rules the two boundaries enforce, mirroring the invariants in `AGENTS.md`:
 
-1. **The key never leaves the worker.** `chrome.storage.local` is read only by
-   `src/storage.ts`, signing happens only in `sw.ts`, and no message type can
+1. **The key never leaves the worker.** Key material in `chrome.storage.local`
+   is touched only by `src/storage.ts` — `sw.ts` reads one unrelated keepalive
+   flag — signing happens only in `sw.ts`, and no message type can
    return key material. The page-world and content bundles do not even contain
    the Ed25519 code — `dist/inpage.js` and `dist/content.js` have no `ed25519`
    symbol in them.
@@ -133,15 +134,24 @@ consent flow as a site-declared grant, over one of two toolsets:
   `document.modelContext` when it exists, falls back to the deprecated
   `navigator.modelContext`, and installs a minimal two-spelling shim when
   neither exists, so a site that registers tools gets AgentPort for free.
-  Harvested tools execute in the page (that is where they were defined). They
-  are ungated by default because the site deliberately published them;
-  `annotations.destructiveHint: true` opts a tool into per-call approval.
+  Harvested tools execute in the page (that is where they were defined) and
+  **always require per-call approval**. No page-authored field is consulted.
+  The rule lives in exactly one place, `toSiteTool` in
+  `packages/client/src/webmcp.ts`, and reading `annotations.destructiveHint`
+  is precisely the hole it closed: a page that simply omitted the field got an
+  ungated tool, so *missing metadata granted authority*. `readOnlyHint` is
+  recorded on the registration and deliberately read by nobody — relaxing on
+  it also needs a trusted user-side origin policy, and shipping half of that
+  pair rebuilds the same hole under a new field name.
 - **Otherwise the generic `page.*` toolset:** `page.info`, `page.readText`,
   `page.readSelection`, `page.listElements`, `page.scroll` are ungated reads;
   `page.fill` and `page.click` mutate the document and always ask. Writes
-  address elements by a handle from `page.listElements`, never by a selector, so
-  the agent can only act on something that was enumerated to it and the approval
-  card can name the element instead of showing a CSS string.
+  address elements by a handle from `page.listElements`, never by a selector,
+  so the agent can only act on something that was enumerated to it — and
+  `resolveHandle` refuses the call outright if that element's role or label
+  changed since it was listed. The approval card shows the call's raw
+  arguments. Naming the element in words instead is what ADR-023 R4 argues
+  for; it is not built, and `pagetools.ts` records why.
 
 Page text is hostile data. `page.readText` returns it labelled as untrusted, and
 the approval round-trip is the only thing between a poisoned paragraph and a
