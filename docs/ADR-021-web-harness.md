@@ -19,10 +19,10 @@ do that.
 The extension can supply the missing half. It already ships generic page tools
 — `page.info`, `page.readText`, `page.readSelection`, `page.listElements`,
 `page.scroll`, `page.fill`, `page.click`
-(`packages/extension/src/pagetools.ts:125`) — and lends them to the user's
+(`packages/extension/src/pagetools.ts#genericPageTools`) — and lends them to the user's
 agent on any site, through the same grant, consent, and sealing machinery as a
 declared surface. We call that surface the **widget**
-(`packages/extension/src/bridge.ts:100`: `type Origin = 'page' | 'widget'`).
+(`packages/extension/src/bridge.ts#Origin`: `type Origin = 'page' | 'widget'`).
 
 That is not a fallback. It is the widest form of the product: **the same agent
 you already run — your memory, your prompts, your MCP servers, your files —
@@ -35,7 +35,8 @@ rather than reading it.
 
 **A navigation kills the session.** The agent is asked to click a link; it
 succeeds; the document goes away and the attachment dies with it. This is not
-an oversight — it is written down (`packages/extension/src/sw.ts:725`):
+an oversight — it was written down, in `packages/extension/src/sw.ts`, in the
+disconnect path this ADR deleted:
 
 ```js
 // The extension's own widget sessions die with their document — only
@@ -44,13 +45,13 @@ if (entry.from === 'page') orphanSession(entry);
 else dropSession(entry, 'frame_closed');
 ```
 
-Page-declared surfaces get the orphan-and-reclaim path with a two-minute grace
-(`sw.ts:224`); the widget does not. So the one surface whose entire purpose is
-driving multi-page flows is the one surface that cannot survive succeeding.
+Page-declared surfaces got the orphan-and-reclaim path with a two-minute
+grace; the widget did not. So the one surface whose entire purpose is driving
+multi-page flows was the one surface that could not survive succeeding.
 
-**Every call re-asks.** `askApproval(origin, who, prompt)` (`sw.ts:161`,
-`:525`, `:608`) opens an extension-chrome window per call, and nothing is
-remembered between them. On a declared site with a handful of gated tools that
+**Every call re-asks.** `askApproval` (`packages/extension/src/sw.ts#askApproval`,
+now `(origin, who, prompt, synthesised)`) opens an extension-chrome window per
+call, and nothing is remembered between them. On a declared site with a handful of gated tools that
 is proportionate. On a generic harness where the agent clicks, reads, clicks
 again, it is a modal dialog every few seconds, which trains the user to approve
 without reading — the worst possible outcome for a consent boundary.
@@ -81,15 +82,17 @@ is one lifecycle, not two.
 
 **Open:** whether a tab-scoped or origin-scoped identity is the right key when
 the same origin is open in several tabs. Prefer origin-scoped with the tab as a
-tiebreaker for reclaim, matching `reclaimSession` (`sw.ts:257`).
+tiebreaker for reclaim, matching `reclaimSession` (`packages/extension/src/sw.ts#reclaimSession`).
 
 ### 2. Navigation is a first-class tool, not an accident
 
 If the harness is going to drive multi-page flows, the agent should be able to
 say where it is going: a `page.navigate` tool, and a way to await the load and
-observe that the page changed underneath it. Today navigation is something that
-*happens to* the agent mid-turn, and it finds out by its next tool call failing
-(`sw.ts:654`: "the page is navigating; retry in a moment").
+observe that the page changed underneath it. Navigation used to be something
+that merely *happened to* the agent mid-turn — it found out when its next tool
+call failed. Ship-order 1 replaced that with a bounded wait for the document to
+rebind (`packages/extension/src/sw.ts#awaitRebind`), which is a better failure
+and still not an affordance: the agent still cannot say where it is going.
 
 The agent must also be told the page changed. A tool result that silently
 describes a different document than the one the agent reasoned about is the
@@ -111,15 +114,16 @@ unsound, for reasons that survive every scoping refinement:
   irreversible effect.
 - **`fill` is already data egress, not a step before it.** `page.fill`
   dispatches bubbling `input` and `change` events that the page's own scripts
-  observe (`packages/extension/src/pagetools.ts:164`, `:181`). By the time an
+  observe (`packages/extension/src/pagetools.ts#genericPageTools`). By the time an
   "always ask before Submit" policy could fire, the value has already been
   transmitted. The attack is: hostile page text tells the agent to place data
   it holds into a field; remembered `fill` writes it; the page's listener sends
   it; no later approval ever fires.
 - **The labels the agent reasons about are attacker-controlled** — ARIA
-  attributes, placeholders, names, text (`pagetools.ts:65`) — and the element
+  attributes, placeholders, names, text (`packages/extension/src/pagetools.ts#ElementRow`) — and the element
   handle proves only that the same object is still connected, not that its
-  meaning, handlers, or form destination are unchanged (`pagetools.ts:92`).
+  handlers or form destination are unchanged — it does now refuse when the
+  role or label moved (`packages/extension/src/pagetools.ts#resolveHandle`).
 
 So: **remember attachment and passive observation, not mutation.**
 
@@ -146,11 +150,12 @@ So: **remember attachment and passive observation, not mutation.**
 
 **A separate finding that changes the API, not just the policy.** Gated page
 calls and the runtime's OWN tool-permission requests currently pass through the
-same untyped boolean decider: `ApprovalPrompt` carries a summary and an
-optional call and no provenance at all
-(`packages/client/src/session.ts:59`), and both `tool.call` and
-`approval.request` route into it (`session.ts:253`, `:346`), including ACP's
-own-tool permission request (`packages/daemon/src/runtimes/acp.ts:328`). So a
+same untyped boolean decider: `ApprovalPrompt` carried a summary and an
+optional call and no provenance at all, and both `tool.call` and
+`approval.request` routed into it, including ACP's own-tool permission
+request. That was ADR-023's subject, and it shipped — the prompt now carries an
+authority domain (`packages/client/src/session.ts#ApprovalPrompt`). At the time,
+though, a
 remembered policy implemented as "a smarter askApproval" could match an
 approval that was never about the page at all. Any remembered policy therefore
 requires an extension-trusted authority domain on every approval —
@@ -185,7 +190,7 @@ so their weaknesses are the product's weaknesses. Wanted, in priority order:
   detached node must report that, not succeed quietly.
 - **Bounded, structured reads.** `page.readText` on a large document must
   degrade predictably (`MAX_TEXT` / `MAX_ELEMENTS` exist at
-  `pagetools.ts:20-21`) and say that it truncated.
+  `packages/extension/src/pagetools.ts#MAX_TEXT`) and say that it truncated.
 - **Waiting.** Real flows need "wait until this appears" more than they need
   more verbs.
 

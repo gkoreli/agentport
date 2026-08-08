@@ -10,14 +10,15 @@
 
 ## Context
 
-`packages/daemon/src/runtimes/acp.ts:169` declares:
+`packages/daemon/src/runtimes/acp.ts#clientCapabilities` declared, at the time:
 
 ```ts
 clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
 ```
 
-No `elicitation` key. And `claude-agent-acp` reads that (`acp-agent.js:4114`,
-`:4120`):
+No `elicitation` key. And `claude-agent-acp` reads that
+(`acp-agent.js#elicitationSupport`, `#disallowedTools` — a pinned dependency,
+so cite the symbols: a version bump moves every line in it):
 
 ```js
 form: !!this.clientCapabilities?.elicitation?.form,
@@ -125,7 +126,8 @@ a new trigger.
 
 Implement it as **per-attachment capability negotiation**. `AcpRuntime`
 spawns its child and calls `initialize` once per `openSession`
-(`acp.ts:114`, `:164`), so `clientCapabilities` is *already* per-attachment
+(`packages/daemon/src/runtimes/acp.ts#openSession`, which issues the
+`initialize` carrying `#clientCapabilities`), so it is *already* per-attachment
 rather than per-daemon. Declare form elicitation only for tiers that have a
 trusted surface, and the runtime's own `disallowedTools` does the rest.
 
@@ -246,7 +248,7 @@ too large to read is not a consent surface.
 
 ### R9. No secrets through a form, from day one
 
-`prior-art-synthesis.md:398-403` records that elicitation had to **ban**
+`docs/reviews/prior-art-synthesis.md` records that elicitation had to **ban**
 collecting secrets through structured forms, and says to design our surfaces
 with that ban from the start rather than retrofitting it. Taken: a form field
 is not a credential prompt, and the surfaces must not grow one. This is
@@ -264,7 +266,7 @@ The resolution is not quantitative, and it is not "bounded by the grant". It
 is structural, and it turns on a fact easy to miss: **in the delegated tier
 the site's tools are the site's own functions.** `SiteTool` carries a
 `handler` the page supplies, and the client invokes it in the page
-(`session.ts:374`). A site forging an approval for one of its own tools has
+(`packages/client/src/session.ts#onToolCall`). A site forging an approval for one of its own tools has
 gained *nothing it did not already have* — it could simply call the function.
 Those approvals do not protect the user from the site; they protect the user
 from the **agent** being talked into misusing the site's tools by hostile
@@ -281,8 +283,8 @@ That gives the general rule, of which R1 is one case:
   capability. **Also wrong, and we ship it today.**
 
 That last row is a live hole, and ADR-023 got close enough to name it without
-closing it. The daemon routes every non-`viaConnect` approval to the client
-panel (`daemon.ts:1146-1151`), and ADR-023 established that
+closing it. The daemon routed every non-`viaConnect` approval to the client
+panel, and ADR-023 established that
 `runtime_own_tool` approvals travel that same path. So in a delegated session
 **the page is asked whether the agent may use the agent's own shell** — and
 ADR-023 made the two domains *distinguishable*, so a renderer can tell the

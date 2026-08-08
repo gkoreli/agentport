@@ -980,7 +980,7 @@ built-in assistant cannot copy: it is the *same agent* the user already runs,
 with their memory, prompts, MCP servers, and files.
 
 Two things block it, both found by using it. A navigation kills the session —
-deliberately, at `packages/extension/src/sw.ts:725`, where only `from === 'page'`
+deliberately, in `packages/extension/src/sw.ts`, where only `from === 'page'`
 surfaces get orphan-and-reclaim — so the one surface built for multi-page flows
 cannot survive succeeding at a click. And every gated call re-asks, because
 nothing remembers a decision, which on a generic harness means a dialog every

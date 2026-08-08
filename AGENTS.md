@@ -159,6 +159,7 @@ npm run webmcp:harvest # our belief about the WebMCP draft, checked
 npm run wire:check # wire validation: 521 fixture cases across all 45 frames
 npm run agui:check # every emitted AG-UI event parsed by @ag-ui/core's schemas
 npm run source:check # no invisible control characters in source (a NUL got in)
+npm run docs:check   # every code citation in the docs resolves to a real symbol
 npm run typecheck  # tsc -b over all packages
 npm run deploy     # build the site + wrangler deploy
 
@@ -329,6 +330,18 @@ never leaves and the peer listens forever). See ADR-023 R8.
 - No dependency may be added to `@agentport/protocol` or `@agentport/client`
   that assumes Node. Both must run in a browser.
 - Comments explain *why* a boundary exists, not what a line does.
+- **Cite code by symbol, never by line** (`npm run docs:check` enforces it).
+  `packages/daemon/src/daemon.ts#requestApproval` resolves; the same pointer
+  written with a line number is refused — including here, which is why that
+  counterexample is not in backticks. A rule whose own statement violates it
+  teaches the copy-paste, not the rule. An audit found 27 of 33 line citations pointing at unrelated
+  code, several by 100+ lines, because every agent here edits with scripted
+  replacements and a line number is stale the moment anyone touches the file
+  above it. A symbol survives insertion and fails exactly when the prose goes
+  wrong — on a rename or a deletion. Note what the check deliberately does not
+  do: it cannot tell a *drifted* citation from a correct one, which is why the
+  form changed rather than the check getting cleverer. Verifying that a cited
+  file exists and is long enough would have passed all 27.
 
 ## Wire validation
 

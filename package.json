@@ -32,6 +32,7 @@
     "ui:smoke": "tsx scripts/ui-smoke.ts",
     "ui:extension-smoke": "tsx scripts/extension-ui-smoke.ts",
     "integration": "tsx scripts/integration.ts",
+    "docs:check": "tsx scripts/docs-check.ts",
     "source:check": "tsx scripts/source-check.ts"
   },
   "devDependencies": {

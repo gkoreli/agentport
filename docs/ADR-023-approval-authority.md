@@ -19,19 +19,21 @@ permission requests "pass through the same untyped boolean `ApprovalDecider`"
 with no authority-domain or provenance field. That is true, and it is worse
 than it sounds. Traced end to end:
 
-`ApprovalPrompt` (`packages/client/src/session.ts:60`) has exactly two fields,
-`summary` and an optional `call {name, arguments}`. Two producers reach one
+`ApprovalPrompt` (`packages/client/src/session.ts#ApprovalPrompt`) had exactly
+two fields at the time, `summary` and an optional `call {name, arguments}` —
+go and look and you will see the third one this ADR added. Two producers reach one
 consumer:
 
-- `#onToolCall` (`session.ts:331`) — a **site tool from the signed grant**,
+- `#onToolCall` (`packages/client/src/session.ts#onToolCall`) — a **site tool from the signed grant**,
   gated by `requiresApproval` or `alwaysAsk`. Its `call.name` is a granted,
   namespaced tool name.
-- `#onApproval` (`session.ts:405`) — an `approval.request` frame, passed
+- `#onApproval` (`packages/client/src/session.ts#onApproval`) — an `approval.request` frame, passed
   through verbatim.
 
 Both call `this.#decide(prompt)`. The ACP runtime's own-tool permission
-requests land on the second path (`packages/daemon/src/runtimes/acp.ts:377`),
-and the name they carry is:
+requests land on the second path
+(`packages/daemon/src/runtimes/acp.ts#requestPermission`), and the name they
+carried was:
 
 ```ts
 name: params.toolCall.title ?? 'tool',
@@ -50,12 +52,13 @@ past by an own-tool request titled after a granted tool — does not work
 against the extension today. `askApproval` in `packages/extension/src/sw.ts`
 never branches on `call.name`, never consults grant membership, and has no
 auto-approve path: it opens an extension-origin window and waits for a human.
-(The `toolNames.has(name)` checks at `sw.ts:893` and `:902` are the *dispatch*
+(The `toolNames.has(name)` checks in `packages/extension/src/sw.ts#dispatchToolCall` are the *dispatch*
 grant boundary, correctly placed; an own-tool request never reaches them
 because it is not a `tool.call`.)
 
-The real problem is one layer up, and it is worse. The consent window renders
-(`packages/extension/src/consent.ts:127`):
+The real problem is one layer up, and it is worse. The consent window rendered
+this — R4 is what put an authority line above it
+(`packages/extension/src/consent.ts#authority`):
 
 ```
 ${state.agentName} asks: ${state.summary}
@@ -128,11 +131,11 @@ ships in the same wave, not after.
 
 Explicitly, because the next reader will wonder: a granted tool's *invocation*
 can only arrive through the MCP bridge. `turn.callTool` is reachable only from
-the invoker the bridge registers (`acp.ts:163`), and the bridge only registers
+the invoker the bridge registers (`packages/daemon/src/runtimes/acp.ts#openSession`), and the bridge only registers
 the session's granted tools — so a granted call always meets the browser gate
 in `#callTool` and is stamped `site_tool`. The ACP permission path for a
 granted tool is short-circuited before it ever reaches `turn.requestApproval`
-(`acp.ts:365`, exact-name match against the grant, allow-once only).
+(`packages/daemon/src/runtimes/acp.ts#grantedMcpNames`, exact-name match against the grant, allow-once only).
 
 The residual edge is a name-normalisation mismatch: a granted tool announced
 under a name `mcpToolName()` does not produce would fall through and be
@@ -147,9 +150,11 @@ each version was wrong in a different direction.
 
 *Draft one* scoped the binding down to insurance, reasoning that `id` is a
 fresh handle so replay is unreachable. *Draft two* scoped it up after finding
-that `packages/daemon/src/runtime.ts:127-138` calls `writer.args(text)` twice
-— once to build the approval, once to build the dispatch — so the object the
-user approved is discarded and a freshly built one crosses the wire. *Draft
+that `packages/daemon/src/runtime.ts` called `writer.args(text)` twice — once
+to build the approval, once to build the dispatch — so the object the user
+approved was discarded and a freshly built one crossed the wire. (That double
+call has since been removed, so the reference runtime no longer models the
+footgun.) *Draft
 three*, after review, is the correct one, and it needs four separate
 statements because the paths do not share an answer.
 
@@ -189,19 +194,21 @@ worse than an absent field, because it stops the search.
 ### R7. Two corrections to inherited instructions, recorded rather than silent
 
 **The build order's "deploy relay first" does not apply here.**
-`prior-art-synthesis.md:606-608` says this change needs the relay deployed
+`docs/reviews/prior-art-synthesis.md` says this change needs the relay deployed
 first. That is the right general rule and the wrong call for these two frames:
 `approval.request` is in `AGENT_SEALABLE_MEMBERS` and `approval.response` in
 `CLIENT_SEALABLE_MEMBERS`, neither is a lifecycle frame, and `grep -rn
 "approval" packages/relay/src/` returns nothing. The relay sees `{t:'enc',…}`
 and routes on `s`. Endpoints deploy together; **the relay is not in that set.**
 
-**The consent review's line refs are stale.** It cites `session.ts:59`,
-`:253`, `:346` and `acp.ts:328`; the live equivalents are `session.ts:60`,
-`:338`, `:408` and `acp.ts:379`. Cite the live ones.
+**The consent review cites line numbers, and every one of them has drifted.**
+This ruling used to correct them to the then-current lines; those corrections
+were themselves wrong within days, which is the argument rather than an
+embarrassment. Cite symbols — `npm run docs:check` now refuses the other form.
 
 **And a latent liveness bug found on the way**, worth fixing in the same
-change: `acp.ts:383` puts `params.toolCall.title` into `call.name`, which the
+change: `packages/daemon/src/runtimes/acp.ts#requestPermission` put
+`params.toolCall.title` into `call.name`, which the
 schema validates against `TOOL_NAME_PATTERN`. A title containing any character
 that pattern forbids does not degrade — it rejects the whole frame, so the
 user is never asked and the agent's permission request hangs on a `Deferred`
