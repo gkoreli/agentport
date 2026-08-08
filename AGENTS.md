@@ -397,6 +397,19 @@ has fixtures.
 
 ## State of things
 
+**Landed is not shipped, and this section used to conflate them.** Everything
+below describes `main`. The deployed front door — the `connect.js` a stranger
+loads from the URL in the README, and the relay it dials — is whatever the
+last `npm run deploy` published, which is a different system whenever main has
+moved. Check before assuming: compare `PROTOCOL_VERSION` at the last release
+commit against main's, and remember that a wire change is lockstep, so the
+relay and every endpoint go together or not at all.
+
+That distinction is not bookkeeping. Requirement 6 is about people who have
+not arrived yet, and what they meet is the deployed artifact — so a fix that
+is landed and unreleased is, from the only perspective that requirement cares
+about, not a fix.
+
 Working: pairing, cert issuance and verification, directory + presence,
 capability grants with TTL, prompt streaming, plan reporting, tool-call
 round-trip, approval round-trip, cancellation, reconnect with in-place session
