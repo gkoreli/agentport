@@ -134,8 +134,28 @@ export function leftBehindByNavigation(entry: DocumentIdentity, arriving: Docume
  * over a page that published nothing, so every tool in it is ours. Anything
  * else — a site's own declarations, or WebMCP registrations the site chose to
  * publish — belongs to the site and is described as such.
+ *
+ * `from` FIRST, and it is not decoration. The `context` below is a field the
+ * PAGE authors: `sanitizeConnectRequest` passes it through as plain JSON with
+ * no key filtering, because it is meant to be surface metadata rather than an
+ * authority statement. Reading it on a page-declared surface let a site set
+ * `{source: 'page-dom'}` on its own tools and have the consent window say
+ * "your extension built this — the origin did not provide it" about a tool
+ * the origin very much provided. Display only, but it is the one line on that
+ * card the agent does not write (ADR-023 R4), and it inverted in the
+ * UNDER-warning direction.
+ *
+ * A page-tier surface can never contain a tool we synthesised — the widget is
+ * the only thing that builds them — so the tier answers this outright and the
+ * page-authored field is never consulted there. `reclaimKeyFor` above already
+ * takes `from` first for the same reason; this is that pattern, applied to
+ * the sibling that was missing it.
  */
-export function synthesisedNames(request: { tools: { name: string }[]; context?: Record<string, unknown> }): ReadonlySet<string> {
-  if (request.context?.['source'] !== 'page-dom') return new Set();
+export function synthesisedNames(
+  from: Origin,
+  request: { tools: { name: string }[]; context?: Record<string, unknown> },
+): ReadonlySet<string> {
+  if (from === 'page') return new Set();
+  if (request.context?.['source'] !== WIDGET_TOOL_SOURCE_DOM) return new Set();
   return new Set(request.tools.map((tool) => tool.name));
 }

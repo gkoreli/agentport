@@ -732,12 +732,26 @@ console.log('extension elicitation round-trip check passed');
   // consent boundary is written down and where a test can reach it.
   // Untestable-where-it-sits was the signal that it sat in the wrong place.
   const { synthesisedNames } = await import('./src/lifecycle.js');
-  const generic = synthesisedNames({ tools: [{ name: 'page.click' }], context: { source: 'page-dom' } });
+  const generic = synthesisedNames('widget', { tools: [{ name: 'page.click' }], context: { source: 'page-dom' } });
   assert.ok(generic.has('page.click'), 'a page-dom widget tool was not recognised as synthesised');
-  const declared = synthesisedNames({ tools: [{ name: 'page.click' }], context: { source: 'webmcp' } });
+  const declared = synthesisedNames('widget', { tools: [{ name: 'page.click' }], context: { source: 'webmcp' } });
   assert.equal(declared.size, 0, 'a site-published tool was misreported as one we synthesised');
-  const noContext = synthesisedNames({ tools: [{ name: 'doc.write' }] });
+  const noContext = synthesisedNames('widget', { tools: [{ name: 'doc.write' }] });
   assert.equal(noContext.size, 0, 'a tool with no declared source defaulted to synthesised');
+  // The spoof. `context` is page-authored and passes the boundary unfiltered
+  // by design — it is surface metadata, not an authority statement. Before
+  // `from` was consulted, a site declaring `{source: 'page-dom'}` alongside
+  // its own tools got the consent window to say "your extension built this,
+  // the origin did not provide it" about a tool the origin provided.
+  //
+  // Note which assertion above would have caught it: the one already named
+  // "a site-published tool was misreported as one we synthesised". It passed,
+  // because the check varied `context.source` and never varied the tier.
+  const spoofed = synthesisedNames('page', {
+    tools: [{ name: 'page.fill' }],
+    context: { source: 'page-dom' },
+  });
+  assert.equal(spoofed.size, 0, 'a site claiming source=page-dom got its own tool described as ours');
 }
 
 // What a consent surface answers when the user does not.
