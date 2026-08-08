@@ -43,6 +43,7 @@ import {
   type LogContext,
   type PlanStep,
   type ToolDefinition,
+  type AuthorityDomain,
 } from '@agentport/protocol';
 import {
   LIMITS,
@@ -60,7 +61,7 @@ import {
   type WorkerToConsent,
   type WorkerToContent,
 } from './bridge.js';
-import { leftBehindByNavigation, mayReclaim, reclaimKeyFor } from './lifecycle.js';
+import { leftBehindByNavigation, mayReclaim, reclaimKeyFor, synthesisedNames } from './lifecycle.js';
 import { loadCerts, saveCert,
   DEFAULT_RELAY_URL,
   clearResume,
@@ -471,14 +472,30 @@ function askPair(agent: { name: string; runtime: string; location?: string }): P
 function askApproval(
   origin: string,
   who: { name: string },
-  prompt: { summary: string; call?: { name: string; arguments: Record<string, unknown> } },
+  prompt: { domain: AuthorityDomain; summary: string; call?: { name: string; arguments: Record<string, unknown> } },
+  synthesised: ReadonlySet<string>,
 ): Promise<boolean> {
+  // The extension stamps this one, because the extension is the only party
+  // that knows. The client sees a tool in a grant and calls it `site_tool`;
+  // it cannot tell a tool the SITE declared from one WE synthesised over a
+  // page that declared nothing. Same rule as ADR-023 R2 — the side that knows
+  // the truth decides — applied one hop further out.
+  //
+  // This is a DISPLAY correction, not a routing one. A generic page tool
+  // routes exactly as a site tool does, because a page can already click its
+  // own buttons; what was wrong is telling the user a site lent a capability
+  // the site has never heard of.
+  const domain: AuthorityDomain =
+    prompt.domain === 'site_tool' && prompt.call && synthesised.has(prompt.call.name)
+      ? 'generic_page_tool'
+      : prompt.domain;
   const pending: PendingUi = {
     id: mintId('ui_'),
     payload: {
       kind: 'approve',
       origin,
       agentName: who.name,
+      domain,
       summary: prompt.summary,
       ...(prompt.call ? { call: prompt.call } : {}),
     },
@@ -688,7 +705,7 @@ async function openSession(
     ttlMs: request.ttlMs,
     // Approvals go to extension chrome. The decision window is independent of
     // page DOM and closing it without answering fails shut.
-    decide: (prompt) => askApproval(origin, who, prompt),
+    decide: (prompt) => askApproval(origin, who, prompt, synthesisedNames(request)),
   });
 
   const entry: SessionEntry = {
@@ -785,7 +802,7 @@ async function resumeFromStore(
       agent: record.agent,
       token: record.token,
       tools,
-      decide: (prompt) => askApproval(origin, who, prompt),
+      decide: (prompt) => askApproval(origin, who, prompt, synthesisedNames(request)),
     });
     who.name = session.info.agentName;
     const entry: SessionEntry = {

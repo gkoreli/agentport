@@ -32,6 +32,7 @@ import {
   MAX_PLAN_STEP_CHARS,
   isPromptId,
   randomId,
+  type AuthorityDomain,
   type FormField,
   type PlanStep,
   type ToolDefinition,
@@ -203,6 +204,13 @@ export type ConsentPayload =
       kind: 'approve';
       origin: string;
       agentName: string;
+      /**
+       * Which authority is being asked about (ADR-023 R4). Carried to the
+       * consent window because the window has to SAY it: `summary` is written
+       * by the agent and can be made to read like anything, so this is the
+       * one line on the card the agent does not author.
+       */
+      domain: AuthorityDomain;
       summary: string;
       call?: { name: string; arguments: Record<string, unknown> };
     };

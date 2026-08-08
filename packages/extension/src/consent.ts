@@ -116,6 +116,23 @@ const Approve = component('ap-consent-approve', () => {
       args = '';
     }
   }
+  // The one line on this card the agent does not write (ADR-023 R4). Below
+  // it, `summary` is agent-authored text steered by whatever the agent has
+  // been reading, so it can be made to read like anything at all — including
+  // like one of the site's own tools. This says which authority is actually
+  // being asked about, in words rather than an enum name.
+  //
+  // The generic case is the one that was silently wrong: a tool the EXTENSION
+  // synthesised over a page that declared nothing used to be described as
+  // something the site lent, which is false whatever the site could have done
+  // itself.
+  const authority =
+    state.domain === 'runtime_own_tool'
+      ? "Your agent's own tool, on your machine"
+      : state.domain === 'generic_page_tool'
+        ? `A tool your extension built for this page — ${state.origin} did not provide it`
+        : `A tool ${state.origin} lent your agent`;
+
   return html`
     <main>
       <header><b>AgentPort</b><span>approval</span></header>
@@ -124,6 +141,7 @@ const Approve = component('ap-consent-approve', () => {
           <b>${state.origin}</b>
           <small>Verified origin — reported by the browser, not by the page.</small>
         </div>
+        <p class="authority">${authority}</p>
         <p class="surface">${state.agentName} asks: ${state.summary}</p>
         ${when(computed(() => Boolean(args)), () => html`<pre>${args}</pre>`)}
       </section>

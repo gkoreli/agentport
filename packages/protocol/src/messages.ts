@@ -100,7 +100,7 @@ export function wireFingerprint(): string {
  * commit as the version, deliberately by hand — but unlike the version, a
  * stale value here CANNOT pass, because the check recomputes it.
  */
-export const WIRE_FINGERPRINT = 'e877e7667e5c86425b6652a2';
+export const WIRE_FINGERPRINT = '607c5d4ae8e55702d3d15121';
 
 /**
  * The wire dialect both ends must agree on, checked at `hello` before
@@ -116,18 +116,15 @@ export const WIRE_FINGERPRINT = 'e877e7667e5c86425b6652a2';
  * canonical body changed too), `domain` and `callHash` on the approval pair,
  * and the `revoke`/`revoked` and `ask`/`answer` frames.
  *
- * Known weakness, stated rather than left to be discovered: this constant is
- * HAND-MAINTAINED, which is the pattern that produced four separate defects
- * in this codebase already. Three breaking wire changes landed before anyone
- * noticed it had not moved. The structural fix is to derive it from the
- * schemas — a fingerprint over `FRAME_SCHEMAS`' types and their field shapes
- * — which needs every combinator in `schema.ts` to expose its structure, and
- * is deliberately not done here rather than done shallowly: a fingerprint
- * covering only top-level fields would have missed `grantHash`, since that
- * one is nested inside `SessionDelegation`, while still looking like a
- * guarantee.
+ * v4: `generic_page_tool` joins the AuthorityDomain set.
+ *
+ * This is no longer hand-maintained on its own: `WIRE_FINGERPRINT` above is
+ * recomputed from the schemas on every `wire:check` run, so a wire change that
+ * forgot this constant is a red build. It caught the v4 change on the first
+ * run after it was written — which is the only evidence worth having that a
+ * guard works.
  */
-export const PROTOCOL_VERSION = 'agentport/3';
+export const PROTOCOL_VERSION = 'agentport/4';
 
 export type Hex = string;
 
@@ -853,12 +850,33 @@ export type ToolResult = Infer<typeof ToolResult>;
  *
  * Closed, because an open string is one more thing a peer self-declares, and
  * because whoever renders this has to be able to say something true about it.
- * `site_tool` is bounded by the signed grant; `runtime_own_tool` is the
- * agent's own capability on the user's machine and is bounded by nothing the
- * site can see. Those are different questions and a human must be asked them
- * differently.
+ *
+ * - `site_tool` — the site declared it and lent it. Bounded by the signed
+ *   grant, and the site is a party to the whole exchange.
+ * - `generic_page_tool` — the EXTENSION synthesised it over a page that
+ *   declared nothing. The site is not a party and has never heard of it.
+ * - `runtime_own_tool` — the agent's own capability on the user's machine,
+ *   bounded by nothing the site can see.
+ *
+ * Three different questions, and a human has to be asked them differently.
+ *
+ * `generic_page_tool` exists for a DISPLAY reason, not a routing one, and the
+ * distinction is what keeps it small. Routing asks "does letting a page answer
+ * this create escalation?", and for a generic click the answer is no — a page
+ * can click its own buttons with three lines of script, so the approval never
+ * protected the user from the site. Display asks what the user is being told
+ * they are authorising, and calling it a tool the site lent is FALSE whether
+ * or not the site could have done it itself. A true statement about capability
+ * does not license a false statement about provenance.
+ *
+ * So this member routes exactly as `site_tool` does. That conclusion is
+ * CONTINGENT, not a property of the domain: it holds because the widget tier's
+ * answer surface is extension chrome. If that tier ever gains a page-answered
+ * decider, the party answering would no longer hold the capability it answers
+ * about, and routing would have to diverge for the same reason it did for
+ * `runtime_own_tool`.
  */
-export const AuthorityDomain = en('site_tool', 'runtime_own_tool');
+export const AuthorityDomain = en('site_tool', 'generic_page_tool', 'runtime_own_tool');
 export type AuthorityDomain = Infer<typeof AuthorityDomain>;
 
 export const ApprovalRequest = obj({

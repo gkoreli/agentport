@@ -695,4 +695,25 @@ console.log('extension elicitation round-trip check passed');
   );
 }
 
+// The domain the consent window shows, which is the whole reason the third
+// member exists — routing is unchanged, honesty is not.
+{
+  // No `.catch(() => skip)`. The first version of this had one and imported
+  // from sw.ts, which touches `self` at module load and cannot be imported in
+  // Node — so the assertions never ran and the check reported green. Rule 1
+  // catching me in the same file where I was writing about rule 1.
+  //
+  // The fix was not to stub `self`: this is a pure classification with no
+  // worker dependency, so it belongs beside the other pure rules, where the
+  // consent boundary is written down and where a test can reach it.
+  // Untestable-where-it-sits was the signal that it sat in the wrong place.
+  const { synthesisedNames } = await import('./src/lifecycle.js');
+  const generic = synthesisedNames({ tools: [{ name: 'page.click' }], context: { source: 'page-dom' } });
+  assert.ok(generic.has('page.click'), 'a page-dom widget tool was not recognised as synthesised');
+  const declared = synthesisedNames({ tools: [{ name: 'page.click' }], context: { source: 'webmcp' } });
+  assert.equal(declared.size, 0, 'a site-published tool was misreported as one we synthesised');
+  const noContext = synthesisedNames({ tools: [{ name: 'doc.write' }] });
+  assert.equal(noContext.size, 0, 'a tool with no declared source defaulted to synthesised');
+}
+
 console.log('page harness check passed');

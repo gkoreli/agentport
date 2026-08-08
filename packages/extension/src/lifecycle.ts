@@ -126,3 +126,16 @@ export function leftBehindByNavigation(entry: DocumentIdentity, arriving: Docume
   if (entry.frameId !== 0 || entry.tabId !== arriving.tabId) return false;
   return entry.origin !== arriving.origin;
 }
+
+/**
+ * Tool names this extension SYNTHESISED, rather than ones the site declared.
+ *
+ * The connect request says which: a `page-dom` widget is the generic harness
+ * over a page that published nothing, so every tool in it is ours. Anything
+ * else — a site's own declarations, or WebMCP registrations the site chose to
+ * publish — belongs to the site and is described as such.
+ */
+export function synthesisedNames(request: { tools: { name: string }[]; context?: Record<string, unknown> }): ReadonlySet<string> {
+  if (request.context?.['source'] !== 'page-dom') return new Set();
+  return new Set(request.tools.map((tool) => tool.name));
+}
