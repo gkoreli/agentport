@@ -2,8 +2,12 @@
 
 **Bring your own agent to any website.**
 
+```html
+<script src="https://agentport.gogakoreli.workers.dev/connect.js"></script>
+```
+
 ```js
-const session = await navigator.agent.connect({
+const session = await AgentPort.connect({
   name: 'Inkwell',
   tools: [
     {
@@ -19,7 +23,16 @@ const session = await navigator.agent.connect({
 await session.prompt('Tighten the opening paragraph.');
 ```
 
-That is the entire integration a website writes. No API key, no model choice,
+That is the entire integration a website writes.
+
+`AgentPort.connect` is the call to write, because it works whether or not the
+user has anything installed: it prefers an installed wallet, falls back to a
+popup on the wallet's own origin, and falls back again to a connect code. The
+eventual shape is `navigator.agent.connect(...)` with the same request — that
+is what an installed wallet provides today and what we would like a browser to
+provide one day. **Do not call `navigator.agent` directly**: it is undefined
+for every user who has installed nothing, which is most of them, and that is
+the case the fallback ladder exists for. No API key, no model choice,
 no inference bill. The user picks one of *their own* agents — running on their
 VPS, on their subscription, with their memory, prompts, and MCP servers — and
 the site lends it a few tools for the length of the session.
