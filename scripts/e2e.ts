@@ -108,6 +108,47 @@ console.log('0. secure channel state');
   check('associated-data mismatch fails authentication', wrongContext.length > 0, wrongContext);
 }
 
+// The two variables that make the runtime pluggable. NORTH-STAR counts
+// "someone swaps in a runtime we have never heard of" as a signal this
+// worked, and the documented way is two env vars. They are a PAIR — one names
+// a program, the other names that program's arguments — and they used to
+// default INDEPENDENTLY, in three copies across two CLIs. So
+// `AGENTPORT_ACP_COMMAND=goose` alone spawned
+// `goose -y @agentclientprotocol/claude-agent-acp`: goose carrying Claude
+// Code's npx arguments, failing far from the cause. It is the obvious half to
+// set, which is what makes it worth refusing rather than guessing at.
+console.log('\n0a2. swapping the runtime');
+{
+  const { resolveAcpCommand } = await import('../packages/daemon/src/acp-command.js');
+  const unset = resolveAcpCommand({});
+  check(
+    'neither set is the documented default, Claude Code over npx',
+    typeof unset !== 'string' && unset.command === 'npx' && unset.args.includes('@agentclientprotocol/claude-agent-acp'),
+    unset,
+  );
+  const both = resolveAcpCommand({ AGENTPORT_ACP_COMMAND: 'goose', AGENTPORT_ACP_ARGS: 'acp' });
+  check(
+    'both set swaps the runtime wholesale, with no Claude arguments left behind',
+    typeof both !== 'string' &&
+      both.command === 'goose' &&
+      both.args.join(' ') === 'acp' &&
+      !both.args.some((arg) => arg.includes('claude')),
+    both,
+  );
+  // An agent that takes no arguments must be able to SAY so: "unset" cannot
+  // mean both "I have none" and "I forgot".
+  const none = resolveAcpCommand({ AGENTPORT_ACP_COMMAND: 'my-agent', AGENTPORT_ACP_ARGS: '' });
+  check('an agent with no arguments says so explicitly', typeof none !== 'string' && none.args.length === 0, none);
+  for (const half of [{ AGENTPORT_ACP_COMMAND: 'goose' }, { AGENTPORT_ACP_ARGS: 'acp' }]) {
+    const refused = resolveAcpCommand(half);
+    check(
+      `half-configured (${Object.keys(half)[0] ?? '?'}) is refused, not guessed at`,
+      typeof refused === 'string' && refused.includes('AGENTPORT_ACP_COMMAND') && refused.includes('AGENTPORT_ACP_ARGS'),
+      refused,
+    );
+  }
+}
+
 console.log('\n0b. official MCP transport');
 {
   const bridgeLogs: LogEntry[] = [];

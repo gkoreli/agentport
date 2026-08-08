@@ -406,7 +406,7 @@ Evidence: `npm run wire:check` — 521 fixture cases across all 45 frame types
 (valid, boundary-accepted, missing/unknown/wrong-type/oversize/deep, and raw
 hostile seeds including non-canonical and `__proto__` smuggles), a coverage
 gate over `FRAME_SCHEMAS`, programmatic bounds, and sealed-path checks on real
-crypto. `npm run e2e` — 170 checks over real sockets. `npm run integration`
+crypto. `npm run e2e` — 175 checks over real sockets. `npm run integration`
 against a local relay — full ACP-shaped stack. `npm run ui:smoke` — 49 checks.
 `npm run typecheck` plus the four out-of-references projects and
 `npm run check:extension`.

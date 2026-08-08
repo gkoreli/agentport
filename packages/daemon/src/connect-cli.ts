@@ -11,6 +11,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { AgentDaemon } from './daemon.js';
+import { resolveAcpCommand } from './acp-command.js';
 import { createTerminalAsk } from './terminal-ask.js';
 import { loadIdentity, saveIdentity } from './identity.js';
 import { RUNTIMES, registerRuntime } from './runtime.js';
@@ -42,16 +43,20 @@ const relayUrl = process.env.AGENTPORT_RELAY ?? 'wss://agentport.gogakoreli.work
 const identityPath = process.env.AGENTPORT_IDENTITY ?? join(homedir(), '.agentport', 'agent.json');
 const runtimeName = process.env.AGENTPORT_RUNTIME ?? 'claude-code';
 
+const acp = resolveAcpCommand(process.env);
+if (typeof acp === 'string') {
+  log.error(acp);
+  process.exit(1);
+}
+
 const bridge = new McpBridge();
 for (const name of ['claude-code', 'acp']) {
   registerRuntime(
     name,
     () =>
       new AcpRuntime({
-        command: process.env.AGENTPORT_ACP_COMMAND ?? 'npx',
-        args: (process.env.AGENTPORT_ACP_ARGS ?? '-y @agentclientprotocol/claude-agent-acp')
-          .split(' ')
-          .filter(Boolean),
+        command: acp.command,
+        args: acp.args,
         cwd: process.env.AGENTPORT_AGENT_CWD ?? process.cwd(),
         bridge,
       }),

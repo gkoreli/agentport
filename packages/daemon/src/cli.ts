@@ -2,6 +2,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { AgentDaemon } from './daemon.js';
+import { resolveAcpCommand } from './acp-command.js';
 import { createTerminalAsk } from './terminal-ask.js';
 import { loadIdentity, saveIdentity } from './identity.js';
 import { pairingControlPath, readPairingControl, writePairingControl } from './pairing-control.js';
@@ -23,14 +24,20 @@ process.on('unhandledRejection', (err) => {
 });
 
 // One bridge per daemon; each session gets its own token-scoped endpoint on it.
+const acp = resolveAcpCommand(process.env);
+if (typeof acp === 'string') {
+  log.error(acp);
+  process.exit(1);
+}
+
 const bridge = new McpBridge();
 
 registerRuntime(
   'claude-code',
   () =>
     new AcpRuntime({
-      command: process.env.AGENTPORT_ACP_COMMAND ?? 'npx',
-      args: (process.env.AGENTPORT_ACP_ARGS ?? '-y @agentclientprotocol/claude-agent-acp').split(' '),
+      command: acp.command,
+      args: acp.args,
       cwd: process.env.AGENTPORT_AGENT_CWD ?? process.cwd(),
       bridge,
     }),
@@ -41,8 +48,8 @@ registerRuntime(
   'acp',
   () =>
     new AcpRuntime({
-      command: process.env.AGENTPORT_ACP_COMMAND ?? 'npx',
-      args: (process.env.AGENTPORT_ACP_ARGS ?? '-y @agentclientprotocol/claude-agent-acp').split(' ').filter(Boolean),
+      command: acp.command,
+      args: acp.args,
       cwd: process.env.AGENTPORT_AGENT_CWD ?? process.cwd(),
       bridge,
     }),

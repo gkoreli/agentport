@@ -160,7 +160,7 @@ Open the demo, hit **Pair a new agent**, paste the code, then **Connect
 agent**. The daemon's pairing link (`/pair#code=…`) auto-fills the dialog.
 
 ```bash
-npm run e2e        # full loop over real sockets, no browser, 170 checks
+npm run e2e        # full loop over real sockets, no browser, 175 checks
 npm run webmcp:harvest # our belief about the WebMCP draft, checked
 npm run wire:check # wire validation: 521 fixture cases across all 45 frames
 npm run agui:check # every emitted AG-UI event parsed by @ag-ui/core's schemas
@@ -240,6 +240,15 @@ and it is a thing a person does — periodically, from a temp directory.
 Env, daemon: `AGENTPORT_RELAY`, `AGENTPORT_IDENTITY`, `AGENTPORT_RUNTIME`,
 `AGENTPORT_NAME`, `AGENTPORT_LOCATION`, and — the pair that make the runtime
 actually pluggable — `AGENTPORT_ACP_COMMAND` / `AGENTPORT_ACP_ARGS`.
+
+Those last two are a **pair, and setting one is refused rather than guessed
+at.** One names a program and the other names that program's arguments, so
+defaulting them independently — which is what three copies across two CLIs
+used to do — meant `AGENTPORT_ACP_COMMAND=goose` on its own spawned
+`goose -y @agentclientprotocol/claude-agent-acp`: goose carrying Claude Code's
+npx arguments, failing somewhere far from the cause. An agent that genuinely
+takes none says so with `AGENTPORT_ACP_ARGS=`, because "unset" cannot mean
+both "I have none" and "I forgot".
 
 Env, relay: `AGENTPORT_RELAY_HOST` (default `127.0.0.1`) and
 `AGENTPORT_RELAY_PORT` (default `8787`). These two are what make self-hosting
@@ -521,7 +530,7 @@ Working: pairing, cert issuance and verification, directory + presence,
 capability grants with TTL, prompt streaming, plan reporting, tool-call
 round-trip, approval round-trip, cancellation, reconnect with in-place session
 resume, session teardown, revocation, authority-tagged approvals, the agent
-asking its own user a question, and the full demo UI. 170 e2e checks and 521
+asking its own user a question, and the full demo UI. 175 e2e checks and 521
 wire-validation cases pass.
 
 Not built yet, in rough priority order:
