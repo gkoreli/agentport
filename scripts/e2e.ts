@@ -137,9 +137,18 @@ console.log('\n0b. official MCP transport');
   await mcp.connect(transport);
   const listed = await mcp.listTools();
   check('official SDK lists the temporary grant', listed.tools.map((tool) => tool.name).join(',') === 'page_read,page_slow');
-  const read = await mcp.callTool({ name: 'page_read', arguments: {} });
+  // A canary through the REAL argument path. The two log assertions below
+  // are named "without arguments", and until this existed they only read
+  // `data.tool` — with both calls made using `arguments: {}`, so an
+  // implementation that logged every argument verbatim had nothing visible
+  // to leak and both checks stayed green. Tool arguments carry document
+  // text, form values, whatever the grant lends; AGENTS.md's rule that
+  // attacker bytes never reach a log had exactly one check naming it and
+  // that check could not see the leak.
+  const ARG_CANARY = 'canary-9f3a-must-never-be-logged';
+  const read = await mcp.callTool({ name: 'page_read', arguments: { note: ARG_CANARY } });
   check('official SDK returns structured tool content', (read.structuredContent as Record<string, unknown> | undefined)?.['text'] === 'ok', read);
-  await mcp.callTool({ name: 'page_slow', arguments: {} }, undefined, { timeout: 30 }).catch(() => {});
+  await mcp.callTool({ name: 'page_slow', arguments: { note: ARG_CANARY } }, undefined, { timeout: 30 }).catch(() => {});
   const didCancel = await Promise.race([
     cancelled.promise,
     new Promise<false>((resolve) => setTimeout(() => resolve(false), 500)),
@@ -149,10 +158,17 @@ console.log('\n0b. official MCP transport');
   // MCP request handler's catch block; one event-loop turn joins that causal
   // chain before inspecting the emitted terminal span.
   await new Promise<void>((resolve) => setImmediate(resolve));
-  check('MCP logs completed tool spans without arguments', bridgeLogs.some((entry) =>
+  check('MCP logs completed tool spans', bridgeLogs.some((entry) =>
     entry.message === 'MCP tool call completed' && entry.data?.['tool'] === 'page.read'));
-  check('MCP logs cancelled tool spans without arguments', bridgeLogs.some((entry) =>
+  check('MCP logs cancelled tool spans', bridgeLogs.some((entry) =>
     entry.message === 'MCP tool call cancelled' && entry.data?.['tool'] === 'page.slow'));
+  // The property the two above are named for, now actually observed: the whole
+  // emitted span, serialised, must not contain what the caller passed.
+  check(
+    'no bridge log entry carries a tool argument',
+    !bridgeLogs.some((entry) => JSON.stringify(entry).includes(ARG_CANARY)),
+    bridgeLogs.filter((entry) => JSON.stringify(entry).includes(ARG_CANARY)),
+  );
   await mcp.close();
   await bridge.stop();
 }
@@ -384,6 +400,8 @@ console.log('\n8. drop-in connect (no wallet in the page)');
 doc.text = 'Before.';
 let offered: { surface: string; tools: number } | null = null;
 const localApprovals: string[] = [];
+/** Flipped below: nothing in any suite had ever had the owner say NO. */
+let ownerSaysYes = true;
 
 const dropInAgentKeys = generateKeyPair();
 const dropInDaemon = new AgentDaemon({
@@ -400,9 +418,11 @@ const dropInDaemon = new AgentDaemon({
     offered = { surface: offer.surface.name, tools: offer.grant.tools.length };
     return true;
   },
-  onLocalApproval: async (summary) => {
+  // `(domain, summary, call)`. Destructuring just `(summary)` collected the
+  // DOMAIN here, so every failure detail this array printed was mislabeled.
+  onLocalApproval: async (_domain, summary) => {
     localApprovals.push(summary);
-    return true;
+    return ownerSaysYes;
   },
 });
 await dropInDaemon.start();
@@ -433,6 +453,26 @@ check('session opened without any cert', dropInSession.info.agentName === 'Termi
 await dropInSession.prompt('Add a line.');
 check('gated write was approved by the owner, not the page', localApprovals.length > 0, localApprovals);
 check('document changed', doc.text.endsWith('Add a line.'), doc.text);
+
+// The owner saying NO — the other half of the consent story, and until now
+// not exercised anywhere in any suite. Every `onLocalApproval` across every
+// check returned `true`, so deleting the daemon's `if (!approved) throw`
+// would have kept all of them green: the owner is still ASKED, the document
+// still changes, and a terminal decline is silently ignored in the shipped
+// product.
+{
+  const beforeDecline = doc.text;
+  const askedBefore = localApprovals.length;
+  ownerSaysYes = false;
+  await dropInSession.prompt('Add another line.');
+  check('the owner was asked again', localApprovals.length > askedBefore, localApprovals.length);
+  check(
+    'and saying no actually stops the write',
+    doc.text === beforeDecline,
+    { before: beforeDecline, after: doc.text },
+  );
+  ownerSaysYes = true;
+}
 
 // An approval the widget never redeems must not stay redeemable. Unlike a
 // delegation it carries no origin, so revocation cannot reach it (ADR-022) —
