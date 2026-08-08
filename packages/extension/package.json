@@ -6,12 +6,12 @@
   "scripts": {
     "build": "tsx build.ts",
     "typecheck": "tsc -p tsconfig.json",
-    "check": "tsx check.ts"
+    "check": "tsx build.ts && tsx check.ts"
   },
   "dependencies": {
     "@agentport/client": "0.0.1",
     "@agentport/protocol": "0.0.1",
-    "@nisli/core": "file:../../../nisli/packages/core"
+    "@nisli/core": "^0.54.1"
   },
   "devDependencies": {
     "@types/chrome": "^0.0.287"

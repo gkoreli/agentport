@@ -37,6 +37,7 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260702.1",
+    "@nisli/core": "^0.54.1",
     "@nisli/ui": "^0.4.1",
     "@tailwindcss/cli": "^4.3.3",
     "@types/node": "^22.10.0",

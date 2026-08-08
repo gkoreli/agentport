@@ -217,6 +217,26 @@ commands they remembered. When you add a check harness, it belongs to that
 config, and the one exclusion in it is a file that already has its own
 project, not an exemption.
 
+**A clean clone has to work, and until it was tried it did not.**
+`packages/extension/package.json` declared `@nisli/core` as
+`file:../../../nisli/packages/core` — a path OUTSIDE the repository, pointing
+at a sibling checkout. Everything else that imports it (the site, the wallet,
+`src/nisli-ui`, `scripts/ui-smoke.ts`) resolved it by accidental hoisting, and
+the root package.json declared a different package, `@nisli/ui`, which one
+file uses.
+
+On any other machine `npm install` **exits 0 and creates a dangling symlink**,
+so the failure surfaced much later as `MODULE_NOT_FOUND` in three gates. The
+package is published — `@nisli/core@0.54.1`, exactly what the checkout held —
+so it is now declared where it is used, and the lockfile no longer carries a
+`link: true` to an out-of-tree path. If you want to co-develop nisli, that is
+`npm link` on your own machine, not a committed dependency.
+
+This is requirement 6's blind spot pointed at contributors instead of
+visitors: everyone here has the sibling checkout, so nobody was ever in the
+state where it is missing. `git clone && npm ci && <every gate>` is the check,
+and it is a thing a person does — periodically, from a temp directory.
+
 Env: `AGENTPORT_RELAY`, `AGENTPORT_IDENTITY`, `AGENTPORT_RUNTIME`,
 `AGENTPORT_NAME`, `AGENTPORT_LOCATION`.
 
