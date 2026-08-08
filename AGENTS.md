@@ -545,9 +545,25 @@ Not built yet, in rough priority order:
 2. ~~End-to-end encryption.~~ **Done.** See "Transport" below — X25519 +
    HKDF + XChaCha20-Poly1305, ephemeral per attachment, fingerprint words on
    both consent surfaces, on-path-observer test in e2e section 10.
-3. **Extension packaging.** The wallet lives in the page today, which is only
-   acceptable for a demo — the page can reach the user key. Move it behind an
-   extension boundary with `postMessage`.
+3. **Extension DISTRIBUTION** — the boundary itself is built. This entry used
+   to read "the wallet lives in the page today, which is only acceptable for a
+   demo — the page can reach the user key. Move it behind an extension
+   boundary with `postMessage`." That is no longer where the key lives, and
+   leaving it as the top open item points the next person at work already
+   done.
+
+   Where the user key actually is, per tier: the extension's service worker
+   (`sw.ts#userSecretKey`) when one is installed; the hosted wallet's own
+   origin (`wallet/src/app.ts`) when one is not. `site/src/connect.ts` builds
+   its `AgentWallet` with either a *delegate* key — short-lived, origin-bound,
+   revocable — or a fresh authority-free key for the connect tier. The panel
+   says so itself: "no key, no `AgentWallet`, no picker, no consent". The one
+   page that still holds a user key is `examples/inkwell`, the local-only
+   demo, which is what it is for.
+
+   What is genuinely left is DISTRIBUTION: there is no Chrome Web Store
+   listing, so the extension is a load-unpacked build and the README says so
+   rather than implying a link. That is a release decision, not engineering.
 
    Note what this does *not* block: `#trustedSurfaces` keys on DELEGATION, not
    on the wallet's implementation, so the extension already counts as a
