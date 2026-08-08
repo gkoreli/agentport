@@ -319,21 +319,27 @@ export function resolveHandle(value: unknown): Element {
   return el;
 }
 
-/** Human phrasing for the approval card, so the user is not reading a handle. */
-export function describeCall(name: string, args: Record<string, unknown>): string | undefined {
-  try {
-    switch (name) {
-      case 'page.fill':
-        return `Type into “${label(resolveHandle(args['element']))}”`;
-      case 'page.click':
-        return `Click “${label(resolveHandle(args['element']))}”`;
-      default:
-        return undefined;
-    }
-  } catch {
-    return undefined;
-  }
-}
+/*
+ * There was a `describeCall()` here — "Click “Confirm purchase”" instead of
+ * `{"element":"g3e12"}` on the approval card. It had ZERO callers, and
+ * packages/extension/README.md claimed the card could already do it.
+ *
+ * Deleted rather than wired up, because wiring it up is not a one-liner and
+ * the shape of the difficulty is worth keeping:
+ *
+ * - The description has to be computed where the DOM is, in the isolated
+ *   world, and the card renders in the extension origin. So it is a round
+ *   trip and a message type, not a function call.
+ * - `resolveHandle` now REFUSES when an element's role or label changed since
+ *   it was listed. The deleted version swallowed that in a bare `catch {}`
+ *   and returned undefined — so it would have gone quiet in exactly the case
+ *   where naming the element matters most, and the card would have silently
+ *   fallen back to the handle at the moment the page moved underneath it.
+ *
+ * Worth building; ADR-023 R4 is the argument (the card must say true things
+ * in words a human recognises). Not worth leaving a decoration in the tree
+ * pretending it is built.
+ */
 
 const objectSchema = (properties: Record<string, unknown>, required: string[] = []) => ({
   type: 'object',
