@@ -25,7 +25,7 @@ capabilities to whatever agent the platform supplies. AgentPort lets the
 - Not a workspace. The agent isn't a member of anything — it's attached and
   then detached.
 - Not a new tool-description format. Long term the site's tools should come
-  from WebMCP (`navigator.modelContext`); `SiteTool` is shaped to match.
+  from WebMCP (`document.modelContext`); `SiteTool` is shaped to match.
 
 ## Architecture
 
@@ -142,6 +142,7 @@ agent**. The daemon's pairing link (`/pair#code=…`) auto-fills the dialog.
 
 ```bash
 npm run e2e        # full loop over real sockets, no browser, 136 checks
+npm run webmcp:harvest # our belief about the WebMCP draft, checked
 npm run wire:check # wire validation: 515 fixture cases across all 45 frames
 npm run agui:check # every emitted AG-UI event parsed by @ag-ui/core's schemas
 npm run typecheck  # tsc -b over all packages
@@ -412,9 +413,15 @@ Not built yet, in rough priority order:
    self-referential argument). Extension packaging is what turns that row from
    *vacuously* safe into *genuinely* safe, and needs no policy change when it
    lands.
-4. ~~WebMCP interop.~~ **Done.** Both connect.js and the extension harvest
-   `document.modelContext` registrations (with the deprecated
-   `navigator.modelContext` fallback) into `SiteTool`s at attachment time.
+4. **WebMCP interop — partial, and deliberately so.** Both connect.js and the
+   extension harvest `document.modelContext` registrations (with the deprecated
+   `navigator.modelContext` fallback) into `SiteTool`s at attachment time, and
+   every harvested tool is gated: a page authors the metadata, so a page cannot
+   decide what needs approving. What we do NOT implement is enumerated in
+   `WEBMCP_NOT_IMPLEMENTED` (`packages/client/src/webmcp.ts`), which is the
+   single source for the negative claim — ADR-006 points at it rather than
+   restating it. The old "every WebMCP-adopting site becomes compatible" was
+   withdrawn: it was false, and it is why nobody looked for five months.
 5. ~~Revocation.~~ **Done (ADR-022).** The revocation object is the
    `SessionDelegation`, addressed by its origin, and a revocation is a
    *tombstone* (`{origin, at}` refuses delegations issued at or before `at`),

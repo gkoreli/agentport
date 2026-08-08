@@ -19,3 +19,20 @@ export {
   type WalletUi,
 } from './provider.js';
 export { defaultSocketFactory, type SocketFactory, type WebSocketLike } from './socket.js';
+export {
+  WEBMCP,
+  WEBMCP_NOT_IMPLEMENTED,
+  createWebMcpRegistry,
+  readRegistration,
+  toSiteTool,
+  type ModelContextLike,
+  type RefusalReason,
+  type RegistrationRead,
+  type WebMcpAnnotations,
+  type WebMcpRegisterOptions,
+  type WebMcpRegisteredTool,
+  type WebMcpRegistration,
+  type WebMcpRegistry,
+  type WebMcpRegistryOptions,
+  type WebMcpTool,
+} from './webmcp.js';

@@ -16,6 +16,7 @@
     "daemon": "tsx packages/daemon/src/cli.ts",
     "demo": "tsx examples/inkwell/src/serve.ts",
     "e2e": "tsx scripts/e2e.ts",
+    "webmcp:harvest": "tsx scripts/webmcp-harvest.ts",
     "wire:check": "tsx scripts/wire-check.ts",
     "acp:check": "tsx scripts/acp-permission-check.ts",
     "agui:check": "tsx packages/agui/check.ts",

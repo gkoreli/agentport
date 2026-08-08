@@ -429,7 +429,11 @@ const { ENVELOPE, TO_PAGE, TO_WALLET } = await import('./src/bridge.js');
 
 const win = new Window({ url: 'https://elicit.test/' });
 const globals = globalThis as Record<string, unknown>;
-for (const key of ['window', 'document', 'navigator', 'MessageEvent', 'CustomEvent', 'Event']) {
+// `location` joined this list when the WebMCP shim began scoping its registry
+// to the page's origin at module load — inpage.ts installs the shim as a side
+// effect of being imported, so a global missing here fails before any check
+// runs, with a ReferenceError rather than an assertion.
+for (const key of ['window', 'document', 'navigator', 'location', 'MessageEvent', 'CustomEvent', 'Event']) {
   globals[key] = (win as unknown as Record<string, unknown>)[key];
 }
 // esbuild substitutes this at build time; the source reads it as a global.

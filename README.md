@@ -36,7 +36,7 @@ one, and where one is good we use it rather than restate it —
 
 | layer | what we use | what we add |
 |---|---|---|
-| tool surface | WebMCP (`navigator.modelContext`) | grants scoped to *one session with one agent* |
+| tool surface | WebMCP (`document.modelContext`) | grants scoped to *one session with one agent* |
 | conversation | ACP / AG-UI shaped events | — |
 | identity | Ed25519 certs today, NIP-46 / passkeys next | user→agent ownership binding |
 | transport | WebSocket relay | pairing, presence, per-site revocation |
