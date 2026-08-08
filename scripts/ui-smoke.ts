@@ -199,7 +199,11 @@ class FakeRelay {
   #channel: ReturnType<typeof deriveSealChannel> | undefined;
 
   /** Send a session content frame the way a real daemon would: sealed. */
-  sealedReply(frame: { t: string; s: string }) {
+  // Wide on purpose: this helper seals whatever a check wants to put on the
+  // wire, including deliberately hostile shapes. It was `{t, s}`, which one
+  // call site had already worked around with `as never` — the signature was
+  // wrong, not the call.
+  sealedReply(frame: Record<string, unknown> & { t: string; s: string }) {
     if (!this.#channel) throw new Error('sealedReply before the handshake');
     this.reply(seal(this.#channel.send, frame as never));
   }
@@ -257,12 +261,12 @@ check('no function source leaked into the DOM', !/=>/.test(rendered()), rendered
 check('empty state is gone once connected', !/Bring your own agent/.test(rendered()), rendered().slice(0, 200));
 
 console.log('\n5. panel AG-UI path');
-const panelInput = clickMount.querySelector('[data-slot="chat-composer-input"]') as HTMLTextAreaElement;
+const panelInput = clickMount.querySelector('[data-slot="chat-composer-input"]') as unknown as HTMLTextAreaElement;
 panelInput.value = 'Tighten the opening.';
 panelInput.dispatchEvent(new Event('input', { bubbles: true }));
 flush();
 const encryptedBeforePrompt = FakeRelay.frames.filter((type) => type === 'enc').length;
-(clickMount.querySelector('[data-slot="chat-composer-form"]') as HTMLFormElement).dispatchEvent(
+(clickMount.querySelector('[data-slot="chat-composer-form"]') as unknown as HTMLFormElement).dispatchEvent(
   new Event('submit', { bubbles: true, cancelable: true }),
 );
 await Promise.resolve();
@@ -273,7 +277,7 @@ check('panel run is busy before the first agent token', clickMount.querySelector
 check('Stop is available before the first agent token', clickMount.querySelector('[data-slot="chat-generation-stop"]') !== null);
 const encryptedAfterPrompt = FakeRelay.frames.filter((type) => type === 'enc').length;
 check('panel prompt crossed the sealed session', encryptedAfterPrompt > encryptedBeforePrompt, FakeRelay.frames);
-(clickMount.querySelector('[data-slot="chat-generation-stop"]') as HTMLButtonElement).click();
+(clickMount.querySelector('[data-slot="chat-generation-stop"]') as unknown as HTMLButtonElement).click();
 await Promise.resolve();
 check(
   'early Stop emits a sealed cancellation',
@@ -285,7 +289,7 @@ console.log('\n5b. the agent plan renders as a live checklist');
 // A plan is not a transcript entry: it is the agent's CURRENT intention, so a
 // second snapshot must replace the first in place rather than stack beside it.
 const planFrame = (steps: { text: string; status: string; priority?: string }[]) =>
-  FakeRelay.latest!.sealedReply({ t: 'plan', s: 'sess_test', promptId: 'p_ui', steps } as never);
+  FakeRelay.latest!.sealedReply({ t: 'plan', s: 'sess_test', promptId: 'p_ui', steps });
 
 planFrame([
   { text: 'Read the opening paragraph', status: 'active', priority: 'high' },
@@ -407,7 +411,7 @@ check('suggestions are actionable buttons', chatMount.querySelector('[data-slot=
 
 chatBusy.value = true;
 flush();
-(chatMount.querySelector('[data-slot="chat-suggestion"]') as HTMLButtonElement).click();
+(chatMount.querySelector('[data-slot="chat-suggestion"]') as unknown as HTMLButtonElement).click();
 await Promise.resolve();
 flush();
 check('busy suggestion becomes a visible queue item', chatMount.querySelector('[data-slot="chat-queued"]') !== null);

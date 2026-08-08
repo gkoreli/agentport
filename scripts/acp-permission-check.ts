@@ -36,7 +36,7 @@ const tools = [{ name: 'doc.read', description: 'Read the document', inputSchema
 const grant = { tools, alwaysAsk: [], expiresAt: Date.now() + 60_000 };
 const surface = { name: 'Hostile Permission Check', origin: 'https://example.test' };
 
-await runtime.openSession({ surface, grant, tools });
+await runtime.openSession({ surface, grant, tools, policy: { mayAsk: false, mayUseOwnTools: false } });
 
 const said: string[] = [];
 const approvals: string[] = [];
@@ -50,6 +50,9 @@ const ctx: TurnContext = {
   tools,
   say: (text) => said.push(text),
   think: () => {},
+  plan: () => {},
+  // This tier may not be asked, and the check asserts that nothing tries.
+  ask: () => Promise.resolve(undefined),
   callTool: () => Promise.resolve({}),
   requestApproval: (summary) => {
     approvals.push(summary);

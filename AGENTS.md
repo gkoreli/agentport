@@ -186,6 +186,21 @@ type 'PageSession'` errors sat there from the day `AgentSessionHandle` gained
 reported anything. **A package that typechecks nowhere is where a shipped bug
 hides**, and the only reliable fix is a command someone runs.
 
+`scripts/` was the SIXTH one, and nobody had noticed — including whoever wrote
+the paragraph above. Every check in this repo lives there, `scripts/e2e.ts`
+most of all, and `tsx` strips types without checking them, so the suite that
+proves everything else was itself unproven. It hid exactly what that sentence
+predicts: an `attachmentPolicy(false)` left behind by a signature change, so a
+fixture's policy destructured to `undefined`; six relays built with a `log`
+option that does not exist, quietly logging when the check meant to silence
+them; `AskQuestion` used as a type and never imported; a `socketFactory` a
+daemon never reads. All green, all invisible.
+
+So it is NOT a seventh line on that list. `npm run typecheck` now runs
+`tsconfig.scripts.json` too, because the lesson of the list is that a separate
+command is what gets forgotten — the extension's four errors survived a year
+of people running the commands they remembered.
+
 Env: `AGENTPORT_RELAY`, `AGENTPORT_IDENTITY`, `AGENTPORT_RUNTIME`,
 `AGENTPORT_NAME`, `AGENTPORT_LOCATION`.
 

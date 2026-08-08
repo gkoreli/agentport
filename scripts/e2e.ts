@@ -14,6 +14,7 @@ import { Relay } from '../packages/relay/src/relay.js';
 import { AgentDaemon } from '../packages/daemon/src/daemon.js';
 import { memoryRevocations } from '../packages/daemon/src/revocations.js';
 import { createTerminalAsk } from '../packages/daemon/src/terminal-ask.js';
+import type { AskQuestion } from '../packages/daemon/src/runtime.js';
 import { McpBridge } from '../packages/daemon/src/mcp-bridge.js';
 import { AcpRuntime } from '../packages/daemon/src/runtimes/acp.js';
 import {
@@ -137,7 +138,7 @@ console.log('\n0b. official MCP transport');
   const listed = await mcp.listTools();
   check('official SDK lists the temporary grant', listed.tools.map((tool) => tool.name).join(',') === 'page_read,page_slow');
   const read = await mcp.callTool({ name: 'page_read', arguments: {} });
-  check('official SDK returns structured tool content', read.structuredContent?.['text'] === 'ok', read);
+  check('official SDK returns structured tool content', (read.structuredContent as Record<string, unknown> | undefined)?.['text'] === 'ok', read);
   await mcp.callTool({ name: 'page_slow', arguments: {} }, undefined, { timeout: 30 }).catch(() => {});
   const didCancel = await Promise.race([
     cancelled.promise,
@@ -171,7 +172,7 @@ console.log('\n0c. ACP attachment identity');
     surface: { name: 'Same Label', origin: 'https://same.test' },
     grant: { tools: [] },
     tools: [],
-    policy: attachmentPolicy(false),
+    policy: attachmentPolicy({ decisions: false, questions: false }),
   };
   const first = makeRuntime();
   const second = makeRuntime();
@@ -1263,7 +1264,7 @@ console.log('\n13. delegated sessions');
   // A deliberately dishonest relay clock treats an already-expired statement
   // as live and forwards it over real sockets. The daemon's independent real-
   // time check must still stop the session at the edge.
-  const lyingRelay = new Relay({ port: 0, log: () => {}, now: () => 0 });
+  const lyingRelay = new Relay({ port: 0, sink: () => {}, now: () => 0 });
   await lyingRelay.listening();
   const lyingUrl = `ws://127.0.0.1:${lyingRelay.port}`;
   const edgeDaemon = new AgentDaemon({
@@ -1540,7 +1541,7 @@ console.log('\n14. detached tool calls fail without heuristic ownership transfer
 // the reconnect path, and against a delegation the page still holds.
 console.log('\n15. revocation (ADR-022)');
 {
-  const r15 = new Relay({ port: 0, log: () => {} });
+  const r15 = new Relay({ port: 0, sink: () => {} });
   await r15.listening();
   const url15 = `ws://127.0.0.1:${r15.port}`;
 
@@ -1811,7 +1812,7 @@ console.log('\n16. an approval answers the question it was asked (ADR-023)');
 // agent has no way to ask rather than asking into silence.
 console.log('\n17. the agent asks its own user (ADR-024)');
 {
-  const r17 = new Relay({ port: 0, log: () => {} });
+  const r17 = new Relay({ port: 0, sink: () => {} });
   await r17.listening();
   const url17 = `ws://127.0.0.1:${r17.port}`;
   const owner17 = generateKeyPair();
@@ -2143,7 +2144,7 @@ console.log('\n17. the agent asks its own user (ADR-024)');
 // otherwise stall the suite instead of failing it.
 console.log("\n18. a page may not answer for the user's own capability (ADR-024 R11)");
 {
-  const r18 = new Relay({ port: 0, log: () => {} });
+  const r18 = new Relay({ port: 0, sink: () => {} });
   await r18.listening();
   const url18 = `ws://127.0.0.1:${r18.port}`;
   const owner18 = generateKeyPair();
@@ -2402,7 +2403,7 @@ console.log("\n18. a page may not answer for the user's own capability (ADR-024 
 // the second is ADR-024 R2's own falsifiability clause.
 console.log('\n19. delegated resume, and a runtime that ignores its policy');
 {
-  const r19 = new Relay({ port: 0, log: () => {} });
+  const r19 = new Relay({ port: 0, sink: () => {} });
   await r19.listening();
   const url19 = `ws://127.0.0.1:${r19.port}`;
   const owner19 = generateKeyPair();
@@ -2511,7 +2512,7 @@ console.log('\n19. delegated resume, and a runtime that ignores its policy');
 // all, and neither did the brute-force limit on connect codes.
 console.log("\n20. the drop-in tier's refusals");
 {
-  const r20 = new Relay({ port: 0, log: () => {} });
+  const r20 = new Relay({ port: 0, sink: () => {} });
   await r20.listening();
   const url20 = `ws://127.0.0.1:${r20.port}`;
   const agent20 = generateKeyPair();
@@ -2654,7 +2655,6 @@ console.log("\n20. the drop-in tier's refusals");
       relayUrl: `ws://127.0.0.1:${refusePort}`,
       identity: { ...generateKeyPair(), name: 'Stranded Agent', runtime: 'mock' },
       createRuntime: () => new DemoWriterRuntime(),
-      socketFactory,
       handshakeTimeoutMs: 5_000,
     });
     let refused = 'hung';
@@ -2685,7 +2685,6 @@ console.log("\n20. the drop-in tier's refusals");
       relayUrl: `ws://127.0.0.1:${silentPort}`,
       identity: { ...generateKeyPair(), name: 'Patient Agent', runtime: 'mock' },
       createRuntime: () => new DemoWriterRuntime(),
-      socketFactory,
       handshakeTimeoutMs: 400,
     });
     let quiet = 'hung';
