@@ -731,4 +731,24 @@ console.log('extension elicitation round-trip check passed');
   assert.equal(noContext.size, 0, 'a tool with no declared source defaulted to synthesised');
 }
 
+// What a consent surface answers when the user does not.
+//
+// The mapped type makes the map TOTAL — a new kind is a compile error in two
+// places, verified by adding one and watching both fire. Totality says nothing
+// about the VALUES, though, and the values are the security property: every
+// one of these must read as a refusal to whoever consumes it. So the type
+// covers "did you think about the new kind" and this covers "is the answer
+// still no".
+{
+  const { CONSENT_DENIAL } = await import('./src/bridge.js');
+  assert.equal(CONSENT_DENIAL.connect, null, 'a dismissed connect window picked an agent');
+  assert.equal(CONSENT_DENIAL.approve, false, 'a dismissed approval window approved the call');
+  assert.equal(CONSENT_DENIAL.pair, false, 'a dismissed pairing window paired the agent');
+  // Nothing here may be truthy, whatever kinds exist by the time you read
+  // this: a denial is the value produced when the user was never asked.
+  for (const [kind, value] of Object.entries(CONSENT_DENIAL)) {
+    assert.ok(!value, `the denial for the ${kind} consent window is truthy, so a dismissal grants it`);
+  }
+}
+
 console.log('page harness check passed');

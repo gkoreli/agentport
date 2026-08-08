@@ -47,6 +47,7 @@ import {
 } from '@agentport/protocol';
 import {
   LIMITS,
+  consentDenial,
   mintId,
   sanitizeConnectRequest,
   isRecord,
@@ -392,10 +393,13 @@ function post(port: chrome.runtime.Port, message: WorkerToContent): void {
 // --- extension-chrome consent (ADR-009) ------------------------------------
 //
 // The question and the answer never touch page DOM. A pending question is a
-// payload the consent window fetches by id and answers over its own port; a
-// Every per-call approval uses the same extension-origin window. OS
+// payload the consent window fetches by id and answers over its own port, and
+// every per-call approval uses that same extension-origin window. OS
 // notifications are not a decision surface: platforms may suppress them
 // after Chrome reports successful creation, leaving the tool call unanswered.
+//
+// What a NON-answer means per kind lives in `CONSENT_DENIAL`, not in a ternary
+// at each of these call sites.
 
 interface PendingUi {
   id: string;
@@ -432,7 +436,7 @@ async function openUiWindow(pending: PendingUi): Promise<void> {
       data: { pendingId: pending.id, kind: pending.payload.kind },
     });
     // No window means no consent surface, and a missing answer is a denial.
-    settleUi(pending.id, pending.payload.kind === 'connect' ? null : false);
+    settleUi(pending.id, consentDenial(pending.payload.kind));
   }
 }
 
@@ -440,7 +444,7 @@ chrome.windows.onRemoved.addListener((windowId) => {
   for (const pending of [...pendingUi.values()]) {
     if (pending.windowId !== windowId) continue;
     // Closing the window without answering is a denial, never a default grant.
-    settleUi(pending.id, pending.payload.kind === 'connect' ? null : false);
+    settleUi(pending.id, consentDenial(pending.payload.kind));
   }
 });
 
@@ -1105,10 +1109,15 @@ async function onContentMessage(port: chrome.runtime.Port, message: ContentReque
       return;
     }
     case 'answer': {
-      // `lookup` is the ownership check: this port must hold this ref. The
-      // wallet then refuses an ask id it never issued, and the daemon refuses
-      // one it has already settled — delete-before-resolve there means a
-      // duplicate answer is a no-op rather than a second, contradictory one.
+      // `lookup` is the ownership check: this port must hold this ref.
+      //
+      // What happens to the ask id afterwards, stated as it is rather than as
+      // it was: `AgentSession.answer` does NOT check it — a malformed one
+      // throws out of `seal()` when the frame fails its own schema, and a
+      // well-formed one the agent never issued travels to the DAEMON, which
+      // is the only party that refuses it. The daemon also refuses an id it
+      // has already settled, because delete-before-resolve there makes a
+      // duplicate answer a no-op rather than a second, contradictory one.
       const entry = lookup(port, message.ref);
       if (!entry) {
         log.warn('dropped an answer for a session this port does not hold', { data: { ref: message.ref } });

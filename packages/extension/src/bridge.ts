@@ -215,6 +215,31 @@ export type ConsentPayload =
       call?: { name: string; arguments: Record<string, unknown> };
     };
 
+/**
+ * What each consent kind produces when the user does NOT answer: the window
+ * failed to open, they pressed Escape, they closed it, or the worker went
+ * away. A missing answer is never a default grant.
+ *
+ * A mapped type over the kind union, so adding a kind is a COMPILE ERROR here
+ * rather than a silent fallthrough. It replaced four copies of
+ * `payload.kind === 'connect' ? null : false` living in two files — and every
+ * one of them would have been wrong for the next kind, because a ternary
+ * shaped around booleans answers `false` to a question whose refusal is not a
+ * boolean at all. This is the registry rule from AGENTS.md applied before the
+ * registry got a chance to be wrong, rather than after.
+ */
+export const CONSENT_DENIAL: { readonly [K in ConsentPayload['kind']]: unknown } = {
+  /** No agent was chosen. */
+  connect: null,
+  pair: false,
+  approve: false,
+};
+
+/** The denial for a kind, so no call site re-derives one. */
+export function consentDenial(kind: ConsentPayload['kind']): unknown {
+  return CONSENT_DENIAL[kind];
+}
+
 export type ConsentToWorker =
   | { t: 'consent.get'; rid: string; id: string }
   /** connect → the chosen agent pubkey or null; approve → boolean. */

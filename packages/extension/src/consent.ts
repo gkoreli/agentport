@@ -13,6 +13,7 @@
 
 import { component, computed, each, html, signal, when } from '@nisli/core';
 import { randomId } from '@agentport/protocol';
+import { consentDenial } from './bridge.js';
 import type { AgentRow, ConsentPayload, ConsentToWorker } from './bridge.js';
 
 const port = chrome.runtime.connect({ name: 'agentport.consent' });
@@ -177,9 +178,23 @@ const App = component('ap-consent', () => {
     if (error.value) return html`<main><section><p class="hint">${error.value}</p></section></main>`;
     const current = payload.value;
     if (!current) return html`<main><section><p class="hint">Loading…</p></section></main>`;
-    if (current.kind === 'connect') return Connect({});
-    if (current.kind === 'pair') return Pair({});
-    return Approve({});
+    // A switch, not an if/else chain ending in Approve(): each component
+    // casts `payload.value` to its own variant, so a kind that fell through
+    // to the last branch would render the APPROVAL card for something else
+    // entirely, and compile. The `never` makes an unhandled kind a build
+    // error instead.
+    switch (current.kind) {
+      case 'connect':
+        return Connect({});
+      case 'pair':
+        return Pair({});
+      case 'approve':
+        return Approve({});
+      default: {
+        const unhandled: never = current;
+        return html`<main><section><p class="hint">Unsupported request.</p></section></main>`;
+      }
+    }
   });
   return html`${view}`;
 });
@@ -189,14 +204,20 @@ html`${App({})}`.mount(document.body);
 // Escape always means "no" — the same stance as everywhere else: a missing
 // answer is a denial, never a default grant.
 window.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape') answer(payload.value?.kind === 'connect' ? null : false);
+  const current = payload.value;
+  if (event.key === 'Escape' && current) answer(consentDenial(current.kind));
 });
 // The worker also treats window-close as a denial; answering here as well just
 // makes the denial immediate instead of waiting for onRemoved.
 window.addEventListener('pagehide', () => {
   if (!answered) {
     answered = true;
-    port.postMessage({ t: 'consent.answer', id: questionId, value: payload.value?.kind === 'connect' ? null : false } satisfies ConsentToWorker);
+    const current = payload.value;
+    port.postMessage({
+      t: 'consent.answer',
+      id: questionId,
+      value: current ? consentDenial(current.kind) : null,
+    } satisfies ConsentToWorker);
   }
 });
 
