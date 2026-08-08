@@ -89,7 +89,8 @@ writing panel whose brain is the process in terminal 2.
 No browser needed to verify the protocol:
 
 ```bash
-npm run e2e            # local, mock runtime, 18 checks
+npm run e2e            # local, mock runtime, 150 checks over real sockets
+npm run wire:check     # 515 wire-validation cases across 45 frame types
 npm run site:build     # bundle the demo surfaces
 npm run deploy         # build + wrangler deploy
 npx tsx scripts/remote-check.ts   # pair + prompt against the deployed relay
@@ -104,7 +105,7 @@ covered by `scripts/e2e.ts`.
 
 Verified against a real agent: Claude Code over ACP on a VPS reads and writes
 through the site's lent tools, with every gated write approved in the browser.
-See [ADR-018](./docs/ADR.md#adr-018-security-architecture-is-explicit-fail-closed-and-enforced-at-the-edges)
+See [ADR-018](./docs/ADR.md#adr-018-security-architecture-is-explicit-fail-closed-and-enforced-at-the-edges--accepted)
 for the security architecture and threat model, and [AGENTS.md](./AGENTS.md)
 for the implementation map and roadmap.
 

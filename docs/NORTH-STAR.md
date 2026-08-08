@@ -102,7 +102,10 @@ This is the same product, taken to its widest form:
 - **On a site that declared tools**, the agent gets the site's own intent —
   named actions that carry meaning, with the site's own approval hints.
 - **On a site that declared nothing**, the agent gets the generic page harness
-  — read, find, fill, click, scroll, navigate — supplied by the extension.
+  — read the page, list what is on it, fill, click, scroll — supplied by the
+  extension. It cannot yet search the page or navigate it; ADR-021 proposes
+  `page.navigate` and does not build it, which is why the harness still ends
+  at the edge of one document.
 - **On a site that declared some things**, it gets both, with the site's own
   tools preferred where they overlap, because a named action beats synthesized
   clicks every time.
@@ -180,7 +183,7 @@ system, where nobody working on the system ever stands.
 This is not hypothetical. For a long stretch of this repo's history the
 README's first code block — the thing GitHub renders above everything else —
 called `navigator.agent.connect(...)`. `connect.js` only ever *reads* that
-property; nothing but the extension installs it. So the documented integration
+property, and in a stranger's browser nothing has installed it. So the documented integration
 threw a bare `TypeError` for every visitor without our extension, which is
 precisely the population the whole fallback ladder exists to serve. Five
 requirements had adversarial e2e checks; this one had a broken first line.
