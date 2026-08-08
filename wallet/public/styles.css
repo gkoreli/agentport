@@ -44,6 +44,8 @@ button.wide { width: 100%; }
 .offer { display: grid; gap: 3px; margin-top: 16px; padding: 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--card); }
 .offer button { margin-top: 12px; }
 .status { margin: 16px 0 0; min-height: 20px; font: 12px/1.5 ui-monospace, monospace; overflow-wrap: anywhere; }
+.hint { margin: 12px 0 0; font-size: 12px; color: var(--muted); }
+.hint code { padding: 2px 5px; border: 1px solid var(--line); border-radius: 5px; background: var(--card); font: 11px/1.5 ui-monospace, monospace; overflow-wrap: anywhere; }
 .delegation-note { font-size: 12px; border-left: 2px solid var(--accent); padding-left: 10px; }
 .spinner { width: 28px; height: 28px; margin-bottom: 16px; border: 3px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; }
 .check { width: 44px; height: 44px; display: grid; place-items: center; margin-bottom: 14px; border-radius: 50%; background: rgba(79,209,139,.14); color: var(--ok); font-size: 24px; }

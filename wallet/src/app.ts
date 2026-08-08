@@ -215,6 +215,13 @@ const WalletApp = component('agentport-wallet-app', () => {
           <p class="eyebrow">Pair once</p>
           <h1>Add your agent</h1>
           <p>Paste the pairing code shown by your daemon. The certificate stays in this wallet origin.</p>
+          <!--
+            Someone arriving here for the first time has no daemon, and this
+            screen used to be a dead end: it asked for a code that could not
+            exist and never said where one comes from. One line turns the dead
+            end into a step.
+          -->
+          <p class="hint">No agent yet? Run <code>npx @gkoreli/agentport</code> on the machine you want your agent to live on — it prints a code.</p>
           <label>Pairing code<input value=${pairCode} @input=${onPairInput} placeholder="ABCD-2345" autocomplete="off" /></label>
           <button class="primary wide" disabled=${busy} @click=${lookupPairing}>Look up agent</button>
           ${when(

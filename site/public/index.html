@@ -34,7 +34,7 @@ await session.prompt('Tighten the opening paragraph.');</pre>
 
 <div class="note">
 <p><strong>Two surfaces, one agent.</strong> Connect on Inkwell, then open Tasker and connect again. It's the same agent both times, but each site's grant contains only its own tools, and closing a tab takes those capabilities away.</p>
-<p><strong>To try it you need an agent.</strong> Run <code>npm run daemon</code> on your own machine with <code>AGENTPORT_RELAY=wss://agentport.gogakoreli.workers.dev/relay</code>. Hit <strong>Connect agent</strong>: an installed extension wins, otherwise the AgentPort Wallet opens on its own origin. If popups are unavailable, paste the fallback code into your daemon terminal. Your agent dials out; nothing listens on your machine.</p>
+<p><strong>To try it you need an agent.</strong> Run <code>npx @gkoreli/agentport</code> on the machine you want your agent to live on — the same command the README gives, so there is one instruction rather than two. Hit <strong>Connect agent</strong>: an installed extension wins, otherwise the AgentPort Wallet opens on its own origin. If popups are unavailable, paste the fallback code into your daemon terminal. Your agent dials out; nothing listens on your machine.</p>
 <p><strong>The wallet remembers; the page does not.</strong> The hosted wallet's key and real agent names stay on its own origin. After you approve the site and its requested tools, it signs an eight-hour delegation to a fresh page key. The page receives the generic label “Personal agent.”</p>
 <p><strong>Universal fallback:</strong> popup blocked or closed? The original code flow still works. Connection consent happens at the daemon, and gated actions keep the daemon's local approval gate.</p>
 </div>

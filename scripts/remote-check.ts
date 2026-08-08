@@ -24,7 +24,19 @@ const daemon = new AgentDaemon({
   onPairingCode: (c) => code.resolve(c),
 });
 console.log(`connecting to ${relayUrl}`);
-console.log('daemon start:', await daemon.start());
+// A deployed relay can legitimately refuse us — most often because it is on a
+// different wire version, which is exactly what a lockstep protocol is
+// supposed to do. That is a RESULT, not a crash, so it exits with the reason
+// rather than a stack trace through `ws` internals. This is a command the
+// README tells people to run, so what it prints on the common failure is part
+// of the front door.
+const started = await daemon.start().catch((err: unknown) => {
+  console.error(`\n  ${err instanceof Error ? err.message : String(err)}`);
+  console.error('  The deployed relay and this checkout must be on the same wire version.');
+  console.error('  Deploy the relay from this commit, or check out the one it is running.\n');
+  process.exit(1);
+});
+console.log('daemon start:', started);
 
 const wallet = new AgentWallet({ relayUrl, userSecretKey: user.secretKey, socketFactory });
 await wallet.connect();
