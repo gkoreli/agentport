@@ -460,10 +460,10 @@ Not built yet, in rough priority order:
 
    Note what this does *not* block: `#trustedSurfaces` keys on DELEGATION, not
    on the wallet's implementation, so the extension already counts as a
-   trusted surface and already gets own-tool approvals. It is *permitted*
-   elicitation too — but nothing in extension chrome renders a question yet,
-   so `content.ts` skips every one rather than handing it to the page
-   (ADR-024 R12). The in-page demo wallet is in the same row, and allowing it
+   trusted surface and already gets own-tool approvals. It renders the agent's
+   questions too, in the same extension-origin window (ADR-024 R12) — the
+   question never enters page world, and `content.ts` refuses an answer
+   composed there. The in-page demo wallet is in the same row, and allowing it
    costs nothing — a page holding the user key can already mint any authority
    it likes, so refusing to ask it protects nothing (invariant 8's
    self-referential argument). Extension packaging is what turns that row from
