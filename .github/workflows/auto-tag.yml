@@ -1,0 +1,119 @@
+name: Auto Tag and Publish
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Existing release version to publish to npm (without v)"
+        required: true
+        type: string
+  push:
+    branches:
+      - main
+    paths:
+      - "packages/cli/package.json"
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.version.outputs.changed }}
+      version: ${{ steps.version.outputs.current }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Check if version changed
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          git fetch --tags
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            CURRENT_VERSION="${INPUT_VERSION#v}"
+          else
+            CURRENT_VERSION=$(node -p "require('./packages/cli/package.json').version")
+          fi
+
+          if ! echo "$CURRENT_VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::Invalid version: $CURRENT_VERSION"
+            exit 1
+          fi
+
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]] && ! git rev-parse "v$CURRENT_VERSION" >/dev/null 2>&1; then
+            echo "::error::Release tag v$CURRENT_VERSION does not exist"
+            exit 1
+          fi
+
+          echo "current=$CURRENT_VERSION" >> "$GITHUB_OUTPUT"
+          if git rev-parse "v$CURRENT_VERSION" >/dev/null 2>&1; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create and push tag
+        if: steps.version.outputs.changed == 'true'
+        env:
+          VERSION: v${{ steps.version.outputs.current }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "$VERSION" -m "Release $VERSION"
+          git push origin "$VERSION"
+
+  npm:
+    needs: tag
+    if: ${{ needs.tag.outputs.changed == 'true' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: v${{ needs.tag.outputs.version }}
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+          package-manager-cache: false
+
+      - name: Upgrade npm (required for OIDC trusted publishing)
+        run: npm install -g npm@latest
+
+      - name: Install and verify
+        run: |
+          npm ci
+          npm run typecheck
+          npm run wire:check
+          npm run e2e
+
+      - name: Build npm package
+        env:
+          VERSION: ${{ needs.tag.outputs.version }}
+        run: |
+          PACKAGE_VERSION=$(node -p "require('./packages/cli/package.json').version")
+          if [[ "$PACKAGE_VERSION" != "$VERSION" ]]; then
+            echo "::error::Tag v$VERSION points at package version $PACKAGE_VERSION"
+            exit 1
+          fi
+          npm run build --workspace=@gkoreli/agentport
+          BUILT_VERSION=$(node packages/cli/dist/main.js --version)
+          if [[ "$BUILT_VERSION" != "$VERSION" ]]; then
+            echo "::error::Built CLI reports $BUILT_VERSION, expected $VERSION"
+            exit 1
+          fi
+
+      - name: Publish npm package
+        run: npm publish ./packages/cli --provenance --access public
