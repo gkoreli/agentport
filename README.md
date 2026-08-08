@@ -99,13 +99,44 @@ writing panel whose brain is the process in terminal 2.
 No browser needed to verify the protocol:
 
 ```bash
-npm run e2e            # local, mock runtime, 165 checks over real sockets
+npm run e2e            # local, mock runtime, 170 checks over real sockets
 npm run wire:check     # 521 wire-validation cases across 45 frame types
 npm run site:build     # bundle the demo surfaces
 npm run deploy         # build + wrangler deploy
 npx tsx scripts/remote-check.ts   # pair + prompt against the deployed relay
 npx tsx scripts/acp-smoke.ts      # real ACP agent; run where it is authenticated
 ```
+
+## Run your own relay
+
+The relay is the only third party in the path, and the argument for trusting
+it is that you do not have to: session content is sealed end to end, so it
+carries ciphertext. If that is not enough for you, do not take our word for
+it — run your own.
+
+```bash
+AGENTPORT_RELAY_HOST=0.0.0.0 AGENTPORT_RELAY_PORT=8787 npm run relay
+```
+
+Then point everything at it:
+
+```bash
+AGENTPORT_RELAY=ws://your-host:8787 npx @gkoreli/agentport
+```
+
+Verified end to end against a relay bound this way — pairing, an
+approval-gated tool call, a prompt and teardown all complete
+(`npx tsx scripts/remote-check.ts` with `AGENTPORT_RELAY` pointed at it).
+
+Two honest caveats. A browser on an `https://` page will only dial `wss://`,
+so a real deployment needs TLS terminated in front of this process — any
+reverse proxy will do; the relay speaks plain WebSocket and expects to sit
+behind one. And the relay is stateless by construction, so there is nothing
+to back up and no migration to run: it holds sessions in memory for as long
+as the sockets live and stores nothing.
+
+The other route is the Cloudflare Worker in `site/` deployed to your own
+account, which is how the hosted one runs. That path is not verified here.
 
 ## Status
 

@@ -160,7 +160,7 @@ Open the demo, hit **Pair a new agent**, paste the code, then **Connect
 agent**. The daemon's pairing link (`/pair#code=…`) auto-fills the dialog.
 
 ```bash
-npm run e2e        # full loop over real sockets, no browser, 165 checks
+npm run e2e        # full loop over real sockets, no browser, 170 checks
 npm run webmcp:harvest # our belief about the WebMCP draft, checked
 npm run wire:check # wire validation: 521 fixture cases across all 45 frames
 npm run agui:check # every emitted AG-UI event parsed by @ag-ui/core's schemas
@@ -237,8 +237,15 @@ visitors: everyone here has the sibling checkout, so nobody was ever in the
 state where it is missing. `git clone && npm ci && <every gate>` is the check,
 and it is a thing a person does — periodically, from a temp directory.
 
-Env: `AGENTPORT_RELAY`, `AGENTPORT_IDENTITY`, `AGENTPORT_RUNTIME`,
-`AGENTPORT_NAME`, `AGENTPORT_LOCATION`.
+Env, daemon: `AGENTPORT_RELAY`, `AGENTPORT_IDENTITY`, `AGENTPORT_RUNTIME`,
+`AGENTPORT_NAME`, `AGENTPORT_LOCATION`, and — the pair that make the runtime
+actually pluggable — `AGENTPORT_ACP_COMMAND` / `AGENTPORT_ACP_ARGS`.
+
+Env, relay: `AGENTPORT_RELAY_HOST` (default `127.0.0.1`) and
+`AGENTPORT_RELAY_PORT` (default `8787`). These two are what make self-hosting
+possible, and they were undocumented while three separate documents argued
+that a self-hostable relay is why the relay is trust-irrelevant. A claim whose
+verification path is not written down is not a claim a reader can act on.
 
 ## UI framework
 
@@ -514,7 +521,7 @@ Working: pairing, cert issuance and verification, directory + presence,
 capability grants with TTL, prompt streaming, plan reporting, tool-call
 round-trip, approval round-trip, cancellation, reconnect with in-place session
 resume, session teardown, revocation, authority-tagged approvals, the agent
-asking its own user a question, and the full demo UI. 165 e2e checks and 521
+asking its own user a question, and the full demo UI. 170 e2e checks and 521
 wire-validation cases pass.
 
 Not built yet, in rough priority order:
