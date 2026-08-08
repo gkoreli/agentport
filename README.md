@@ -69,7 +69,17 @@ Start your agent and pair it with Chrome:
 npx @gkoreli/agentport
 ```
 
-Open the one-time link it prints and approve in the extension-owned window.
+Open the one-time link it prints and approve it. Where that approval appears
+depends on what you have, and you do not have to know which:
+
+- **nothing installed** — the AgentPort Wallet opens on its own origin, which
+  the site cannot read;
+- **our extension** — it happens in extension chrome instead. There is no
+  store listing yet; it is a load-unpacked build, and
+  [`packages/extension`](./packages/extension) says how;
+- **popups blocked** — you get a code to paste into the terminal your agent is
+  running in, and consent happens there.
+
 Connect on Inkwell, then open Tasker: same agent, entirely different hands.
 
 ## Try it locally
