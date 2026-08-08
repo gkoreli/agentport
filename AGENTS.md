@@ -145,6 +145,7 @@ npm run e2e        # full loop over real sockets, no browser, 146 checks
 npm run webmcp:harvest # our belief about the WebMCP draft, checked
 npm run wire:check # wire validation: 515 fixture cases across all 45 frames
 npm run agui:check # every emitted AG-UI event parsed by @ag-ui/core's schemas
+npm run source:check # no invisible control characters in source (a NUL got in)
 npm run typecheck  # tsc -b over all packages
 npm run deploy     # build the site + wrangler deploy
 
