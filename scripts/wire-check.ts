@@ -31,6 +31,8 @@ import {
   MAX_TEXT_CHARS,
 } from '../packages/protocol/src/limits.js';
 import {
+  AGENT_SEALABLE,
+  CLIENT_SEALABLE,
   FRAME_SCHEMAS,
   PROTOCOL_VERSION,
   WIRE_FINGERPRINT,
@@ -518,6 +520,44 @@ console.log('\n6. protocol version');
     wireFingerprint() === WIRE_FINGERPRINT,
     { recorded: WIRE_FINGERPRINT, actual: wireFingerprint() },
   );
+}
+
+// --- routers ------------------------------------------------------------------
+//
+// The last hop, and the one the type system cannot reach.
+//
+// `messages.ts` proves at compile time that a new content frame is in
+// `FRAME_SCHEMAS`, in `SESSION_FRAME_TYPES`, and in exactly one of the sealable
+// sets. Every one of those guards conspires to deliver it: it decodes, it
+// unseals, it routes to the right session — and then it meets a `switch` that
+// has no case for it and is dropped. All the ceremony upstream makes the frame
+// look handled right up to the door.
+//
+// A `never` default in those routers would be the wrong fix and is deliberately
+// not what this asserts. They are PARTIAL over the 45-frame union on purpose:
+// an endpoint receives a subset, and AGENTS.md warns against making the
+// origination sets total because partial is what makes them fail-closed. What
+// must be total is narrower — every frame the peer may SEAL toward you is one
+// you handle.
+//
+// Source-matched on `case 'x'`, which is fragile in the safe direction: someone
+// restructuring a router away from a switch fails this loudly rather than
+// silently, which is the failure this whole check exists to convert.
+{
+  const routers = [
+    { role: 'daemon', file: 'packages/daemon/src/daemon.ts', expects: CLIENT_SEALABLE, from: 'CLIENT_SEALABLE' },
+    { role: 'client session', file: 'packages/client/src/session.ts', expects: AGENT_SEALABLE, from: 'AGENT_SEALABLE' },
+  ];
+  for (const router of routers) {
+    const source = readFileSync(new URL(`../${router.file}`, import.meta.url), 'utf8');
+    const handled = new Set([...source.matchAll(/case '([a-z][a-z._]*)'/g)].map((m) => m[1] as string));
+    const missing = [...router.expects].filter((type) => !handled.has(type));
+    check(
+      `the ${router.role} handles every frame in ${router.from}`,
+      missing.length === 0,
+      { missing, file: router.file },
+    );
+  }
 }
 
 // --- summary ------------------------------------------------------------------

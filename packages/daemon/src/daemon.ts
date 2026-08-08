@@ -837,6 +837,13 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
         return;
 
       default:
+        // Same rule as the client's router: partial on purpose, so the guard
+        // is visibility rather than exhaustiveness. A frame that decoded,
+        // unsealed and routed correctly and then matched nothing here is
+        // dropped, and this is the only place that can say so.
+        this.#log.warn('dropped a frame this daemon has no handler for', {
+          data: { frameType: frame.t },
+        });
         return;
     }
   }

@@ -378,6 +378,26 @@ export class AgentSession extends Emitter<SessionEvents> implements AgentSession
         this.#finish(frame.reason ?? 'agent_closed');
         return;
       default:
+        /* A frame that reached here and matched nothing is DROPPED, and this
+       * is the only place that can say so. Not a `never` default: these routers
+       * are deliberately partial over the 45-frame union — an endpoint receives
+       * a subset, and AGENTS.md warns against making the origination sets total
+       * because partial is what makes them fail-closed. So the guard is
+       * visibility, not exhaustiveness.
+       *
+       * It matters because everything upstream conspires to make the frame look
+       * handled: `messages.ts` proves at compile time that a new content frame
+       * is in `FRAME_SCHEMAS`, in `SESSION_FRAME_TYPES`, and in one of the
+       * sealable sets — so it decodes, unseals, routes to the right session,
+       * and then vanishes at the door. That is the plain-`Set` bug this repo
+       * already paid for, one hop further out.
+       *
+       * `frame.t` is safe to log: it comes from the exact-`t` registry, so it
+       * is a schema-defined name and never attacker-chosen text. */
+        this.#log.warn('dropped a frame this session has no handler for', {
+          sessionId: this.id,
+          data: { frameType: frame.t },
+        });
         return;
     }
   }

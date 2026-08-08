@@ -405,6 +405,17 @@ check has already been wrong at least once:
   missing from them is denied, which is already fail-closed, so only a
   non-existent frame name needs catching. Do not "fix" these to be total.
 
+**The last hop is the one the compiler cannot reach.** All of that ceremony
+delivers a new content frame to a `switch` in the daemon or the client session
+— and if nobody added a `case`, it is dropped there, having decoded, unsealed
+and routed correctly. A `never` default is the WRONG fix and `wire:check` does
+not ask for one: those routers are partial over the 45-frame union on purpose,
+because partial is what makes the origination sets fail-closed. What must be
+total is narrower, and is now asserted — **every frame the peer may seal
+toward you is one you handle** (`CLIENT_SEALABLE` → the daemon,
+`AGENT_SEALABLE` → the client session). All three routers also log a frame
+they drop, since until that check existed the drop was silent.
+
 The rule, learned three times in one day (here, and at the extension's
 `PageOutbound` boundary): **a registry the compiler cannot check is a registry
 that will eventually be wrong.** When you add one, make an omission a type

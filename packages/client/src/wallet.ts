@@ -907,7 +907,16 @@ export class AgentWallet extends Emitter<WalletEvents> {
     if (this.#resolve(frame)) return;
     if (frame.t === 'error') {
       this.#log.error('relay rejected a frame', { data: { code: frame.code, message: frame.message } });
+      return;
     }
+
+    // Matched no branch, no correlation waiter, and is not an error: dropped.
+    // This router is an if-chain rather than a switch, so it had no `default`
+    // to be silent in — it simply ran off the end. Same rule as the other two:
+    // partial on purpose, so the guard is visibility, not exhaustiveness.
+    this.#log.warn('dropped a frame this wallet has no handler for', {
+      data: { frameType: frame.t },
+    });
   }
 
   /**
