@@ -1824,10 +1824,8 @@ console.log('\n17. the agent asks its own user (ADR-024)');
   });
 
   const policies: boolean[] = [];
-  const asked = new Deferred<string | undefined>();
   const hostileKey: { value?: unknown } = {};
-  /** Every answer the agent received, in turn order — `asked` only ever
-   *  settles on the first one. */
+  /** Every answer the agent received, in turn order. */
   const answered: (string | undefined)[] = [];
   /** A question nobody answers decays after the daemon's five-minute deadline,
    *  which is far longer than a suite waits: bound every turn that asks. */
@@ -1860,7 +1858,6 @@ console.log('\n17. the agent asks its own user (ADR-024)');
       });
       hostileKey.value = answers ? Object.getOwnPropertyDescriptor(answers, '__proto__')?.value : undefined;
       answered.push(answers?.['draft']);
-      asked.resolve(answers?.['draft']);
       ctx.say(answers ? `Revising ${answers['draft']}.` : 'I could not ask, so I guessed.');
     }
   }
@@ -1880,8 +1877,12 @@ console.log('\n17. the agent asks its own user (ADR-024)');
   });
   await daemon17.start();
 
-  // The drop-in tier answers at the daemon's own terminal, which no page can
-  // draw — so it may ask.
+  // The connect tier's client is a page key the daemon deliberately does NOT
+  // check against a cert — `connect.ts` mints it "ephemeral and
+  // authority-free". So the daemon may only ask here if IT can render the
+  // question, and `daemon17` supplies no `onLocalAsk`. The capability is
+  // withheld, and the page is never handed a question it could answer in the
+  // user's name.
   const page17 = new AgentWallet({ relayUrl: url17, userSecretKey: generateKeyPair().secretKey, socketFactory });
   await page17.connect();
   const offer17 = await page17.beginConnect({
@@ -1891,22 +1892,17 @@ console.log('\n17. the agent asks its own user (ADR-024)');
   });
   daemon17.claimConnect(offer17.code);
   const dropIn = await offer17.accepted;
-  check('a tier with an unforgeable answer surface may ask', policies[0] === true, policies);
+  check('a connect tier with no terminal form is refused elicitation', policies[0] === false, policies);
 
-  dropIn.on('ask', (question) => {
-    check('the question reaches the user with its options intact', question.fields[0]?.options?.length === 2, question);
-    // Answering the hostile key must reach the agent rather than hitting a
-    // prototype setter and vanishing — a field it explicitly asked about.
-    dropIn.answer(question.id, { draft: 'The second', ['__proto__']: 'kept' });
-  });
-  const said = await dropIn.prompt('Revise it.');
-  check('the answer comes back to the agent', (await asked.promise) === 'The second', said);
+  let pageWasAsked = 0;
+  dropIn.on('ask', () => pageWasAsked++);
+  const guessed = await bounded17(dropIn.prompt('Revise it.'));
+  check('the page is never sent a question it could answer as the user', pageWasAsked === 0, pageWasAsked);
   check(
-    'an answer keyed __proto__ survives instead of silently vanishing',
-    hostileKey.value === 'kept',
-    hostileKey.value,
+    'and the turn finishes rather than stalling on a question nobody can render',
+    guessed !== 'hung' && guessed.includes('guessed'),
+    guessed,
   );
-  check('and the agent acted on it', said.includes('The second'), said);
 
   // The delegated tier answers in page DOM, so it never gets the capability.
   const delegatePage = generateKeyPair();
@@ -1950,7 +1946,10 @@ console.log('\n17. the agent asks its own user (ADR-024)');
   });
   check('a wallet holding the user own key may be asked', policies[2] === true, policies);
   directAsker.on('ask', (question) => {
-    directAsker.answer(question.id, { draft: 'The first' });
+    check('the question reaches the user with its options intact', question.fields[0]?.options?.length === 2, question);
+    // Answering the hostile key must reach the agent rather than hitting a
+    // prototype setter and vanishing — a field it explicitly asked about.
+    directAsker.answer(question.id, { draft: 'The first', ['__proto__']: 'kept' });
   });
   // These two prove the ROUND TRIP, and only that. They cannot prove routing,
   // and would still pass on a daemon that withheld the capability: elicitation
@@ -1967,7 +1966,73 @@ console.log('\n17. the agent asks its own user (ADR-024)');
     directSaid !== 'hung' && directSaid.includes('The first'),
     directSaid,
   );
+  check(
+    'an answer keyed __proto__ survives instead of silently vanishing',
+    hostileKey.value === 'kept',
+    hostileKey.value,
+  );
 
+  // --- the connect tier WITH a terminal form -------------------------------
+  // The routing the policy always claimed, now supplied. This is the check
+  // that would have caught its absence, and the shape is the point: it
+  // asserts WHERE the question went, not merely that the policy said yes. A
+  // check that only reads `policy.mayAsk` passes just as happily on a daemon
+  // that hands the question to the requesting page, which is exactly what
+  // happened — the old check watched the boolean and the page answered under
+  // a comment claiming the terminal did.
+  const agent17b = generateKeyPair();
+  const cert17b = signCert(owner17.secretKey, {
+    user: owner17.publicKey,
+    agent: agent17b.publicKey,
+    name: 'Terminal Agent',
+    runtime: 'asking',
+    issuedAt: Date.now(),
+  });
+  const localAsks: string[] = [];
+  const daemon17b = new AgentDaemon({
+    relayUrl: url17,
+    identity: {
+      secretKey: agent17b.secretKey,
+      publicKey: agent17b.publicKey,
+      name: 'Terminal Agent',
+      runtime: 'asking',
+      cert: cert17b,
+    },
+    createRuntime: () => new AskingRuntime(),
+    onConnectOffer: async () => true,
+    onLocalApproval: async () => true,
+    onLocalAsk: async (question) => {
+      localAsks.push(question.message);
+      return { draft: 'The second' };
+    },
+  });
+  await daemon17b.start();
+
+  const page17b = new AgentWallet({ relayUrl: url17, userSecretKey: generateKeyPair().secretKey, socketFactory });
+  await page17b.connect();
+  const offer17b = await page17b.beginConnect({
+    surface: { name: 'Terminal Asker', origin: 'https://terminal-asker.test' },
+    tools: [],
+    decide: () => true,
+  });
+  daemon17b.claimConnect(offer17b.code);
+  const dropInB = await offer17b.accepted;
+  check('supplying the terminal form is what grants the connect tier its capability', policies[3] === true, policies);
+
+  let pageWasAskedB = 0;
+  dropInB.on('ask', () => pageWasAskedB++);
+  const saidB = await bounded17(dropInB.prompt('Revise it.'));
+  check('the question goes to the daemon own terminal', localAsks.length === 1, localAsks);
+  check('and never to the page, which could answer it as the user', pageWasAskedB === 0, pageWasAskedB);
+  check(
+    'the terminal answer reaches the agent',
+    saidB !== 'hung' && saidB.includes('The second'),
+    saidB,
+  );
+
+  dropInB.close();
+  page17b.close();
+  await daemon17b.stop();
   directAsker.close();
   delegatedSession.close();
   dropIn.close();
@@ -2122,8 +2187,8 @@ console.log("\n18. a page may not answer for the user's own capability (ADR-024 
   );
   check('the runtime is told the same thing the daemon enforces', policies[0]?.mayUseOwnTools === false, policies[0]);
   check(
-    'one predicate: a tier that may not answer for the user may not be asked either',
-    policies[0]?.mayUseOwnTools === policies[0]?.mayAsk,
+    'the delegated tier is refused BOTH: it may neither answer for the user nor be asked',
+    policies[0]?.mayUseOwnTools === false && policies[0]?.mayAsk === false,
     policies[0],
   );
 

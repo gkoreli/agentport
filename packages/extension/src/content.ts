@@ -274,8 +274,17 @@ window.addEventListener('message', (event: MessageEvent) => {
 });
 
 /**
- * The agent asked a question of a session the WIDGET owns, and the widget has
- * no form to render it in.
+ * The agent asked a question, and this extension has nowhere trustworthy to
+ * render it.
+ *
+ * Every session, not only the widget's. A page-owned session used to have its
+ * questions handed straight to the page, which is the one thing that must
+ * never happen here: the daemon grants this tier `mayAsk` because the CLIENT
+ * holds the user key, and the client is the extension, not the document. A
+ * page that composes the answer is composing the user's voice — and unlike a
+ * `site_tool` approval, where the forger already holds the capability, there
+ * is no self-referential argument to fall back on. The page cannot mint an
+ * elicitation answer any other way, so handing it one is a real escalation.
  *
  * Answered immediately as SKIPPED rather than left to the daemon's five-minute
  * deadline. Both end in the same place — the agent proceeds without an answer
@@ -287,17 +296,18 @@ window.addEventListener('message', (event: MessageEvent) => {
  *
  * The user is still told, because a question they did not get the chance to
  * answer changes how much they should trust what comes next (ADR-024 R4). The
- * complete fix is a form in the overlay — extension chrome, a surface the page
- * cannot draw — at which point this becomes the fallback for a widget that has
- * no overlay open rather than the whole story.
+ * complete fix is a form in extension chrome — the consent window renders
+ * `connect`, `approve` and `pair` today and has no question kind — at which
+ * point this becomes the fallback for a surface with no window open rather
+ * than the whole story.
  */
-function skipWidgetAsk(ref: string, payload: unknown): void {
+function skipAsk(ref: string, payload: unknown): void {
   const askId = isRecord(payload) && typeof payload['id'] === 'string' ? payload['id'] : undefined;
   if (!askId) {
     log.error('the agent asked something with no id; nothing can answer it', { data: { ref } });
     return;
   }
-  log.warn('skipping an agent question: the widget has no form surface', { data: { ref } });
+  log.warn('skipping an agent question: no extension-chrome form surface exists', { data: { ref } });
   tell({ t: 'answer', ref, askId });
   overlayInstance?.notice('Your agent asked you a question. This surface cannot show it, so it was skipped — expect a guess.');
 }
@@ -397,8 +407,11 @@ function onWorkerMessage(message: WorkerToContent): void {
     case 'event': {
       const record = records.get(message.ref);
       if (!record) return;
-      if (record.owner === 'page') toPage({ t: 'event', ref: message.ref, event: message.event, payload: message.payload });
-      else if (message.event === 'ask') skipWidgetAsk(message.ref, message.payload);
+      // `ask` is checked BEFORE ownership, because ownership is exactly the
+      // wrong discriminator for it: a page-owned session is the case where
+      // forwarding is most tempting and least safe.
+      if (message.event === 'ask') skipAsk(message.ref, message.payload);
+      else if (record.owner === 'page') toPage({ t: 'event', ref: message.ref, event: message.event, payload: message.payload });
       else onWidgetEvent(message.event, message.payload);
       if (message.event === 'closed') records.delete(message.ref);
       return;

@@ -1,6 +1,7 @@
 # ADR-024: The agent may ask its own user — where that is possible
 
-- **Status:** proposed
+- **Status:** accepted; R1–R11 implemented, and R12 records where R1 was
+  enforced by prose rather than by code until it was audited
 - **Date:** 2026-08-07
 - **Depends on:** ADR-003 (sealed content), ADR-018 (surface tiers), ADR-023
   (authority stamped by the side that knows the truth), ADR-019 Gate C
@@ -93,14 +94,16 @@ list it would not, and it would also be *wrong today* — "page-declared"
 describes where the **tools** come from, not where the **answer** comes from,
 and it is the answer that matters.
 
-The daemon already forks three ways on exactly this, and its own comment says
-so (`daemon.ts:1143-1151`):
+The daemon forks on exactly this. The table below is what SHIPS — see R12 for
+the version of it this ADR originally asserted, which described a routing that
+two of its three rows did not perform:
 
-| tier | answers at | trusted surface? | elicitation |
+| tier | the client is | may ask | who actually renders the question |
 |---|---|---|---|
-| extension | extension chrome | yes — a page cannot draw or read it | **allowed** |
-| drop-in / `viaConnect` | the daemon's own terminal | yes | **allowed** |
-| delegated / hosted wallet | **the page's own panel** (`agentport-ui.ts:269`, passed at `:364`) | no | **refused** |
+| delegated / hosted wallet | a page key holding a user-signed delegation | **no** | — |
+| drop-in / `viaConnect` | an ephemeral page key with no cert behind it | **only if the daemon can render it itself** | the daemon's own terminal, via `onLocalAsk` |
+| direct key — extension | the user key, held in the service worker | yes | **nothing yet.** `content.ts` skips every ask; extension chrome has no question surface |
+| direct key — in-page demo wallet | the user key, held in the page | yes | the page — vacuously safe, since a page holding the key could mint any authority |
 
 The refused tier is the *delegated* one — the tier we built deliberately, that
 a real site uses, whose approvals render in page DOM by design, and where a
@@ -395,6 +398,83 @@ unrepresentable. This has already paid for itself once. Narrowing the
 predicate from `viaConnect` to "not delegated" widened *both* fields in the
 same edit, which is how the direct-key tier got elicitation back without
 anyone arguing about it separately.
+
+### R12. R1 was enforced by this document, not by the code — and here is how that survived
+
+An audit of every prose claim in the repo against the code found that the
+routing table above was aspirational in two of its three rows. The permission
+was real; the destination was not.
+
+**What shipped.** `#hasTrustedAnswerSurface` returned `delegation === undefined`
+and the comment above it justified the `viaConnect` row with "answers at the
+daemon's own terminal, a surface no page can reach." `#ask` had no such fork —
+it sent the `ask` frame to the session client on every tier, and on the connect
+tier the client is an ephemeral page key that the daemon *deliberately does not
+check against a cert*. So the one tier whose client carries no authority at all
+was being handed the user's voice, while the delegated tier — whose client at
+least holds a user-signed delegation — was refused. The daemon had no terminal
+form to route to in any case: `onLocalApproval` is `Promise<boolean>`, and a
+`[y/N]` prompt cannot render fields.
+
+The extension row was the same defect on the tier this ADR holds up as the
+answer. `content.ts` checked *ownership* before it checked the event, so a
+page-owned session's questions were forwarded into page world and answered by
+`inpage.ts`'s page-callable `answer()`. Widget-owned sessions were already
+skipped, correctly, with a comment explaining why — so the right behaviour
+existed a few lines away from the wrong one.
+
+**Severity, stated precisely.** This is an attribution break, not a capability
+break. Every consequential action still gated: `site_tool` and
+`runtime_own_tool` approvals fork to the terminal on the connect tier, and an
+elicitation answer is `updatedInput` to a tool, not a permission decision
+(R8). What the site gained was the one channel the agent is built to trust,
+mid-turn, at a decision point the agent itself chose, recorded as the user's
+own words — and the owner at the terminal never saw that a question had been
+asked.
+
+**Why it survived, which is the part worth keeping.** Two reasons, and neither
+is "nobody looked":
+
+1. *The type could not express the bug.* R11 above argues that one boolean
+   makes disagreeing fields unrepresentable, and calls that the safety
+   property. It is the opposite when the two consumers genuinely disagree: the
+   fields never agreed, the code only looked like they did because one
+   consumer's routing was missing, and a single input meant no signature, no
+   type and no reviewer had anywhere to notice. R11 did say that "a field that
+   genuinely needs a second input changes this signature, which is a change a
+   reviewer sees" — that turned out to be the escape hatch, not the guard.
+2. *The check watched the permission instead of the destination.* e2e asserted
+   `policy.mayAsk === true` for the connect tier and then had **the page**
+   answer, under a comment saying the terminal did. That check passes just as
+   happily on a daemon that hands the question to the requesting site, which
+   is precisely what it was passing on.
+
+**The rule.** *A policy whose justification names a destination must be
+produced by the same code that routes to it, or asserted by a check that
+observes where the frame actually went.* A boolean that means "somewhere
+trustworthy exists" is not the same claim as "this frame goes there", and only
+the second one is a security property.
+
+**What changed.** `attachmentPolicy` takes `{decisions, questions}`;
+`questions` is false on the connect tier unless the embedder supplies
+`onLocalAsk`, which is what makes supplying the surface — not asserting it —
+the thing that grants the capability. `#ask` forks to that surface exactly as
+`#requestApproval` always has. `content.ts` skips every ask regardless of
+ownership. e2e now asserts the destination in both directions, and both halves
+were verified non-vacuous by reverting each in place: reverting the policy
+fails the refusal check, and reverting the fork fails three, including one
+that reproduces the escalation by observing the page receive the question.
+
+**Still open, and deliberately not papered over.** Extension chrome has no
+question surface, so on the tier with the best claim to one the agent is
+permitted to ask and nothing renders it — the daemon grants the capability
+because the CLIENT holds the user key, and it cannot see that the client then
+declines to draw it. Until the consent window gains a question kind, the
+extension's honest behaviour is the skip, which tells the user a question was
+withheld rather than stalling their turn for five minutes. The page-world
+provider still mirrors `ask`/`answer` for interface parity across tiers;
+whether that mirror should outlive the arrival of a real surface is the
+question to settle then, not now.
 
 ## The cost, stated rather than discovered
 

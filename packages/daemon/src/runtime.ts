@@ -94,18 +94,32 @@ export interface AttachmentPolicy {
 }
 
 /**
- * Derive an attachment's whole policy from the ONE question it turns on: does
- * this attachment have an answer surface the requesting origin cannot draw,
- * read or forge?
+ * Derive an attachment's whole policy from where its consent can actually be
+ * drawn — which is two questions, not one.
  *
- * One input, deliberately. Both fields would otherwise be two booleans that
- * agree today and drift the first time somebody changes one — silently, since
- * agreeing is not a thing a compiler can check. A future field goes here as
- * another derivation of the same argument; a field that genuinely needs a
- * second input changes this signature, which is a change a reviewer sees.
+ * A DECISION is yes-or-no about one call. A QUESTION carries fields and free
+ * text. They are not the same channel and they do not reach the same
+ * surfaces: `#requestApproval` has always forked a decision to the daemon's
+ * own terminal on the connect tier, and a terminal that can print `[y/N]`
+ * cannot render a form unless somebody writes one.
+ *
+ * This took ONE boolean until the divergence was found, and the comment here
+ * argued the single input was the safety property: two booleans "that agree
+ * today would drift the first time somebody changed one". The reasoning was
+ * backwards. They never agreed — the code only looked like they did, because
+ * one channel's routing had not been built, and a single input made the
+ * disagreement unrepresentable. That is what stopped anybody noticing: the
+ * type could not express the bug, so the bug lived in the prose instead,
+ * where a comment asserted a routing that no code performed.
+ *
+ * The original note did say a field needing a second input "changes this
+ * signature, which is a change a reviewer sees". This is that change.
+ *
+ * An object rather than two positional booleans, so no call site can swap
+ * them silently.
  */
-export function attachmentPolicy(hasTrustedAnswerSurface: boolean): AttachmentPolicy {
-  return { mayAsk: hasTrustedAnswerSurface, mayUseOwnTools: hasTrustedAnswerSurface };
+export function attachmentPolicy(trusted: { decisions: boolean; questions: boolean }): AttachmentPolicy {
+  return { mayAsk: trusted.questions, mayUseOwnTools: trusted.decisions };
 }
 
 /** One question, already narrowed to what a consent surface can render. */

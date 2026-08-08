@@ -135,13 +135,19 @@ assert.equal(sanitizePlanSteps(sparse), undefined, 'a sparse plan array was acce
 
 // --- elicitation, at the boundary ------------------------------------------
 //
-// An elicitation answer is the one page-controlled channel that carries USER
-// AUTHORITY into the agent's reasoning — which is why ADR-024 refuses it on
-// tiers whose answer surface a site can draw, and why this tier may carry it:
-// the extension's surface is one the site cannot draw or read. So this is the
-// most sensitive member of PageOutbound, and its validator REFUSES rather than
-// repairs. Every bound below is the wire's own, because a boundary that
-// accepted what the daemon's decoder will reject is a boundary that lies.
+// An elicitation answer is the one channel that carries USER AUTHORITY into
+// the agent's reasoning, which is why ADR-024 refuses it wherever a site could
+// author the answer. This extension has NO question surface — the consent
+// window renders `connect`, `approve` and `pair` and nothing else — so
+// `content.ts` now skips every `ask` rather than handing it to the page, and
+// no legitimate answer originates in page world at all.
+//
+// The validator stays exactly this strict anyway, and that is the point of
+// having both: routing is the policy, this is the boundary, and a boundary
+// that only holds while the policy above it is correct is not a boundary. A
+// page can still ATTEMPT an answer. Every bound below is the wire's own,
+// because a boundary that accepted what the daemon's decoder will reject is a
+// boundary that lies.
 
 const answer = (over: Record<string, unknown> = {}) => ({
   t: 'answer',
@@ -423,6 +429,15 @@ console.log(`extension build stamp check passed (${rootPackage.version})`);
 // of the fake. Those are exercised by `scripts/extension-ui-smoke.ts`, which
 // loads the unpacked extension in Chrome. Stated rather than papered over: a
 // regression in either hop would not fail this file.
+//
+// AND WHAT IT NO LONGER PROVES ABOUT THE SHIPPED PRODUCT: `content.ts` skips
+// every `ask` instead of forwarding it, so this envelope does not arrive in
+// page world at all any more. What is exercised below is the provider's
+// SHAPE — a page-world session still mirrors the `navigator.agent` interface,
+// ask event included — not a path the extension takes. Whether that mirror
+// should survive once extension chrome renders questions is ADR-024's
+// question, not this file's, and it is recorded there rather than settled by
+// deleting the check.
 
 const { Window } = await import('happy-dom');
 const { ENVELOPE, TO_PAGE, TO_WALLET } = await import('./src/bridge.js');

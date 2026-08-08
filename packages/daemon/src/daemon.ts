@@ -190,6 +190,20 @@ export interface DaemonOptions {
     call?: { name: string; arguments: Record<string, unknown> },
   ) => Promise<boolean>;
   /**
+   * The agent is asking its user a question in a connect.js session (ADR-024).
+   *
+   * Supplying this is what GRANTS elicitation on the connect tier, rather than
+   * merely routing it: that tier's client is a page key with no cert behind
+   * it, so if the daemon cannot render the question itself there is nobody who
+   * may answer it, and `mayAsk` stays false. An embedder with no terminal —
+   * a test, a service — therefore gets the refusing behaviour by default
+   * instead of silently forwarding the user's voice to the requesting page.
+   *
+   * Resolve `undefined` for "not answered"; every non-answer means the tool
+   * proceeds without one rather than the turn dying.
+   */
+  onLocalAsk?: (question: AskQuestion) => Promise<AskAnswers | undefined>;
+  /**
    * Test-only clock seam, as `RelayOptions.now` is. The approval window is
    * minutes long by design, and an expiry check that has to sleep for one is a
    * check nobody runs — so the only property here that cannot be observed
@@ -995,7 +1009,7 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     // Decided before the answer is signed, because the answer states it: the
     // page is told what this attachment may do, and the statement is bound
     // into the epk proof so the relay cannot rewrite it (ADR-024 R11).
-    const policy = attachmentPolicy(this.#hasTrustedAnswerSurface({ delegation }));
+    const policy = attachmentPolicy(this.#trustedSurfaces({ delegation, viaConnect }));
     const myEpk = {
       epk: mine.publicKey,
       epkSig: signEpk(
@@ -1218,56 +1232,75 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
   }
 
   /**
-   * Does this attachment have an answer surface the requesting origin cannot
-   * draw, read, or forge? (ADR-024 R1.)
+   * Which of this attachment's consent surfaces can the requesting origin
+   * neither draw, read, nor forge? (ADR-024 R1.)
    *
-   * ONE predicate, deliberately, because every policy that depends on it
-   * depends on it for the same reason: may the agent ask its user something
-   * (ADR-024), and may it use its own capabilities here (ADR-024 R10). Two
-   * booleans that happen to agree today would drift the first time somebody
-   * changed one, and they would drift silently, because agreeing is not a
-   * thing a compiler can check. Narrow this and BOTH narrow; widen it and both
-   * widen. Special-casing one of them back is the drift, not the fix.
+   * TWO answers, because there are two channels and they do not land on the
+   * same surfaces. `decisions` is yes-or-no about one call; `questions`
+   * carries fields. See `attachmentPolicy` for why this stopped being one
+   * boolean.
    *
-   * The discriminator is DELEGATION, not the wallet's implementation. Three
-   * tiers, and the wire already separates them:
+   * The first discriminator is DELEGATION, and the wire already separates the
+   * tiers:
    *
-   * - `viaConnect` — no delegation, no browser wallet at all. Answers at the
-   *   daemon's own terminal, a surface no page can reach. TRUE.
    * - **Delegated** — the hosted wallet signed a short-lived authority for a
    *   page's ephemeral key, and that page answers in its own panel, which is
-   *   DOM the requesting origin renders. FALSE, and no repair exists at the
-   *   wallet origin: opening its popup needs user activation, and an
+   *   DOM the requesting origin renders. FALSE for both, and no repair exists
+   *   at the wallet origin: opening its popup needs user activation, and an
    *   agent-initiated question has no gesture behind it — which is exactly
    *   why `connect.ts` reserves its popup synchronously during the click. A
    *   persistent cross-origin frame would be readable-proof and not
    *   overlay-proof, which is the attack a real browser window exists to
    *   defeat.
    * - **Direct key** — no delegation: the client IS the owner's key, checked
-   *   against the cert. TRUE.
+   *   against the cert. TRUE for both.
+   * - `viaConnect` — no delegation, and no browser wallet at all. Decisions
+   *   are TRUE because `#requestApproval` actually routes them to the
+   *   terminal. Questions are true only when the embedder supplied
+   *   `onLocalAsk`, because that is the only thing that can render one.
    *
-   * That last row is the non-obvious one, so state the argument rather than
-   * the conclusion. It covers the extension, whose consent window a page can
-   * neither draw nor read — the easy case. It also covers today's in-page
+   * The direct-key row is the non-obvious one, so state the argument rather
+   * than the conclusion. It covers the extension, whose consent window a page
+   * can neither draw nor read — the easy case. It also covers today's in-page
    * demo wallet, and refusing THAT would protect nothing: a page holding the
    * user key can already mint any authority it likes, including a fresh
    * delegation to itself. This is the same self-referential argument that
    * makes page-answered `site_tool` approvals fine — the forger already holds
-   * the capability, so there is no escalation left to prevent. AGENTS.md
-   * already says the in-page wallet is demo-only precisely because the page
-   * can reach the key; this policy agrees with that rather than pretending
-   * otherwise. Extension packaging is what turns the row from vacuously safe
-   * into genuinely safe, and needs no change here when it lands.
+   * the capability, so there is no escalation left to prevent. Note the scope
+   * of what this grants: the daemon is saying the CLIENT may be told, not
+   * that the client may hand it to the page. A client holding the user key
+   * that forwards the user's voice to page JavaScript has escalated on its
+   * own behalf, and that is its bug to fix, not something the daemon can see.
    *
-   * So the refusal lands exactly where the escalation is: a page that does
-   * NOT hold the user key, answering for the user's capability.
+   * The `viaConnect` row is where this predicate was wrong, and it is worth
+   * recording how. It read TRUE unconditionally, justified in a comment by
+   * "answers at the daemon's own terminal, a surface no page can reach" —
+   * except `#ask` never forked to the terminal the way `#requestApproval`
+   * does. The frame went to the session client, and on this tier the client
+   * is a page key the daemon deliberately does NOT check against a cert
+   * (`connect.ts` mints it "ephemeral and authority-free"). So the one tier
+   * whose client has no authority at all was the tier being handed the user's
+   * voice, while the delegated tier — whose client at least holds a
+   * user-signed delegation — was refused. The comment described the design;
+   * only the routing was missing; and because the policy was a single
+   * boolean, no type could express the disagreement.
+   *
+   * So the refusal lands where the escalation is: a client that does NOT hold
+   * the user key, answering for the user.
    *
    * Takes only what it reads, so it can be answered before the session state
    * it will be stored on exists — the answer has to be signed into the reply
    * that opens the attachment.
    */
-  #hasTrustedAnswerSurface(session: Pick<SessionState, 'delegation'>): boolean {
-    return session.delegation === undefined;
+  #trustedSurfaces(session: Pick<SessionState, 'delegation' | 'viaConnect'>): {
+    decisions: boolean;
+    questions: boolean;
+  } {
+    const decisions = session.delegation === undefined;
+    return {
+      decisions,
+      questions: decisions && (!session.viaConnect || this.#options.onLocalAsk !== undefined),
+    };
   }
 
 
@@ -1304,6 +1337,48 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
         sessionId: session.id,
       });
       return Promise.resolve(undefined);
+    }
+
+    // Past the guard there are two trusted surfaces, exactly as
+    // `#requestApproval` has them: the connect tier has no wallet, so its
+    // questions stay with the daemon owner at the terminal, and everything
+    // else is a DIRECT-KEY attachment whose client is the owner's own key.
+    // This fork is the one that did not exist — the frame used to go to the
+    // client on every tier, including the one whose client is an
+    // authority-free page key.
+    if (session.viaConnect) {
+      const onLocalAsk = this.#options.onLocalAsk;
+      // `#trustedSurfaces` cannot set mayAsk on this tier without it, so this
+      // is a second lock on the same door rather than a reachable branch.
+      if (!onLocalAsk) return Promise.resolve(undefined);
+      // "Never a hang" has to hold for an embedder's terminal too, so the
+      // local path carries the same deadline and abort as the wire path.
+      return new Promise<AskAnswers | undefined>((resolve) => {
+        let settled = false;
+        const finish = (answers: AskAnswers | undefined): void => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          signal?.removeEventListener('abort', onAbort);
+          resolve(answers);
+        };
+        const onAbort = (): void => finish(undefined);
+        const timer = setTimeout(() => {
+          this.#log.info('nobody answered the agent at the terminal; proceeding as skipped', {
+            sessionId: session.id,
+          });
+          finish(undefined);
+        }, ASK_TIMEOUT_MS);
+        if (signal?.aborted) return finish(undefined);
+        signal?.addEventListener('abort', onAbort, { once: true });
+        onLocalAsk(question).then(finish, (err: unknown) => {
+          this.#log.error('the local ask surface failed; proceeding as skipped', {
+            sessionId: session.id,
+            err,
+          });
+          finish(undefined);
+        });
+      });
     }
 
     const id = randomId('ask_');
