@@ -2353,6 +2353,108 @@ console.log('\n19. delegated resume, and a runtime that ignores its policy');
   await r19.close();
 }
 
+// --- 20. the drop-in tier's refusals ---------------------------------------
+// extension-work predicted the remaining test gap would be wherever a path
+// "only runs when nothing is configured", because that is the state no test
+// bothers to construct. The drop-in tier is exactly that — it exists for the
+// case with no wallet and no extension — and the prediction held: the owner
+// SAYING NO, which is the entire consent story of this tier, had no check at
+// all, and neither did the brute-force limit on connect codes.
+console.log("\n20. the drop-in tier's refusals");
+{
+  const r20 = new Relay({ port: 0, log: () => {} });
+  await r20.listening();
+  const url20 = `ws://127.0.0.1:${r20.port}`;
+  const agent20 = generateKeyPair();
+  let asked = 0;
+  const daemon20 = new AgentDaemon({
+    relayUrl: url20,
+    identity: { secretKey: agent20.secretKey, publicKey: agent20.publicKey, name: 'Refusing Agent', runtime: 'demo-writer' },
+    createRuntime: () => new DemoWriterRuntime(),
+    // The whole point of this tier: consent happens HERE, where the key is,
+    // because the page has no wallet to ask. Saying no must be honoured and
+    // must be legible to the page.
+    onConnectOffer: async () => {
+      asked++;
+      return false;
+    },
+  });
+  await daemon20.start();
+
+  const refusedPage = new AgentWallet({ relayUrl: url20, userSecretKey: generateKeyPair().secretKey, socketFactory });
+  await refusedPage.connect();
+  const offer20 = await refusedPage.beginConnect({
+    surface: { name: 'Refused', origin: 'https://refused.test' },
+    tools: inkwellTools(),
+    decide: () => true,
+  });
+  daemon20.claimConnect(offer20.code);
+  // Deadlined, per rule 3: a check that hangs on the bug it targets is not a
+  // check, because a hang is indistinguishable from slowness. If the refusal
+  // never arrives, this REPORTS that rather than stopping the suite.
+  let refusal = '';
+  const settled = await Promise.race([
+    offer20.accepted.then(() => 'opened').catch((err: Error) => {
+      refusal = err.message;
+      return 'refused';
+    }),
+    new Promise<string>((resolve) => setTimeout(() => resolve('hung'), 5_000)),
+  ]);
+  check('the owner was actually asked', asked === 1, asked);
+  check('a declined drop-in connect reaches the page as a refusal', settled === 'refused', settled);
+  check('and it says who declined it', refusal.includes('declined_by_owner'), refusal);
+
+  // Brute force. The code is eight characters over a 32-symbol alphabet, and
+  // the only thing between a guesser and someone else's agent is this limit —
+  // which nothing exercised.
+  // ONE keypair. An earlier version of this used two — a fresh
+  // generateKeyPair() for each field — so the public key did not match the
+  // secret, identify's signature failed at the relay, and `start()` never
+  // resolved. The suite hung rather than failing, which is rule 3 arriving in
+  // the check I was writing to test a refusal path.
+  const guesserKeys = generateKeyPair();
+  const guesserLogs: LogEntry[] = [];
+  const guesser = new AgentDaemon({
+    relayUrl: url20,
+    identity: {
+      secretKey: guesserKeys.secretKey,
+      publicKey: guesserKeys.publicKey,
+      name: 'Guesser',
+      runtime: 'demo-writer',
+    },
+    sink: (entry) => guesserLogs.push(entry),
+    createRuntime: () => new DemoWriterRuntime(),
+  });
+  await guesser.start();
+  for (let i = 0; i < 25; i++) guesser.claimConnect('AAAA-BBBB');
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  // Watching the RIGHT signal, on the second attempt. The first version of
+  // this check listened for the daemon's `closed` event and failed — but
+  // `#fail` only sends an error frame, it does not close the socket, so the
+  // red I was looking at was not the red I had caused. Rule 6, in the check
+  // for a rate limit.
+  //
+  // What the limit actually does is stop the relay from even LOOKING: past
+  // the cap every claim short-circuits to `rate_limited` before the code is
+  // read, so a guesser learns nothing more from further attempts.
+  const codes = guesserLogs.filter((entry) => entry.data?.['code']).map((entry) => entry.data?.['code']);
+  check(
+    'a guesser is refused before the code is even looked up',
+    codes.includes('rate_limited'),
+    [...new Set(codes)],
+  );
+  check(
+    'and it takes the limit to get there, not one bad guess',
+    codes.filter((code) => code === 'connect_unknown').length >= 20,
+    codes.filter((code) => code === 'connect_unknown').length,
+  );
+
+  refusedPage.close();
+  await guesser.stop();
+  await daemon20.stop();
+  await r20.close();
+}
+
 // --- teardown ---------------------------------------------------------------
 
 session.close();
