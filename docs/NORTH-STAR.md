@@ -258,3 +258,36 @@ Not metrics — signals, roughly in the order we would expect to see them:
 
 The last one is the actual target. The end state for a primitive is that it
 stops needing a project.
+
+### Most of these are walkable, and walking them is how they get found
+
+Requirement 6 above has an obligation attached — *arrive as a stranger* —
+because it binds where nobody working here ever stands. That is not special to
+requirement 6. Four of the signals above describe someone standing somewhere
+we never stand, which means each is a path that can be WALKED rather than
+waited for, and each hid a defect that no suite could have surfaced:
+
+| the signal | walked by | what it found |
+|---|---|---|
+| the integration is obvious | loading `connect.js` in a clean browser | the documented script tag could not parse it, so `AgentPort` never existed |
+| someone builds on it | `git clone && npm ci && <every gate>` | a dependency declared as a path outside the repo; install exits 0 and leaves a dangling symlink |
+| someone installs it | `npm pack`, then install the tarball and run it | shipped no README (npm: "No README data found!") and no licence, while declaring Apache-2.0 |
+| someone runs a relay we do not operate | binding one to `0.0.0.0` and pointing `remote-check` at it | it works — and the two variables that make it possible were documented nowhere |
+| someone swaps in a runtime | resolving the two env vars that name one | setting only the obvious half spawned `goose` with Claude Code's arguments |
+
+The WebMCP signal is the exception, and instructive for it: that claim was
+once "every WebMCP-adopting site becomes compatible", which was false, and
+somebody found it, withdrew it, and left `WEBMCP_NOT_IMPLEMENTED` behind as
+the single source for the negative claim. It is the one signal already walked,
+and it is the only one that had nothing left to find.
+
+**The shared shape is worth more than any of the fixes.** Not one of those was
+a false claim. The integration really is one call, the relay really is
+self-hostable, the runtime really is pluggable, the package really does work.
+Each was *true and unreachable* — something between the claim and a stranger
+acting on it was missing. That failure mode is invisible from inside a working
+tree by construction, because we never traverse the gap: we already have the
+checkout, the symlink, the env vars, the extension.
+
+So these are not only signals to hope for. They are a list of places to
+periodically stand, and the standing is a thing a person does.
