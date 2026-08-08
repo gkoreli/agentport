@@ -44,10 +44,12 @@ import {
   type PlanStep,
   type ToolDefinition,
   type AuthorityDomain,
+  type FormField,
 } from '@agentport/protocol';
 import {
   LIMITS,
   consentDenial,
+  type AnswerField,
   mintId,
   sanitizeConnectRequest,
   isRecord,
@@ -227,6 +229,16 @@ interface SessionEntry {
 const ORPHAN_GRACE_MS = 2 * 60 * 1000;
 
 /**
+ * How long a question window may sit unanswered.
+ *
+ * Strictly inside the daemon's own `ASK_TIMEOUT_MS` (5 minutes), because past
+ * that the daemon has already decayed the question to a skip and treats a late
+ * answer as a silent no-op — so a longer window here would let someone fill in
+ * a form that goes nowhere and never says so.
+ */
+const ASK_WINDOW_MS = 4 * 60 * 1000;
+
+/**
  * How long a tool call waits for the next document to bind before failing.
  * The agent clicks a link and immediately reads the page it landed on; that
  * call must wait for the navigation rather than error out mid-turn. It must
@@ -335,6 +347,12 @@ function reclaimSession(
 
 function dropSession(entry: SessionEntry, reason: string): void {
   sessions.delete(entry.ref);
+  // A question window outliving its session is a form the user fills in for
+  // an agent that has stopped listening. Settle it as a skip, which also
+  // closes the window.
+  for (const pending of [...pendingUi.values()]) {
+    if (pending.ref === entry.ref) settleUi(pending.id, consentDenial('ask'));
+  }
   clearTimeout(entry.orphanTimer);
   if (entry.port) refsOf(entry.port).delete(entry.ref);
   for (const deferred of entry.pending.values()) deferred.resolve({ ok: false, error: `session closed: ${reason}` });
@@ -406,6 +424,15 @@ interface PendingUi {
   payload: ConsentPayload;
   deferred: Deferred<unknown>;
   windowId?: number;
+  /**
+   * The session this window is asking on behalf of, when there is one.
+   *
+   * Only questions carry it, and only so a dying session can close its own
+   * window. Without it the user goes on filling in a form whose agent stopped
+   * listening — the form-shaped version of the stall this whole path exists to
+   * avoid.
+   */
+  ref?: string;
 }
 
 const pendingUi = new Map<string, PendingUi>();
@@ -511,6 +538,53 @@ function askApproval(
   return pending.deferred.promise.then((value) => value === true);
 }
 
+/**
+ * The agent asking its own user a question, in extension chrome (ADR-024 R12).
+ *
+ * The daemon grants this tier `mayAsk` because the CLIENT holds the user key —
+ * and the client is this worker, not the document. So the question never
+ * reaches page world at all: it opens the same extension-origin window every
+ * approval uses, and only the answer travels back.
+ *
+ * Resolves the fields the user filled, or `undefined` for a SKIP. A skip is a
+ * real answer meaning "proceed without one", which is why every failure path
+ * here produces one rather than leaving the agent waiting.
+ */
+function askQuestion(
+  ref: string,
+  origin: string,
+  who: { name: string },
+  question: { message: string; fields: FormField[] },
+): Promise<AnswerField[] | undefined> {
+  const pending: PendingUi = {
+    id: mintId('ui_'),
+    payload: { kind: 'ask', origin, agentName: who.name, message: question.message, fields: question.fields },
+    deferred: new Deferred<unknown>(),
+    ref,
+  };
+  pendingUi.set(pending.id, pending);
+  // Our own deadline, strictly inside the daemon's ASK_TIMEOUT_MS. Past that
+  // the daemon has already decayed the question to a skip and treats a late
+  // answer as a silent no-op — so without this the user fills in a form that
+  // goes nowhere and is never told. AGENTS.md rule 3 applied to a surface
+  // rather than to a check.
+  const timer = setTimeout(() => {
+    if (!pendingUi.has(pending.id)) return;
+    log.warn('closing an unanswered question before the agent stops listening', {
+      data: { pendingId: pending.id, origin },
+    });
+    settleUi(pending.id, consentDenial('ask'));
+  }, ASK_WINDOW_MS);
+  observe(openUiWindow(pending), 'question consent window flow failed', { data: { pendingId: pending.id } });
+
+  return pending.deferred.promise.then((value) => {
+    clearTimeout(timer);
+    // Anything that is not a list of fields is a skip: the denial value, a
+    // dismissed window, a worker that restarted. Never coerced into an answer.
+    return Array.isArray(value) ? (value as AnswerField[]) : undefined;
+  });
+}
+
 function handleConsent(port: chrome.runtime.Port): void {
   const reply = (message: WorkerToConsent) => {
     try {
@@ -612,13 +686,43 @@ function wireSession(entry: SessionEntry): void {
     if (current) current.missedEvents += 1;
   };
 
-  // `ask` is turn content, so it counts as missed when nobody is bound: a
-  // question the agent asked into a document that navigated away is lost, and
-  // the daemon's own deadline decays it to a skip. Counting it is how the next
-  // document learns something happened it did not see.
-  for (const event of ['delta', 'thought', 'tool', 'ask'] as const) {
+  for (const event of ['delta', 'thought', 'tool'] as const) {
     session.on(event, (payload) => forward(event, payload, true));
   }
+
+  // `ask` does NOT join that list, and the reason is the whole point of
+  // ADR-024 R12: forwarding it would put the user's own voice in page world,
+  // where the requesting origin composes the answer. It goes to extension
+  // chrome instead, and the document is only TOLD when a question could not
+  // be put to the user (R4 — a refusal nobody can see is invisible
+  // diminishment, and the model treats an absent affordance as nothing at
+  // all).
+  session.on('ask', (question) => {
+    void (async () => {
+      let values: AnswerField[] | undefined;
+      try {
+        values = await askQuestion(ref, entry.origin, { name: session.info.agentName }, question);
+      } catch (err) {
+        log.error('the question surface failed; skipping so the turn continues', { err, data: { ref } });
+        values = undefined;
+      }
+      const current = sessions.get(ref);
+      if (!current) {
+        // The session died while the window was open. Nothing to answer, and
+        // the daemon has already torn the question down with it.
+        log.info('a question outlived its session; dropping the answer', { data: { ref } });
+        return;
+      }
+      try {
+        current.session.answer(question.id, values ? Object.fromEntries(values.map((f) => [f.key, f.value])) : undefined);
+      } catch (err) {
+        // `answer` throws when the sealing channel is gone. It must not
+        // escape into the port listener that called us.
+        log.error('could not deliver the answer to the agent', { err, data: { ref } });
+      }
+      if (!values) forward('ask.skipped', { message: question.message }, false);
+    })();
+  });
   session.on('done', (payload) => {
     // A plan is what the agent intends NOW. Once its turn is over the checklist
     // is history, so the worker stops offering it to the next document rather

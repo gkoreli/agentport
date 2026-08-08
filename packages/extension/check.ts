@@ -137,10 +137,10 @@ assert.equal(sanitizePlanSteps(sparse), undefined, 'a sparse plan array was acce
 //
 // An elicitation answer is the one channel that carries USER AUTHORITY into
 // the agent's reasoning, which is why ADR-024 refuses it wherever a site could
-// author the answer. This extension has NO question surface — the consent
-// window renders `connect`, `approve` and `pair` and nothing else — so
-// `content.ts` now skips every `ask` rather than handing it to the page, and
-// no legitimate answer originates in page world at all.
+// author the answer. The consent window now renders a question kind, so the
+// question goes to extension chrome and is answered there — and NO legitimate
+// answer originates in page world on this tier at all. `content.ts` refuses
+// them outright.
 //
 // The validator stays exactly this strict anyway, and that is the point of
 // having both: routing is the policy, this is the boundary, and a boundary
@@ -377,6 +377,7 @@ const content = await readFile(join(here, 'dist/content.js'), 'utf8');
 const serviceWorker = await readFile(join(here, 'dist/sw.js'), 'utf8');
 const overlay = await readFile(join(here, 'dist/overlay.js'), 'utf8');
 const overlayHtml = await readFile(join(here, 'dist/overlay.html'), 'utf8');
+const consentHtml = await readFile(join(here, 'dist/consent.html'), 'utf8');
 const staticManifest = JSON.parse(await readFile(join(here, 'static/manifest.json'), 'utf8')) as {
   version: string;
   _build_note?: string;
@@ -410,6 +411,13 @@ assert.match(overlayHtml, /overlay\.js/, 'extension iframe page does not load it
 assert.ok(!staticManifest.permissions?.includes('notifications'), 'approval flow must not depend on OS notifications');
 assert.doesNotMatch(serviceWorker, /chrome\.notifications/, 'service worker still contains the unreliable notification approval path');
 assert.match(serviceWorker, /chrome\.windows\.create/, 'service worker does not open the extension-owned approval window');
+// The question surface actually reaches the built bundle. Keyed on the custom
+// element name and the input type rather than a class or a sentence: the
+// element name is the component's identity and cannot move innocently, while
+// a copy edit to the card's wording could (rule 4).
+const consentBundle = await readFile(join(here, 'dist/consent.js'), 'utf8');
+assert.match(consentBundle, /ap-consent-ask/, 'the consent bundle has no question surface, so every question is skipped');
+assert.match(consentHtml, /input\[type="text"\]/, 'the consent window has no styling for a text field');
 
 console.log(`extension build stamp check passed (${rootPackage.version})`);
 
@@ -430,14 +438,15 @@ console.log(`extension build stamp check passed (${rootPackage.version})`);
 // loads the unpacked extension in Chrome. Stated rather than papered over: a
 // regression in either hop would not fail this file.
 //
-// AND WHAT IT NO LONGER PROVES ABOUT THE SHIPPED PRODUCT: `content.ts` skips
-// every `ask` instead of forwarding it, so this envelope does not arrive in
-// page world at all any more. What is exercised below is the provider's
-// SHAPE — a page-world session still mirrors the `navigator.agent` interface,
-// ask event included — not a path the extension takes. Whether that mirror
-// should survive once extension chrome renders questions is ADR-024's
-// question, not this file's, and it is recorded there rather than settled by
-// deleting the check.
+// AND WHAT IT NO LONGER PROVES ABOUT THE SHIPPED PRODUCT: the worker sends
+// questions to extension chrome, so this envelope does not arrive in page
+// world any more, and `content.ts` refuses an answer that originates there.
+// What is exercised below is deliberately the provider's SHAPE — a page-world
+// session still mirrors the `navigator.agent` interface, ask event included,
+// so a site sees one API across tiers instead of a method that throws on one
+// of them. ADR-024 R12 left that mirror's fate open; it is settled as "keep
+// the shape, close the channel", and the closing half is in `content.ts`
+// where only the real-Chrome harness can reach it.
 
 const { Window } = await import('happy-dom');
 const { ENVELOPE, TO_PAGE, TO_WALLET } = await import('./src/bridge.js');
@@ -749,6 +758,35 @@ console.log('extension elicitation round-trip check passed');
   for (const [kind, value] of Object.entries(CONSENT_DENIAL)) {
     assert.ok(!value, `the denial for the ${kind} consent window is truthy, so a dismissal grants it`);
   }
+}
+
+// The dialect the agent receives, whichever surface answered.
+//
+// Pure and therefore checkable, which is why it lives in bridge.ts rather than
+// inside the consent component (rule 7b). The properties that matter are the
+// two the daemon and the terminal form already agree on: a blank field is
+// OMITTED rather than sent empty, because absent means "left blank" and an
+// empty string is an answer; and a multi-select joins with the separator the
+// terminal uses, so the agent cannot tell which surface a person used.
+{
+  const { answerFieldsFrom } = await import('./src/bridge.js');
+  assert.deepEqual(
+    answerFieldsFrom(new Map([['draft', ['The second']]])),
+    [{ key: 'draft', value: 'The second' }],
+    'a single answer did not survive',
+  );
+  assert.deepEqual(
+    answerFieldsFrom(new Map([['draft', ['The first', 'The second']]])),
+    [{ key: 'draft', value: 'The first, The second' }],
+    'a multi-select did not join the way the terminal form joins',
+  );
+  assert.deepEqual(answerFieldsFrom(new Map([['draft', []]])), [], 'an untouched field was sent as an answer');
+  assert.deepEqual(answerFieldsFrom(new Map([['draft', ['']]])), [], 'a blank field was sent as an empty answer');
+  // A field key is wire data and `__proto__` passes the id pattern. Pairs all
+  // the way out means there is no object literal to poison on the way.
+  const hostile = answerFieldsFrom(new Map([['__proto__', ['kept']]]));
+  assert.deepEqual(hostile, [{ key: '__proto__', value: 'kept' }], 'a __proto__ answer key vanished instead of surviving');
+  assert.equal(Object.getPrototypeOf(hostile[0]), Object.prototype, 'building an answer walked into a prototype');
 }
 
 console.log('page harness check passed');

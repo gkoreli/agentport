@@ -12,8 +12,8 @@
  */
 
 import { component, computed, each, html, signal, when } from '@nisli/core';
-import { randomId } from '@agentport/protocol';
-import { consentDenial } from './bridge.js';
+import { randomId, type FormField } from '@agentport/protocol';
+import { answerFieldsFrom, consentDenial } from './bridge.js';
 import type { AgentRow, ConsentPayload, ConsentToWorker } from './bridge.js';
 
 const port = chrome.runtime.connect({ name: 'agentport.consent' });
@@ -153,6 +153,94 @@ const Approve = component('ap-consent-approve', () => {
     </main>`;
 });
 
+const Ask = component('ap-consent-ask', () => {
+  const state = payload.value as Extract<ConsentPayload, { kind: 'ask' }>;
+  /**
+   * Field key -> chosen values. A Map, not an object, because these keys came
+   * over the wire and `__proto__` is legal by the id pattern — a Map has no
+   * prototype chain to walk into. Text fields hold at most one entry.
+   */
+  const picked = signal<Map<string, string[]>>(new Map());
+  const set = (key: string, values: string[]): void => {
+    picked.value = new Map(picked.value).set(
+      key,
+      values.filter((value) => value !== ''),
+    );
+  };
+  const chosen = (key: string): string[] => picked.value.get(key) ?? [];
+
+  const toggle = (field: FormField, option: string): void => {
+    const current = chosen(field.key);
+    if (field.multi) {
+      set(field.key, current.includes(option) ? current.filter((value) => value !== option) : [...current, option]);
+    } else {
+      // Tapping the chosen option again clears it. The user has to be able to
+      // get back to "I did not answer this", which is not the same as any of
+      // the options and must not require closing the window.
+      set(field.key, current[0] === option ? [] : [option]);
+    }
+  };
+
+  const submit = (): void => answer(answerFieldsFrom(picked.value));
+
+  const fields = computed(() => state.fields);
+
+  return html`
+    <main>
+      <header><b>AgentPort</b><span>question</span></header>
+      <section>
+        <div class="origin">
+          <b>${state.origin}</b>
+          <small>Verified origin — reported by the browser, not by the page.</small>
+        </div>
+        <p class="authority">Your agent is asking you. ${state.origin} can neither see this window nor your answer.</p>
+        <p class="surface">${state.agentName} asks: ${state.message}</p>
+        ${each(
+          fields,
+          (field) => field.key,
+          (field) => {
+            const current = field.value;
+            const options = current.options ?? [];
+            if (options.length === 0) {
+              return html`
+                <h2>${current.label}</h2>
+                <input
+                  type="text"
+                  placeholder="Leave blank to skip"
+                  @input=${(event: Event) => set(current.key, [(event.target as HTMLInputElement).value])}
+                />`;
+            }
+            const optionList = computed(() => options);
+            return html`
+              <h2>${current.label}</h2>
+              ${each(
+                optionList,
+                (option) => option,
+                (option) => {
+                  const selected = computed(() => (chosen(current.key).includes(option.value) ? 'true' : 'false'));
+                  const label = computed(() => option.value);
+                  return html`
+                    <button
+                      class="agent"
+                      type="button"
+                      aria-selected=${selected}
+                      @click=${() => toggle(current, option.value)}
+                    >
+                      <span class="grow">${label}</span>
+                    </button>`;
+                },
+              )}`;
+          },
+        )}
+        <p class="hint">Skipping answers nothing and lets your agent carry on with a guess. It is never read as approval.</p>
+      </section>
+      <footer>
+        <button type="button" @click=${() => answer(consentDenial('ask'))}>Skip</button>
+        <button class="primary" type="button" @click=${submit}>Send answer</button>
+      </footer>
+    </main>`;
+});
+
 const Pair = component('ap-consent-pair', () => {
   const state = payload.value as Extract<ConsentPayload, { kind: 'pair' }>;
   return html`
@@ -190,6 +278,8 @@ const App = component('ap-consent', () => {
         return Pair({});
       case 'approve':
         return Approve({});
+      case 'ask':
+        return Ask({});
       default: {
         const unhandled: never = current;
         return html`<main><section><p class="hint">Unsupported request.</p></section></main>`;

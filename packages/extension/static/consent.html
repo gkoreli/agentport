@@ -50,6 +50,16 @@
         background: #24242b; border: 1px solid #33333c; border-radius: 8px;
         padding: 8px 14px; color: inherit; font: inherit; cursor: pointer;
       }
+      /* The question window's free-text fields. Without `color: inherit` and
+         an explicit background these render in the UA's light default inside
+         a dark card, which reads as a different origin's chrome. */
+      input[type="text"] {
+        display: block; width: 100%; box-sizing: border-box;
+        background: #1a1a1f; border: 1px solid #2c2c33; border-radius: 8px;
+        padding: 8px 10px; color: inherit; font: inherit;
+      }
+      input[type="text"]::placeholder { color: #6b6875; }
+      input[type="text"]:focus-visible { outline: 2px solid #7c6cff; outline-offset: 1px; border-color: #7c6cff; }
       button.primary { background: #7c6cff; border-color: #7c6cff; color: #fff; }
       button:disabled { opacity: .4; cursor: not-allowed; }
       button:focus-visible { outline: 2px solid #7c6cff; outline-offset: 1px; }

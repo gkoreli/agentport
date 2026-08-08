@@ -217,22 +217,21 @@ window.addEventListener('message', (event: MessageEvent) => {
       return;
     }
     case 'answer': {
-      // The session reference comes from OUR table, keyed by owner: a page may
-      // only answer a question asked of a session this document owns, never
-      // one belonging to another frame or to the extension's own widget. The
-      // ask id is the page's to supply — the worker checks it against the
-      // asks actually outstanding, and the daemon checks it again.
-      const record = ownedBy(body.ref, 'page');
-      if (!record) {
-        // Refused rather than forwarded, and said out loud. `answer` returns
-        // void by contract, so there is no promise to reject: silence in the
-        // isolated world is the only place this can surface, and a question
-        // that then times out minutes later is exactly the failure this whole
-        // path exists to avoid.
-        log.warn('refused an answer for a session this document does not own', { data: { ref: body.ref } });
-        return;
-      }
-      tell({ t: 'answer', ref: record.ref, askId: body.askId, ...(body.values ? { values: body.values } : {}) });
+      // Settling what ADR-024 R12 left open: the page-world provider keeps
+      // `ask`/`answer` so a site sees the SAME `navigator.agent` session shape
+      // on every tier — a method that throws here and works on the in-page
+      // tier would be worse than one that never fires — but no answer from
+      // page world is legitimate on this tier any more. Questions render in
+      // extension chrome and are answered there, so the page has no ask id it
+      // could have come by honestly.
+      //
+      // So this is refused, not forwarded, and said out loud: a page reaching
+      // this line is confused or hostile, and either is worth seeing. The
+      // validator above stays exactly as strict, because a boundary that only
+      // holds while the routing above it is correct is not a boundary.
+      log.error('refused an answer composed in page world; questions are answered in extension chrome', {
+        data: { ref: body.ref },
+      });
       return;
     }
     case 'tool.result': {
@@ -274,42 +273,36 @@ window.addEventListener('message', (event: MessageEvent) => {
 });
 
 /**
- * The agent asked a question, and this extension has nowhere trustworthy to
- * render it.
+ * A question the agent asked could not be put to the user.
  *
- * Every session, not only the widget's. A page-owned session used to have its
- * questions handed straight to the page, which is the one thing that must
- * never happen here: the daemon grants this tier `mayAsk` because the CLIENT
- * holds the user key, and the client is the extension, not the document. A
- * page that composes the answer is composing the user's voice — and unlike a
- * `site_tool` approval, where the forger already holds the capability, there
- * is no self-referential argument to fall back on. The page cannot mint an
- * elicitation answer any other way, so handing it one is a real escalation.
+ * The routing itself moved to the service worker (ADR-024 R12): a question
+ * opens the same extension-origin window every approval uses, so it never
+ * reaches page world and the page never composes the answer. What arrives here
+ * is only the worker saying it had to SKIP one — the window would not open, it
+ * went unanswered before the agent stopped listening, or the session died
+ * underneath it.
  *
- * Answered immediately as SKIPPED rather than left to the daemon's five-minute
- * deadline. Both end in the same place — the agent proceeds without an answer
- * — but only one of them is a decision: a stall is indistinguishable from a
- * slow agent, so the user watches a turn hang for minutes over a question they
- * were never shown. A skip carries no authority and attributes nothing to the
- * user, which is exactly why it is the safe thing to send on their behalf and
- * an ANSWER never would be.
+ * The user is still told, because a question they never got the chance to
+ * answer changes how much they should trust what comes next (ADR-024 R4). A
+ * skip carries no authority and attributes nothing to them, which is exactly
+ * why it is the safe thing to send on their behalf and an ANSWER never would
+ * be.
  *
- * The user is still told, because a question they did not get the chance to
- * answer changes how much they should trust what comes next (ADR-024 R4). The
- * complete fix is a form in extension chrome — the consent window renders
- * `connect`, `approve` and `pair` today and has no question kind — at which
- * point this becomes the fallback for a surface with no window open rather
- * than the whole story.
+ * Honest limit: the notice needs a surface, and on a page-declared site where
+ * the user never opened the widget there is no extension surface to draw on.
+ * It is logged there and nothing more. Giving the overlay a life of its own
+ * just to carry notices is a bigger change than this one.
  */
-function skipAsk(ref: string, payload: unknown): void {
-  const askId = isRecord(payload) && typeof payload['id'] === 'string' ? payload['id'] : undefined;
-  if (!askId) {
-    log.error('the agent asked something with no id; nothing can answer it', { data: { ref } });
-    return;
-  }
-  log.warn('skipping an agent question: no extension-chrome form surface exists', { data: { ref } });
-  tell({ t: 'answer', ref, askId });
-  overlayInstance?.notice('Your agent asked you a question. This surface cannot show it, so it was skipped — expect a guess.');
+function noticeAskSkipped(ref: string, payload: unknown): void {
+  const message = isRecord(payload) && typeof payload['message'] === 'string' ? payload['message'] : undefined;
+  log.warn('a question could not be put to the user; the agent was told it was skipped', {
+    data: { ref, hasSurface: overlayInstance !== undefined },
+  });
+  overlayInstance?.notice(
+    message
+      ? `Your agent asked you something and it could not be shown, so it was skipped — expect a guess.`
+      : 'Your agent asked you a question that could not be shown, so it was skipped — expect a guess.',
+  );
 }
 
 function ownedBy(ref: string, owner: Origin): SessionRecord | undefined {
@@ -409,10 +402,21 @@ function onWorkerMessage(message: WorkerToContent): void {
       if (!record) return;
       // `ask` is checked BEFORE ownership, because ownership is exactly the
       // wrong discriminator for it: a page-owned session is the case where
-      // forwarding is most tempting and least safe.
-      if (message.event === 'ask') skipAsk(message.ref, message.payload);
-      else if (record.owner === 'page') toPage({ t: 'event', ref: message.ref, event: message.event, payload: message.payload });
-      else onWidgetEvent(message.event, message.payload);
+      // forwarding is most tempting and least safe. The worker no longer
+      // emits it — questions go to extension chrome — so this is the boundary
+      // holding independently of the policy above it, not a live path. A
+      // boundary that only holds while the routing is correct is not one.
+      if (message.event === 'ask') {
+        log.error('the worker forwarded a question to a document; refusing to hand the user voice to the page', {
+          data: { ref: message.ref },
+        });
+      } else if (message.event === 'ask.skipped') {
+        noticeAskSkipped(message.ref, message.payload);
+      } else if (record.owner === 'page') {
+        toPage({ t: 'event', ref: message.ref, event: message.event, payload: message.payload });
+      } else {
+        onWidgetEvent(message.event, message.payload);
+      }
       if (message.event === 'closed') records.delete(message.ref);
       return;
     }

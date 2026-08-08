@@ -213,6 +213,24 @@ export type ConsentPayload =
       domain: AuthorityDomain;
       summary: string;
       call?: { name: string; arguments: Record<string, unknown> };
+    }
+  /**
+   * The agent asking its own user a question (ADR-024 R12).
+   *
+   * The whole reason this kind exists: the daemon grants this tier `mayAsk`
+   * because the CLIENT holds the user key, and the client is this extension —
+   * not the document. Rendering the question anywhere a page can draw or read
+   * would hand the site the user's own voice, and unlike a `site_tool`
+   * approval there is no self-referential argument to fall back on, because a
+   * page cannot mint an elicitation answer any other way.
+   */
+  | {
+      kind: 'ask';
+      origin: string;
+      agentName: string;
+      /** Agent-authored, and steered by whatever the agent has been reading. */
+      message: string;
+      fields: FormField[];
     };
 
 /**
@@ -233,11 +251,38 @@ export const CONSENT_DENIAL: { readonly [K in ConsentPayload['kind']]: unknown }
   connect: null,
   pair: false,
   approve: false,
+  /**
+   * A SKIP, and this is the entry the whole map was built for. A skip is a
+   * real answer — the agent proceeds without one — and it is emphatically not
+   * `false`, which is what the boolean-shaped ternary this replaced would
+   * have produced and handed to `session.answer()`.
+   */
+  ask: null,
 };
 
 /** The denial for a kind, so no call site re-derives one. */
 export function consentDenial(kind: ConsentPayload['kind']): unknown {
   return CONSENT_DENIAL[kind];
+}
+
+/**
+ * Turn what the question window collected into the wire's answer shape.
+ *
+ * Pure, and here rather than inside the consent component, because it is the
+ * DIALECT the agent receives and it needs a check: empty fields are omitted
+ * (absent means "left blank", which the daemon and the daemon's terminal form
+ * already agree on) and a multi-select joins with the same separator the
+ * terminal uses, so one dialect reaches the agent whichever surface answered.
+ *
+ * It lived in `consent.ts` first, where nothing could import it — that module
+ * calls `chrome.runtime.connect` at load. Untestable-where-it-sits was the
+ * signal it sat in the wrong place, the same lesson `synthesisedNames` taught
+ * in `lifecycle.ts`.
+ */
+export function answerFieldsFrom(picked: ReadonlyMap<string, readonly string[]>): AnswerField[] {
+  return [...picked.entries()]
+    .map(([key, values]) => ({ key, value: values.filter((value) => value !== '').join(', ') }))
+    .filter((field) => field.value !== '');
 }
 
 export type ConsentToWorker =

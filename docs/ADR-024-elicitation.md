@@ -1,7 +1,8 @@
 # ADR-024: The agent may ask its own user — where that is possible
 
-- **Status:** accepted; R1–R11 implemented, and R12 records where R1 was
-  enforced by prose rather than by code until it was audited
+- **Status:** accepted; R1–R12 implemented. R12 records where R1 was enforced
+  by prose rather than by code until it was audited, and now carries the
+  surface that made the prose true.
 - **Date:** 2026-08-07
 - **Depends on:** ADR-003 (sealed content), ADR-018 (surface tiers), ADR-023
   (authority stamped by the side that knows the truth), ADR-019 Gate C
@@ -102,7 +103,7 @@ two of its three rows did not perform:
 |---|---|---|---|
 | delegated / hosted wallet | a page key holding a user-signed delegation | **no** | — |
 | drop-in / `viaConnect` | an ephemeral page key with no cert behind it | **only if the daemon can render it itself** | the daemon's own terminal, via `onLocalAsk` |
-| direct key — extension | the user key, held in the service worker | yes | **nothing yet.** `content.ts` skips every ask; extension chrome has no question surface |
+| direct key — extension | the user key, held in the service worker | yes | the extension's own consent window, the same one every approval uses |
 | direct key — in-page demo wallet | the user key, held in the page | yes | the page — vacuously safe, since a page holding the key could mint any authority |
 
 The refused tier is the *delegated* one — the tier we built deliberately, that
@@ -471,16 +472,41 @@ were verified non-vacuous by reverting each in place: reverting the policy
 fails the refusal check, and reverting the fork fails three, including one
 that reproduces the escalation by observing the page receive the question.
 
-**Still open, and deliberately not papered over.** Extension chrome has no
-question surface, so on the tier with the best claim to one the agent is
-permitted to ask and nothing renders it — the daemon grants the capability
-because the CLIENT holds the user key, and it cannot see that the client then
-declines to draw it. Until the consent window gains a question kind, the
-extension's honest behaviour is the skip, which tells the user a question was
-withheld rather than stalling their turn for five minutes. The page-world
-provider still mirrors `ask`/`answer` for interface parity across tiers;
-whether that mirror should outlive the arrival of a real surface is the
-question to settle then, not now.
+**Closed since.** Extension chrome now renders a question kind, so the tier
+with the best claim to a private answer surface has one: the worker sends the
+question to the same extension-origin window every approval uses, and the
+answer comes back over that window's own port. The question never enters page
+world at all.
+
+Three things that fell out of building it, all worth keeping:
+
+- **The window needs its own deadline, and it must be shorter than the
+  daemon's.** `ASK_TIMEOUT_MS` is five minutes, after which the daemon has
+  decayed the question to a skip and treats a late answer as a silent no-op.
+  Without a shorter window the user fills in a form that goes nowhere and is
+  never told — the form-shaped version of the stall this ADR exists to stop.
+  Four minutes, and the skip is announced.
+- **A dying session closes its own windows.** Otherwise the same failure
+  arrives by a different route.
+- **`skipAsk` did not survive as a fallback**, contrary to what R12 first
+  assumed. Once the worker owns the routing there is exactly one place that
+  decides, and a second one in the content script would have been the parallel
+  path the tenets forbid. What remains there is the *notice* — the user is
+  still told when a question could not be put to them — plus a refusal that
+  holds independently of the routing above it.
+
+**And R12's deferred question, settled.** The page-world provider keeps
+`ask`/`answer` so a site sees the same `navigator.agent` session shape on every
+tier; a method that throws on one tier and works on another is worse than one
+that never fires. But the CHANNEL is closed: `content.ts` refuses an answer
+composed in page world outright, because no legitimate one can exist there any
+more. Keep the shape, close the channel.
+
+**Honest limit that remains.** The notice needs a surface, and on a
+page-declared site where the user never opened the widget there is no
+extension surface to draw on — it is logged and nothing more. Giving the
+overlay a life of its own purely to carry notices is a larger change than this
+one, and is not pretended otherwise.
 
 ## The cost, stated rather than discovered
 
