@@ -1212,29 +1212,6 @@ async function onContentMessage(port: chrome.runtime.Port, message: ContentReque
       lookup(port, message.ref)?.session.cancel(message.promptId);
       return;
     }
-    case 'answer': {
-      // `lookup` is the ownership check: this port must hold this ref.
-      //
-      // What happens to the ask id afterwards, stated as it is rather than as
-      // it was: `AgentSession.answer` does NOT check it — a malformed one
-      // throws out of `seal()` when the frame fails its own schema, and a
-      // well-formed one the agent never issued travels to the DAEMON, which
-      // is the only party that refuses it. The daemon also refuses an id it
-      // has already settled, because delete-before-resolve there makes a
-      // duplicate answer a no-op rather than a second, contradictory one.
-      const entry = lookup(port, message.ref);
-      if (!entry) {
-        log.warn('dropped an answer for a session this port does not hold', { data: { ref: message.ref } });
-        return;
-      }
-      // `Object.fromEntries`, not assignment into a literal: it DEFINES own
-      // properties, so a field key of `__proto__` becomes a plain key instead
-      // of reaching the prototype setter. The pairs were already validated
-      // against the wire's own key pattern and length bound at the page
-      // boundary, so this is the first and only place they become an object.
-      entry.session.answer(message.askId, Object.fromEntries((message.values ?? []).map((f) => [f.key, f.value])));
-      return;
-    }
     case 'tool.result': {
       const entry = lookup(port, message.ref);
       const deferred = entry?.pending.get(message.callId);

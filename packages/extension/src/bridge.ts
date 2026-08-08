@@ -173,8 +173,6 @@ export type ContentToWorker =
   | { t: 'history'; rid: string; ref: string }
   | { t: 'prompt'; rid: string; ref: string; promptId: string; text: string; context?: Record<string, unknown> }
   | { t: 'prompt.cancel'; ref: string; promptId: string }
-  /** Already validated by `readPageOutbound`; the ref is re-checked here. */
-  | { t: 'answer'; ref: string; askId: string; values?: AnswerField[] }
   | { t: 'tool.result'; ref: string; callId: string; ok: boolean; result?: unknown; error?: string }
   | { t: 'close'; ref: string; reason?: string }
   | { t: 'status'; rid: string };

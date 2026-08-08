@@ -229,6 +229,13 @@ window.addEventListener('message', (event: MessageEvent) => {
       // this line is confused or hostile, and either is worth seeing. The
       // validator above stays exactly as strict, because a boundary that only
       // holds while the routing above it is correct is not a boundary.
+      //
+      // And there is no longer anywhere to forward it TO: `ContentToWorker`
+      // has no `answer` member and the worker has no handler, because once
+      // the consent window started answering questions nothing produced one.
+      // That is deliberate rather than incidental — the worker's handler put
+      // an answer on the wire under the user's authority, and a path carrying
+      // that which nothing can reach is the worst kind to leave lying about.
       log.error('refused an answer composed in page world; questions are answered in extension chrome', {
         data: { ref: body.ref },
       });
