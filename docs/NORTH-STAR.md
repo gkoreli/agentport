@@ -203,6 +203,46 @@ failure — and fix whatever a stranger would hit. That is a thing a person
 does, not a thing a suite proves, and it is the only one of the six that
 works that way.
 
+### The second time, which is the one that proves the mechanism
+
+The first walk after that paragraph was written found the same front door
+broken again — one line higher.
+
+The call had been corrected from `navigator.agent.connect(...)` to
+`AgentPort.connect(...)`. The **script tag that defines that global** had not.
+`site/build.ts` built `connect.ts` as ESM alongside the two demo surfaces, so
+the published artifact ended in a top-level `export`, and a classic
+`<script src>` parses under the Script goal where that is a SyntaxError. The
+file never executed, the global was never assigned, and the documented call
+threw `ReferenceError: AgentPort is not defined` — for every visitor, on every
+site, for as long as the file had existed.
+
+Three things about that are worth more than the fix:
+
+1. **A fix can move a bug instead of removing it.** The postmortem above was
+   written about this exact snippet, and the snippet was still broken. What
+   changed was which line failed first.
+2. **The blind spot was structural, not careless.** Nothing we ship loads
+   `/connect.js`. Our surfaces bundle the source; the landing page shows the
+   tag inside a `<pre>`, rendered as documentation and never executed. No
+   build, no check, no deploy and no demo has ever exercised the one artifact
+   the entire adoption story rests on. That is what "nobody is ever in a
+   position to notice" means concretely.
+3. **The rest of the walk found more than the snippet did.** A daemon that
+   printed a perfect explanation of a version mismatch and then waited
+   forever; a wallet screen asking a stranger for a pairing code from a daemon
+   they had no way to know they needed; a landing page and a README giving
+   different instructions for the same step. None of those is a protocol bug,
+   and none would ever appear in a suite, because every one of them is only
+   visible from outside.
+
+The narrow lesson is that the *artifact* can carry a check even where the
+*path* cannot: "the built `connect.js` parses under the goal the documented
+tag parses it under" is a property of the file, not an encoding of what we
+believe a visitor does, and it now fails the build. The broad lesson is that
+this walk is not optional maintenance. It is the only instrument that points
+at the requirement most likely to be the one that kills this.
+
 ## How we would know it worked
 
 Not metrics — signals, roughly in the order we would expect to see them:
