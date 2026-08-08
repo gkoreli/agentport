@@ -745,7 +745,12 @@ Lifecycle traffic remains clear and includes, depending on the flow:
 - client, agent, and ephemeral public keys and their proofs;
 - agent name/runtime, session status, denial and close reasons, and missed
   frame counts;
-- the resume bearer token while a resume/open response is in transit.
+- the resume bearer token while a resume/open response is in transit;
+- the origin carried by a `revoke` frame — so a relay that routes one learns
+  which site you just cut off from this agent, and by accumulation which sites
+  you have attached to through it. ADR-022 R8 considered hashing the origin
+  and rejected it as theatre: origins are low-entropy and the relay already
+  knows the agent key, so any hash it can see it can also brute-force.
 
 These fields are authenticated where they affect the session decision, but
 they are not confidential. The relay stores none of them durably; seeing a
@@ -817,14 +822,17 @@ assertion cannot fail for the claimed property does not count as evidence.
 - The E2E suite covers ownership denial, grant restriction, approval refusal,
   on-path observation, tampering, replay, proof stripping, grant rewriting,
   resume-token theft, and edge-owned history. It does not yet directly attack
-  invalid cert rebinding, self-reported identity replacement, grant expiry,
-  every cross-role/non-participant route, or compare old and resumed
-  attachment keys. Those rows above remain required test work, not implied
-  coverage.
+  invalid cert rebinding, self-reported identity replacement, grant expiry, or
+  every cross-role/non-participant route. Those rows above remain required
+  test work, not implied coverage. (Old and resumed attachment keys *are* now
+  compared — e2e asserts the fingerprint words change across a rekey, since
+  identical words would mean a key was reused.)
 - Production key custody and origin attestation still depend on completing the
   extension boundary. The in-page wallet remains demo-only.
-- There is no revocation UI, and prompt injection containment for the runtime's
-  unrelated personal tools remains incomplete (ADR-014).
+- Revocation is CLI-only (`agentport status | revoke <origin> | unpair`, per
+  ADR-022); no wallet or extension surface lists what holds your agent. Prompt
+  injection containment for the runtime's unrelated personal tools remains
+  incomplete (ADR-014).
 
 ### Explicit limitations and non-goals
 

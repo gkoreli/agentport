@@ -428,8 +428,12 @@ Two behavioral consequences worth stating plainly:
    wallet together.
 2. **`session.opened`/`connect.begin` without sealing proofs die at the relay's
    decoder**, not at the daemon — the schema requires `epk`/`epkSig`. The
-   daemon's `sealing_required` check became unreachable and was deleted with
-   it; e2e now asserts the relay-side rejection.
+   daemon's `sealing_required` check is NOT dead and was not deleted: `client`
+   is relay-stamped and therefore optional in the schema, so an *unstamped*
+   open still reaches the daemon and is refused there. That is precisely the
+   lying-relay case ADR-018 exists for, so the check is a fail-closed edge
+   guard, not a leftover. e2e asserts the relay-side rejection of a missing
+   `epk`; the unstamped-`client` path is unasserted.
 
 #### Library review (required by §1 before adopting a schema library)
 

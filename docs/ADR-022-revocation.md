@@ -243,9 +243,16 @@ The e2e section must prove, over real sockets:
 4. A delegation issued *after* the revocation instant works — the tombstone is
    not a denylist.
 5. Another origin's live session is untouched.
-6. After `unpair`, an owner who still holds a valid cert copy is refused
-   (absent ownership is refusal).
-7. A delegated page key attempting `revoke` is refused by the relay.
+6. A delegated page key attempting `revoke` is refused by the relay.
+
+Not asserted, and listed here rather than above so the gap is not mistaken
+for coverage: **after `unpair`, an owner who still holds a valid cert copy is
+refused.** The enforcement is real (`AgentDaemon#onSessionOpen` refuses when
+`client !== cert?.user`, with an absent cert failing the comparison), but an
+honest relay refuses such an open *before* the daemon branch is ever reached,
+so an ordinary wallet cannot exercise it. Asserting it needs a lying-relay
+harness of the kind section 10 already builds for the on-path observer. That
+is the check to write, not a weaker one against a cooperating relay.
 
 Each check is verified non-vacuous by reverting the fix in place, per the
 house rule.
@@ -285,11 +292,16 @@ session (closing needs no authority), but a tombstone cannot bind an origin
 string a page invented. That is a property of the connect tier, not of
 revocation.
 
-**A pre-approved connect offer is not covered.** The daemon keeps sealing
-keypairs minted at connect-offer time, keyed by the client's ephemeral key and
-carrying no origin, with no TTL and no sweep. An offer the owner accepted that
-never became a session leaves a redeemable keypair that `revoke(origin)`
-structurally cannot reach. It is a leak in the connect tier's own lifecycle
+**A pre-approved connect offer is not covered by an origin tombstone.** The
+daemon keeps sealing keypairs minted at connect-offer time, keyed by the
+client's ephemeral key and carrying **no origin** — which is the whole
+problem, since `revoke(origin)` has nothing to match on. The window is
+bounded, contrary to an earlier draft of this section: `CONNECT_APPROVAL_TTL_MS`
+is six minutes, the heartbeat sweeps stale offers, and redemption re-checks the
+TTL and deletes the entry so an offer cannot be spent twice. So the honest
+limit is a redemption window of at most six minutes in which an offer the
+owner accepted, and that never became a session, stays reachable by its holder
+and unreachable by `revoke`. It is a leak in the connect tier's own lifecycle
 and it should get a TTL; it is not something an origin tombstone can fix.
 
 ## Trade-offs

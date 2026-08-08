@@ -814,9 +814,12 @@ console.log('\n10. the relay is blind (ADR-003)');
     tools: inkwellTools(),
     decide: () => true,
   }).catch((err: Error) => { strippedClientProof = err.message; });
-  // The schema requires epk/epkSig on session.open, so the RELAY now rejects
-  // the stripped frame at decode — the daemon's own sealing_required check
-  // became unreachable dead code and was deleted with it.
+  // The schema requires epk/epkSig on session.open, so the RELAY rejects the
+  // stripped frame at decode. That closes two of the three disjuncts in the
+  // daemon's own sealing_required check — but NOT the third: `client` is
+  // relay-stamped and optional in the schema, so an unstamped open still
+  // reaches the daemon. The check is live and fail-closed; this assertion
+  // covers the relay half only.
   check('omitting the client sealing proof is rejected at the relay', strippedClientProof.includes('missing_key at session.open.epk'), strippedClientProof);
   downgradeWallet.close();
 

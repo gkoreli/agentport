@@ -746,7 +746,12 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
         // is what makes a replayed response a no-op and stops a timeout racing
         // an answer into a double resolve. A refactor that resolves first, or
         // that keeps answered ids around for idempotency, kills the property
-        // silently, which is why e2e now asserts it.
+        // silently — and NOTHING asserts it. ADR-023 R9 records why: the nonce
+        // guard makes wire duplication unreachable, so only a purpose-built
+        // hostile peer could exercise this, and a check that cannot fail would
+        // prove nothing. This ordering is protected by review alone. Do not
+        // upgrade that sentence into a claim of coverage without adding the
+        // harness that earns it.
         this.#sessions.get(frame.s)!.approvals.delete(frame.id);
         // The answer must be about the question (ADR-023 R6). A decision that
         // did not come from a human reading this exact call — a policy engine,
