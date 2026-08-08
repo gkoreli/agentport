@@ -20,10 +20,43 @@ import type { SiteTool } from '@agentport/client';
 const MAX_TEXT = 40_000;
 const MAX_ELEMENTS = 200;
 
-/** Handles are per-listing: a stale handle fails rather than hitting whatever
- *  occupies that position after a re-render. */
-const handles = new Map<string, WeakRef<Element>>();
+/**
+ * What a handle remembers, so resolving one can prove it still means what the
+ * agent thought it meant.
+ *
+ * `isConnected` alone was the old proof, and it proves the wrong thing: that
+ * the same DOM NODE is still attached. Every mainstream framework reconciles
+ * by mutating nodes in place, so an unkeyed list re-order leaves the same node
+ * carrying different text and different handlers. A click approved as "Delete
+ * draft" then fires on "Confirm purchase", `isConnected` is true, and `{ok:
+ * true}` comes back. **No error is possible on that path** — the click
+ * SUCCEEDS on the wrong element, which is the failure mode nothing downstream
+ * can catch and the user cannot see.
+ *
+ * So a handle records what the element WAS, and resolution refuses when it no
+ * longer matches. It never re-resolves to something else: re-deciding is the
+ * agent's job, and a harness that silently heals is a harness that acts on a
+ * choice nobody made.
+ */
+interface Handle {
+  ref: WeakRef<Element>;
+  /** Role and label as they were when the agent was shown this element. */
+  role: string;
+  name: string;
+}
+
+const handles = new Map<string, Handle>();
 let handleSeq = 0;
+
+/**
+ * Bumped on every listing, and carried in the handle itself.
+ *
+ * A stale handle is then structurally detectable rather than a heuristic: the
+ * generation in the string says which listing it came from, so "you are using
+ * a ref from before your last listing" is a different answer from "that
+ * element is gone", and the agent can tell them apart without guessing.
+ */
+let generation = 0;
 
 /**
  * Whether a human looking at this page could see this element.
@@ -149,6 +182,7 @@ function describeKind(el: Element): string {
 
 function listElements(): { elements: ElementRow[]; truncated: boolean } {
   handles.clear();
+  generation++;
   const selector = 'a[href], button, input, textarea, select, [role="button"], [role="link"], [contenteditable="true"]';
   const rows: ElementRow[] = [];
   let truncated = false;
@@ -159,14 +193,32 @@ function listElements(): { elements: ElementRow[]; truncated: boolean } {
     }
     if (el.closest('[data-agentport-ui]')) continue;
     if (!isVisible(el)) continue;
-    const handle = `e${++handleSeq}`;
-    handles.set(handle, new WeakRef(el));
-    // NO VALUES. This tool is ungated, and it used to return the current
-    // contents of every non-password input — a half-typed card number, a
-    // one-time code, an address — to anything holding the grant. Enumeration
-    // is metadata; reading what the user typed is a different question and
-    // must be asked as one.
-    const row: ElementRow = { handle, kind: describeKind(el), label: label(el) };
+    const handle = `g${generation}e${++handleSeq}`;
+    const kind = describeKind(el);
+    const named = label(el);
+    handles.set(handle, { ref: new WeakRef(el), role: kind, name: named });
+    // NO VALUES, and the reason is not the one it looks like. The site is not
+    // what gains: every input here belongs to this origin and the page could
+    // read them with three lines of its own script, the same self-referential
+    // argument that makes page.fill and site-tool approvals safe.
+    //
+    // The party that gains is the AGENT — and through it the model, the
+    // memory, and the transcript. A half-typed card number read into context
+    // does not stay in the tab. It goes to whatever model is running, into
+    // whatever the runtime persists, and into the next turn's context on a
+    // different site. The north star promises the site learns nothing about
+    // which model, whose memory, who pays; this was the mirror of that list,
+    // the user's own typed secrets flowing the other way into the one place
+    // the product promises is theirs, without anyone being asked.
+    //
+    // So the rule is not "gate it", it is "do not collect it". A gated read
+    // would be worse than useless: the value is already on screen, so the
+    // user would be approving a question they cannot evaluate — the risk is
+    // entirely about where it goes next. Enumeration is metadata about
+    // structure; the contents of a field someone typed into is a different
+    // question, and when it is asked the honest shape is one named field, at
+    // the agent's request, with the value shown in the approval.
+    const row: ElementRow = { handle, kind, label: named };
     rows.push(row);
   }
   return { elements: rows, truncated };
@@ -174,8 +226,36 @@ function listElements(): { elements: ElementRow[]; truncated: boolean } {
 
 /** Resolve a handle, or explain why it is gone. Never falls back to a guess. */
 export function resolveHandle(value: unknown): Element {
-  const el = typeof value === 'string' ? handles.get(value)?.deref() : undefined;
-  if (!el || !el.isConnected) throw new Error('unknown element handle — call page.listElements again');
+  if (typeof value !== 'string') throw new Error('that is not an element handle');
+
+  const entry = handles.get(value);
+  if (!entry) {
+    // Distinguishable on purpose. One string for four causes told the agent
+    // nothing it could act on — "re-list and retry" and "that control is gone,
+    // find another way" are different instructions, and the old message
+    // asserted the first while covering both.
+    const stale = /^g(\d+)e/.exec(value);
+    if (stale && Number(stale[1]) < generation) {
+      throw new Error('that handle is from an earlier listing — call page.listElements again');
+    }
+    throw new Error('unknown element handle — call page.listElements again');
+  }
+
+  const el = entry.ref.deref();
+  if (!el || !el.isConnected) throw new Error('that element is no longer on the page');
+
+  // The check that makes a wrong-element click impossible rather than
+  // unlikely. If the node was reused for something else, this is where it is
+  // caught — and the refusal NAMES both meanings, so the agent can see that
+  // the page changed under it rather than being told to retry blindly.
+  const role = describeKind(el);
+  const name = label(el);
+  if (role !== entry.role || name !== entry.name) {
+    throw new Error(
+      `that element changed since you listed it — it was ${entry.role} “${entry.name}” and is now ` +
+        `${role} “${name}”. Call page.listElements again and decide afresh.`,
+    );
+  }
   return el;
 }
 

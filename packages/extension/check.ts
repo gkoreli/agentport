@@ -634,6 +634,37 @@ console.log('extension elicitation round-trip check passed');
   const handle = listed.elements[0]!.handle;
   assert.ok(resolveHandle(handle), 'a fresh handle did not resolve');
   assert.throws(() => resolveHandle('e999999'), /unknown element handle/);
+  assert.throws(() => resolveHandle(42), /not an element handle/);
+
+  // THE ONE THAT MATTERS. Frameworks reconcile by mutating nodes in place, so
+  // a list re-order leaves the same node carrying different text. Under the
+  // old `isConnected`-only proof this click SUCCEEDED on the wrong element and
+  // no error was possible — the failure the agent cannot detect and the user
+  // cannot see.
+  const button = pageWin.document.querySelector('[role="button"]')!;
+  const reused = listed.elements.find((row) => row.kind === 'button')!;
+  assert.ok(resolveHandle(reused.handle), 'the button did not resolve before the page changed');
+  button.textContent = 'Confirm purchase';
+  assert.throws(
+    () => resolveHandle(reused.handle),
+    /changed since you listed it/,
+    'a node reused for something else still resolved — a click here hits the wrong element',
+  );
+  // And the refusal names both meanings, so the agent can see WHAT changed
+  // rather than being told to retry blindly.
+  try {
+    resolveHandle(reused.handle);
+    assert.fail('expected a refusal');
+  } catch (err) {
+    const message = (err as Error).message;
+    assert.ok(message.includes('Confirm'), 'the refusal did not say what the element is now');
+  }
+
+  // A handle from an earlier listing is structurally detectable, and says so
+  // differently from "that element is gone" — different instructions.
+  const beforeRelist = listed.elements[0]!.handle;
+  await tools.get('page.listElements')!.handler({});
+  assert.throws(() => resolveHandle(beforeRelist), /from an earlier listing/);
 }
 
 console.log('page harness check passed');
