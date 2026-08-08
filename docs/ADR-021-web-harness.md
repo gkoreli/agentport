@@ -182,17 +182,27 @@ distinction visible without making it the user's problem.
 ### 5. The harness is only as good as its failure modes
 
 Generic page tools are what the agent falls back on when a site says nothing,
-so their weaknesses are the product's weaknesses. Wanted, in priority order:
+so their weaknesses are the product's weaknesses. Wanted, in priority order —
+and three of the four have since shipped, marked here rather than left reading
+as an open wish-list:
 
-- **Element addressing that survives a re-render.** A framework re-rendering
-  between `page.listElements` and `page.click` must not silently retarget.
-- **Truthful failure.** "Clicked" must mean something happened; a click into a
-  detached node must report that, not succeed quietly.
-- **Bounded, structured reads.** `page.readText` on a large document must
-  degrade predictably (`MAX_TEXT` / `MAX_ELEMENTS` exist at
-  `packages/extension/src/pagetools.ts#MAX_TEXT`) and say that it truncated.
-- **Waiting.** Real flows need "wait until this appears" more than they need
-  more verbs.
+- ~~**Element addressing that survives a re-render.**~~ **Done.**
+  `packages/extension/src/pagetools.ts#resolveHandle` refuses the call when the
+  element's role or label changed since it was listed, rather than retargeting
+  silently.
+- ~~**Truthful failure.**~~ **Done.** `page.click` consults
+  `packages/extension/src/pagetools.ts#obstruction` and says what is covering
+  the element; `page.fill` returns `applied` (the value really is what we set)
+  separately from `stable` (the DOM stopped changing), because a write that
+  the page reverted is not a write that failed.
+- ~~**Bounded, structured reads.**~~ **Done.** `MAX_TEXT` / `MAX_ELEMENTS` at
+  `packages/extension/src/pagetools.ts#MAX_TEXT`, and both readers return
+  `truncated` — an agent that reads an excerpt and does not know it was an
+  excerpt draws conclusions the page never supported.
+- **Waiting.** Still open, and still the one that matters most. `#settle`
+  exists but answers "has the DOM stopped moving", which is not the question:
+  real flows need *wait until this appears*, and without it the agent's only
+  tool for a slow page is to read it again and hope.
 
 ### 6. Prompt injection is the hard problem here, and it gets worse
 
