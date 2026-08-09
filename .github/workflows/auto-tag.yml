@@ -274,4 +274,12 @@ jobs:
             echo "@gkoreli/agentport@$VERSION is already published"
             exit 0
           fi
-          npm publish release/*.tgz --provenance --access public
+          shopt -s nullglob
+          PACKAGES=(release/*.tgz)
+          if [[ "${#PACKAGES[@]}" -ne 1 ]]; then
+            echo "::error::Expected exactly one release tarball, found ${#PACKAGES[@]}"
+            exit 1
+          fi
+          # npm 12 treats `release/name.tgz` as GitHub shorthand and ignores a
+          # bare `./` tarball spec. `file:` is the unambiguous local package.
+          npm publish "file:./${PACKAGES[0]}" --provenance --access public

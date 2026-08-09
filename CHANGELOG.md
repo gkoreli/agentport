@@ -103,6 +103,10 @@ implementation bundled into `@gkoreli/agentport@0.1.7`; CI extracts and runs
 that exact saved tarball after deployment. The workflow also refuses
 CLI/daemon/protocol changes under an already-tagged CLI version and runs every
 separately excluded browser/Worker/extension/example typecheck before tagging.
+The publisher requires exactly one downloaded tarball and passes npm an
+explicit `file:./release/...` package spec; npm 12 otherwise interprets the
+artifact path as GitHub shorthand or ignores a bare relative tarball before
+authentication.
 
 The README now gives a complete stranger-copyable integration with the exact
 public `/relay` and wallet endpoints, calls `AgentPort.connect()` from the user
