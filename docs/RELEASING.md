@@ -53,7 +53,10 @@ The real unpacked-extension gate similarly installs Chrome for Testing
 `151.0.7922.76` through a commit-pinned setup action. Do not replace it with
 the runner's branded Google Chrome: official Chrome removed command-line
 unpacked-extension loading in version 137, so the browser runs while silently
-loading no test subject.
+loading no test subject. The Ubuntu 24 Actions job explicitly disables the
+Chrome sandbox because that ephemeral runner's AppArmor policy disables the
+unprivileged user namespaces CfT needs; the harness keeps the sandbox for every
+ordinary local run.
 
 The production job requires a protected GitHub `production` environment with:
 

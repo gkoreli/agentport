@@ -106,6 +106,10 @@ jobs:
       - name: Install and verify
         env:
           AGENTPORT_CHROME: ${{ steps.setup-chrome.outputs.chrome-path }}
+          # ubuntu-24.04's AppArmor policy disables unprivileged user
+          # namespaces, so CfT cannot create its sandbox on this ephemeral
+          # runner. The harness otherwise keeps the sandbox everywhere.
+          AGENTPORT_CHROME_NO_SANDBOX: "1"
         run: |
           npm ci
           npm run typecheck

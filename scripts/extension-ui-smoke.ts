@@ -328,7 +328,9 @@ async function waitFor<T>(label: string, read: () => T | undefined | Promise<T |
 async function devtoolsEndpoint(profile: string, child: ChildProcess): Promise<string> {
   const file = join(profile, 'DevToolsActivePort');
   return waitFor('Chrome DevTools endpoint', async () => {
-    if (child.exitCode !== null) throw new Error(`Chrome exited with ${child.exitCode}`);
+    if (child.exitCode !== null || child.signalCode !== null) {
+      throw new Error(`Chrome exited with ${child.exitCode ?? child.signalCode ?? 'unknown status'}`);
+    }
     const contents = await readFile(file, 'utf8').catch(() => '');
     const [port, path] = contents.trim().split(/\r?\n/);
     if (!port || !path) return undefined;
@@ -432,7 +434,13 @@ async function main(): Promise<void> {
       '--user-data-dir=' + profile,
       'about:blank',
     ];
-    if (typeof process.getuid === 'function' && process.getuid() === 0) args.unshift('--no-sandbox');
+    const noSandbox = process.env['AGENTPORT_CHROME_NO_SANDBOX'];
+    if (noSandbox !== undefined && noSandbox !== '1') {
+      throw new Error('AGENTPORT_CHROME_NO_SANDBOX must be exactly 1 when set');
+    }
+    if (noSandbox === '1' || (typeof process.getuid === 'function' && process.getuid() === 0)) {
+      args.unshift('--no-sandbox');
+    }
     browser = spawn(chrome, args, { stdio: ['ignore', 'ignore', 'pipe'] });
     browser.stderr?.setEncoding('utf8');
     browser.stderr?.on('data', (chunk: string) => stderr.push(chunk));

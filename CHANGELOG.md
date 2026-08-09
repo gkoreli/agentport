@@ -93,7 +93,8 @@ Official branded Chrome removed unpacked-extension command-line loading in 137;
 using the runner's branded binary silently skipped the extension and reported
 an unrelated overlay timeout. The harness now refuses that unsupported browser
 up front instead of manufacturing evidence from a test subject that never
-loaded.
+loaded. Ubuntu 24's AppArmor policy also prevents CfT from creating its sandbox,
+so only the ephemeral CI run opts out; local harnesses remain sandboxed.
 
 The first independent review caught the release check checking the wrong
 thing: `scripts/remote-check.ts` imported the checkout daemon, so a new relay
