@@ -35,9 +35,12 @@ it:
 Hosted-only changes deploy without minting an npm version. If a push contains a
 change to the CLI or either of its in-repository daemon/protocol inputs, it must
 also contain a new CLI version; otherwise the workflow stops before deployment.
-Npm publication is held behind the same deployment. A manual dispatch may
-redeploy or retry an existing tag, and publishing an already present npm
-version is an idempotent success.
+Npm publication is held behind the deploy-stage verification. A manual dispatch
+with `deploy: true` redeploys the existing tag before the exact-artifact smoke.
+With `deploy: false`, it deliberately leaves Cloudflare unchanged but still
+downloads the saved tarball and proves the already-deployed production relay
+matches it before retrying npm. It is not an unchecked publish shortcut.
+Publishing an already present npm version is an idempotent success.
 
 The production job requires a protected GitHub `production` environment with:
 
@@ -96,6 +99,8 @@ result for an older package.
 
 The local Wrangler OAuth session is interactive and expiring; do not copy it
 to GitHub. Create a dedicated API token in Cloudflare and store it only in the
-protected environment. A failed deploy or remote smoke prevents npm
+protected environment. A failed deploy-stage remote smoke prevents npm
 publication. A failed npm publication can be retried from the existing tag
-through `workflow_dispatch` without creating a new release.
+through `workflow_dispatch`: set `deploy: false` only when production is
+already the intended release, so the retry verifies that deployment before
+publishing.
