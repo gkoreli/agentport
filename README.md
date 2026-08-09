@@ -3,27 +3,60 @@
 **Bring your own agent to any website.**
 
 ```html
-<script src="https://agentport.gogakoreli.workers.dev/connect.js"></script>
+<script
+  src="https://agentport.gogakoreli.workers.dev/connect.js"
+  data-relay="wss://agentport.gogakoreli.workers.dev/relay"
+  data-wallet="https://agentport-wallet.gogakoreli.workers.dev"
+></script>
+
+<textarea id="editor">A first draft.</textarea>
+<button id="connect-agent">Connect your agent</button>
 ```
 
 ```js
-const session = await AgentPort.connect({
-  name: 'Inkwell',
-  tools: [
-    {
-      name: 'inkwell.document.read',
-      description: 'Read the current document',
-      inputSchema: { type: 'object', properties: {} },
-      handler: () => ({ text: editor.value }),
-    },
-  ],
-  alwaysAsk: ['inkwell.document.replaceSelection'],
-});
+const editor = document.querySelector("#editor");
 
-await session.prompt('Tighten the opening paragraph.');
+document.querySelector("#connect-agent").addEventListener("click", async () => {
+  const session = await AgentPort.connect({
+    name: "Inkwell",
+    tools: [
+      {
+        name: "inkwell.document.read",
+        description: "Read the current document",
+        inputSchema: { type: "object", properties: {} },
+        handler: () => ({ text: editor.value }),
+      },
+      {
+        name: "inkwell.document.replace",
+        description: "Replace the current document",
+        inputSchema: {
+          type: "object",
+          properties: { text: { type: "string" } },
+          required: ["text"],
+        },
+        requiresApproval: true,
+        handler: ({ text }) => {
+          if (typeof text !== "string") throw new Error("text is required");
+          editor.value = text;
+          return { ok: true };
+        },
+      },
+    ],
+    decide: ({ summary }) => Promise.resolve(window.confirm(summary)),
+  });
+
+  await session.prompt("Tighten the opening paragraph.");
+});
 ```
 
-That is the entire integration a website writes.
+Call `AgentPort.connect()` from a user gesture: the hosted wallet opens on its
+own origin, and browsers only permit that popup while the click is live. An
+external site must set `data-relay` explicitly; without it, the drop-in uses
+the embedding site's own `/relay`, which is the self-hosted configuration.
+
+The complete integration contract — tool rules, approvals, session events,
+resume, WebMCP, CSP, errors, and deployment compatibility — is in the
+**[app-builder guide](docs/APP-BUILDER.md)**.
 
 `AgentPort.connect` is the call to write, because it works whether or not the
 user has anything installed: it prefers an installed wallet, falls back to a
@@ -62,6 +95,10 @@ remote agent** a **site-defined toolset**. That's this.
 
 **https://agentport.gogakoreli.workers.dev** — one Cloudflare Worker serving both
 demo surfaces and the relay they connect to.
+
+> **Deployment status:** `@gkoreli/agentport@0.1.6` and the hosted relay both
+> speak `agentport/5`. The production pairing, sealed-session, tool-call, and
+> prompt smoke passes. See [Release and deployment](docs/RELEASING.md).
 
 Start your agent and pair it with Chrome:
 

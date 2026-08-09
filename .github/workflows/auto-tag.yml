@@ -1,28 +1,46 @@
-name: Auto Tag and Publish
+name: Deploy, Tag, and Publish
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Existing release version to publish to npm (without v)"
+        description: "Existing release version to verify or republish (without v)"
         required: true
         type: string
+      deploy:
+        description: "Deploy this tag to Cloudflare before checking npm"
+        required: true
+        default: false
+        type: boolean
   push:
     branches:
       - main
     paths:
+      - ".github/workflows/auto-tag.yml"
+      - "package.json"
+      - "package-lock.json"
+      - "wrangler.toml"
+      - "wrangler.wallet.toml"
+      - "scripts/deploy.ts"
+      - "scripts/remote-check.ts"
+      - "site/**"
+      - "wallet/**"
+      - "src/nisli-ui/**"
+      - "packages/agui/**"
+      - "packages/client/**"
+      - "packages/protocol/**"
+      - "packages/relay/**"
       - "packages/cli/package.json"
 
 concurrency:
-  group: publish
+  group: production-release
   cancel-in-progress: false
 
 permissions:
   contents: write
-  id-token: write
 
 jobs:
-  tag:
+  prepare:
     runs-on: ubuntu-latest
     outputs:
       changed: ${{ steps.version.outputs.changed }}
@@ -32,7 +50,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Check if version changed
+      - name: Resolve release version
         id: version
         env:
           INPUT_VERSION: ${{ inputs.version }}
@@ -61,28 +79,129 @@ jobs:
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Create and push tag
-        if: steps.version.outputs.changed == 'true'
+  verify:
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', needs.prepare.outputs.version) || github.sha }}
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+          package-manager-cache: false
+
+      - name: Install and verify
+        run: |
+          npm ci
+          npm run typecheck
+          npm run wire:check
+          npm run e2e
+
+      - name: Build release package
         env:
-          VERSION: v${{ steps.version.outputs.current }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          PACKAGE_VERSION=$(node -p "require('./packages/cli/package.json').version")
+          if [[ "$PACKAGE_VERSION" != "$VERSION" ]]; then
+            echo "::error::Release v$VERSION points at package version $PACKAGE_VERSION"
+            exit 1
+          fi
+          npm run build --workspace=@gkoreli/agentport
+          BUILT_VERSION=$(node packages/cli/dist/main.js --version)
+          if [[ "$BUILT_VERSION" != "$VERSION" ]]; then
+            echo "::error::Built CLI reports $BUILT_VERSION, expected $VERSION"
+            exit 1
+          fi
+          mkdir release
+          npm pack ./packages/cli --pack-destination release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm-package-${{ needs.prepare.outputs.version }}
+          path: release/*.tgz
+          if-no-files-found: error
+          retention-days: 7
+
+  tag:
+    needs: [prepare, verify]
+    if: needs.prepare.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Create and push tag
+        env:
+          VERSION: v${{ needs.prepare.outputs.version }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git tag -a "$VERSION" -m "Release $VERSION"
           git push origin "$VERSION"
 
+  deploy:
+    needs: [prepare, verify, tag]
+    if: >-
+      ${{
+        always() &&
+        needs.prepare.result == 'success' &&
+        needs.verify.result == 'success' &&
+        (needs.tag.result == 'success' || needs.tag.result == 'skipped') &&
+        (github.event_name == 'push' || inputs.deploy)
+      }}
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', needs.prepare.outputs.version) || github.sha }}
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+          package-manager-cache: false
+
+      - name: Deploy matching Worker, relay, and wallet
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          npm ci
+          npm run deploy:ci
+
+      - name: Prove the deployed relay matches this release
+        run: |
+          for attempt in 1 2 3; do
+            if timeout 90s npx tsx scripts/remote-check.ts; then
+              exit 0
+            fi
+            if [[ "$attempt" -lt 3 ]]; then
+              echo "The Durable Object may still be draining the previous version; retrying in 10 seconds"
+              sleep 10
+            fi
+          done
+          echo "::error::Deployed relay did not pass the remote check after three bounded attempts"
+          exit 1
+
   npm:
-    needs: tag
-    if: ${{ needs.tag.outputs.changed == 'true' || github.event_name == 'workflow_dispatch' }}
+    needs: [prepare, verify, tag, deploy]
+    if: >-
+      ${{
+        always() &&
+        needs.prepare.result == 'success' &&
+        needs.verify.result == 'success' &&
+        (needs.tag.result == 'success' || needs.tag.result == 'skipped') &&
+        (needs.deploy.result == 'success' || needs.deploy.result == 'skipped') &&
+        (needs.prepare.outputs.changed == 'true' || github.event_name == 'workflow_dispatch')
+      }}
     runs-on: ubuntu-latest
     permissions:
       id-token: write
       contents: read
     steps:
-      - uses: actions/checkout@v5
-        with:
-          ref: v${{ needs.tag.outputs.version }}
-
       - uses: actions/setup-node@v5
         with:
           node-version: "24"
@@ -92,28 +211,17 @@ jobs:
       - name: Upgrade npm (required for OIDC trusted publishing)
         run: npm install -g npm@latest
 
-      - name: Install and verify
-        run: |
-          npm ci
-          npm run typecheck
-          npm run wire:check
-          npm run e2e
+      - uses: actions/download-artifact@v4
+        with:
+          name: npm-package-${{ needs.prepare.outputs.version }}
+          path: release
 
-      - name: Build npm package
+      - name: Publish npm package if absent
         env:
-          VERSION: ${{ needs.tag.outputs.version }}
+          VERSION: ${{ needs.prepare.outputs.version }}
         run: |
-          PACKAGE_VERSION=$(node -p "require('./packages/cli/package.json').version")
-          if [[ "$PACKAGE_VERSION" != "$VERSION" ]]; then
-            echo "::error::Tag v$VERSION points at package version $PACKAGE_VERSION"
-            exit 1
+          if npm view "@gkoreli/agentport@$VERSION" version >/dev/null 2>&1; then
+            echo "@gkoreli/agentport@$VERSION is already published"
+            exit 0
           fi
-          npm run build --workspace=@gkoreli/agentport
-          BUILT_VERSION=$(node packages/cli/dist/main.js --version)
-          if [[ "$BUILT_VERSION" != "$VERSION" ]]; then
-            echo "::error::Built CLI reports $BUILT_VERSION, expected $VERSION"
-            exit 1
-          fi
-
-      - name: Publish npm package
-        run: npm publish ./packages/cli --provenance --access public
+          npm publish release/*.tgz --provenance --access public

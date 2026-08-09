@@ -28,6 +28,7 @@
     "wallet:check": "tsx scripts/wallet-popup-check.ts",
     "site:dev": "npm run site:build && wrangler dev",
     "deploy": "tsx scripts/deploy.ts",
+    "deploy:ci": "tsx scripts/deploy.ts --ci",
     "connect": "tsx packages/daemon/src/connect-cli.ts",
     "ui:smoke": "tsx scripts/ui-smoke.ts",
     "ui:extension-smoke": "tsx scripts/extension-ui-smoke.ts",

@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 const here = dirname(fileURLToPath(import.meta.url));
 const publicDir = join(here, 'public');
 const { version } = JSON.parse(readFileSync(join(here, '../package.json'), 'utf8')) as { version: string };
+const buildVersion = process.env['AGENTPORT_BUILD_VERSION'] ?? version;
 
 mkdirSync(publicDir, { recursive: true });
 // Workers static-asset SPA fallback serves index.html for /connect.
@@ -19,5 +20,5 @@ await esbuild.build({
   target: 'es2022',
   minify: true,
   logLevel: 'info',
-  define: { __AGENTPORT_VERSION__: JSON.stringify(version) },
+  define: { __AGENTPORT_VERSION__: JSON.stringify(buildVersion) },
 });

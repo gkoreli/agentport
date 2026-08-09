@@ -7,6 +7,7 @@ import { webcrypto } from 'node:crypto';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const { version } = JSON.parse(readFileSync(join(here, '../package.json'), 'utf8')) as { version: string };
+const buildVersion = process.env['AGENTPORT_BUILD_VERSION'] ?? version;
 
 const shared = {
   outdir: join(here, 'public'),
@@ -14,7 +15,7 @@ const shared = {
   target: 'es2022',
   minify: true,
   logLevel: 'info',
-  define: { __AGENTPORT_VERSION__: JSON.stringify(version) },
+  define: { __AGENTPORT_VERSION__: JSON.stringify(buildVersion) },
 } as const;
 
 // Our own two demo surfaces. `inkwell.html` and `tasker.html` load these with

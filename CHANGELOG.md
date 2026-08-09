@@ -10,6 +10,48 @@ they moved.
 
 ## Unreleased
 
+### The release is one verified transaction, not three independently moving artifacts
+
+The hosted Worker/relay, hosted wallet, and npm daemon speak one lockstep wire
+protocol, but the old automation watched only `packages/cli/package.json`,
+tagged first, and published npm without deploying or proving the matching
+Cloudflare endpoints. A green publish could therefore make the command users
+installed incompatible with the relay they immediately dialled.
+
+The release workflow now watches every source that contributes to a hosted or
+wire-speaking artifact, verifies the repository before tagging, preserves the
+exact npm tarball it checked, deploys the matching site/relay and wallet through
+the same deploy script used locally, runs the bounded production smoke, and
+only then publishes that saved tarball. Manual retries are idempotent: an
+existing tag can be redeployed and an already-published npm version is success.
+CI deploys stamp the root version plus commit identity without manufacturing a
+commit on the runner; local deploys keep the existing version-bump commit.
+
+The README now gives a complete stranger-copyable integration with the exact
+public `/relay` and wallet endpoints, calls `AgentPort.connect()` from the user
+gesture a popup requires, and points to new app-builder and release guides.
+The app guide records the tool, approval, event, resume, CSP, error, WebMCP,
+and compatibility contract; the release guide records the single deployment
+order, credentials, retry path, and clean-install proof.
+
+### A page is not a wallet — the custody/API ambiguity is now a proposed decision
+
+An external app copied the local demo's direct `AgentWallet` construction,
+persisted a root user key in the site's own `localStorage`, and then exposed
+the mistake through a relay URL missing `/relay`. Fixing the URL restores
+availability; it does not fix the architectural footgun that made privileged
+wallet construction look like the ordinary app-builder API.
+
+ADR-025 records the two failures separately. Misuse resistance makes
+`AgentPort.connect()` the sole default website API and moves wallet machinery
+behind an explicitly privileged package boundary. Security containment makes
+browser attachment keys ephemeral, keeps the root key on the control plane,
+and routes runtime-owned approvals and user answers only to a destination the
+page cannot forge. It also states the non-negotiable limit: E2EE hides content
+from the relay, not from an endpoint holding the key, so production root
+custody ultimately needs a non-exportable passkey or remote signer. The ADR is
+proposed; this checkpoint changes no protocol behavior yet.
+
 ### The extension can answer the agent's question, and now typechecks
 
 Narrowing the policy predicate to delegation turned elicitation ON for the
