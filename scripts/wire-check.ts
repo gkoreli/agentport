@@ -46,9 +46,11 @@ import {
   generateSealKeyPair,
   openSealed,
   seal,
+  signEpk,
+  verifyEpk,
   type SealedFrame,
 } from '../packages/protocol/src/seal.js';
-import { canonicalJson } from '../packages/protocol/src/crypto.js';
+import { canonicalJson, generateKeyPair, sign, verify } from '../packages/protocol/src/crypto.js';
 import { decodeFrame, encodeFrame } from '../packages/protocol/src/wire.js';
 
 let failures = 0;
@@ -519,6 +521,32 @@ console.log('\n6. protocol version');
     'the wire matches the fingerprint recorded beside its version',
     wireFingerprint() === WIRE_FINGERPRINT,
     { recorded: WIRE_FINGERPRINT, actual: wireFingerprint() },
+  );
+
+  // The wire fingerprint covers frame schemas, not the semantics of a signed
+  // transcript: this change deliberately has no new frame field and therefore
+  // does not move that fingerprint. Prove the semantic boundary directly. The
+  // legacy signature is over the exact pre-v6, versionless transcript; if the
+  // locally compiled version is removed from epkProofMessage, this rejection
+  // becomes an acceptance and the check fails for the downgrade it names.
+  const identity = generateKeyPair();
+  const epk = generateSealKeyPair().publicKey;
+  const scope = 'sess_version_proof';
+  const binding = { mode: 'resume', agent: 'a'.repeat(64), token: 'legacy-token' };
+  const currentSignature = signEpk(identity.secretKey, scope, epk, binding);
+  const legacyMessage = `agentport-epk-v1:${canonicalJson({ scope, epk, binding })}`;
+  const legacySignature = sign(identity.secretKey, legacyMessage);
+  check(
+    'a current v6 EPK proof verifies',
+    verifyEpk(identity.publicKey, scope, epk, currentSignature, binding),
+  );
+  check(
+    'the legacy versionless signature is valid for its historical transcript',
+    verify(identity.publicKey, legacyMessage, legacySignature),
+  );
+  check(
+    'v6 rejects a legacy versionless EPK proof',
+    !verifyEpk(identity.publicKey, scope, epk, legacySignature, binding),
   );
 }
 

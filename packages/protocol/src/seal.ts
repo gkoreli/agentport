@@ -40,6 +40,7 @@ import { canonicalJson, sign, verify, type KeyPair } from './crypto.js';
 import {
   AGENT_SEALABLE,
   CLIENT_SEALABLE,
+  PROTOCOL_VERSION,
   type CapabilityGrant,
   type Hex,
   type Role,
@@ -58,10 +59,12 @@ export function generateSealKeyPair(): KeyPair {
 /**
  * The message an identity key signs to vouch for an ephemeral key. `scope` is
  * the session id (or 'connect' before one exists) so a proof cannot be
- * replayed into a different session.
+ * replayed into a different session. The locally compiled protocol version is
+ * part of the proof so a relay cannot negotiate a different version with each
+ * endpoint and carry an older endpoint's otherwise-valid proof into this one.
  */
 export function epkProofMessage(scope: string, epk: Hex, binding: unknown): string {
-  return `agentport-epk-v1:${canonicalJson({ scope, epk, binding })}`;
+  return `agentport-epk-v1:${canonicalJson({ version: PROTOCOL_VERSION, scope, epk, binding })}`;
 }
 
 export function signEpk(identitySecretKey: Hex, scope: string, epk: Hex, binding: unknown): Hex {
