@@ -1,6 +1,7 @@
 # ADR-025: A page is not a wallet — misuse-resistant APIs and enforceable custody
 
-- **Status:** proposed; no implementation has landed
+- **Status:** proposed; three independent Sol reviews integrated; no
+  implementation has landed. Resume repair (R4) is a security prerequisite.
 - **Date:** 2026-08-08
 - **Owners:** AgentPort maintainers
 - **Depends on:** ADR-003 (end-to-end sealing), ADR-008 (wallet tiers),
@@ -94,6 +95,30 @@ site tools delivered to that tab. It must not also become the user's durable
 authority endpoint merely because both responsibilities currently fit in one
 class.
 
+### Prerequisite found during review: resume can change the E2EE endpoint
+
+Reviewing this boundary exposed an older defect that must be fixed before a
+second authority path is built. `session.opened` sends its resume token as
+visible lifecycle metadata, so a malicious relay knows it. On resume,
+`AgentDaemon#onSessionResume`
+(`packages/daemon/src/daemon.ts#onSessionResume`) checks that bearer token and
+verifies the fresh X25519 key against the *new* relay-stamped Ed25519 client,
+but never requires that client to equal the attachment's stored
+`clientKey`. It then overwrites `clientKey` with the new value.
+
+A malicious relay can therefore observe a legitimate token, force a detach,
+generate its own Ed25519 and X25519 keys, resume as the new client, and become
+the application-side plaintext endpoint. The retained attachment policy comes
+with it. The existing resume-theft checks do not cover that adversary: they
+test a socket without the token or a thief while the original attachment is
+still live, while the relay has the token and can manufacture the detach.
+
+This means the current E2EE claim holds for a fresh attachment and does not
+hold across the current bearer-only resume. R4 makes attachment identity
+stable for the logical attachment and requires proof of that identity on every
+resume. A control design built before this repair would inherit the same
+takeover.
+
 ## Decision
 
 This ADR decides both the developer-facing boundary and the security boundary.
@@ -102,11 +127,18 @@ is a containment control, not proof that an exportable root key remained
 secret. Production custody ultimately requires a signer a third-party page
 cannot obtain.
 
-### R1. `AgentPort.connect()` is the only app-builder session-opening API
+### R1. `AgentPort.connect()` is the sole supported cross-wallet entry
 
 An ordinary website declares its surface and calls `AgentPort.connect()` from
 a user gesture. It never constructs a wallet, supplies a root key, signs a
 certificate, chooses an ownership identity, or talks to pairing frames.
+
+`navigator.agent.connect()` remains the installed-provider contract behind
+that discovery path, not the call an app writes. `AgentPort.resume()` is the
+one recovery operation for an already-authorized logical attachment, not a
+second way to create one. The classic-script global exposes exactly
+`connect()` and `resume()` (plus an explicitly selected version field if one is
+needed); the current `provider` and `getProvider` escape hatches are removed.
 
 The app-builder surface includes only:
 
@@ -116,104 +148,164 @@ The app-builder surface includes only:
 - semantic errors that distinguish relay reachability, user refusal, policy
   refusal, and session loss.
 
+Those errors use one closed public code union shared by the drop-in and
+extension bridge. Plain `Error` strings and a second private
+`ProviderRejected` type are not a public contract.
+
 Changing the relay remains supported through `connect.js` configuration. A
 self-hosted relay may legitimately live at `/`, so the library must not repair
 URLs by guessing that every relay needs `/relay`. The hosted AgentPort example
 must provide the exact production URL and fail visibly when it is wrong.
 
-### R2. Wallet construction moves out of the default client package surface
+### R2. Split the current client by authority, not only by package name
 
-`AgentWallet`, `WalletOptions`, pairing/certificate operations, provider
-installation, and root-key socket authentication move to a separately named
-privileged package or entry point. The intended name is
-`@agentport/wallet-core`; settling the package name is not allowed to weaken
-the boundary.
+Moving today's `AgentWallet` unchanged to `@agentport/wallet-core` would keep
+the defect inside `connect.js`. The class currently combines root
+authentication, directory and pairing operations, certificate issuance,
+revocation, direct-owner opening, delegated and code-flow attachments,
+sealing, resume, and concrete session construction. The page bundle needs only
+the attachment part.
 
-`@agentport/client` becomes the app-safe session and tool contract. Importing
-`AgentWallet` from its root becomes a type error. All first-party custody code
-— the extension, hosted wallet, and the implementation behind `connect.js` —
-moves to the privileged package in the same change. The old root export is
-deleted; there is no deprecated alias or compatibility export.
+The implementation is split into three layers:
 
-The privileged package documentation begins with the trust assumption: code
-using it is implementing a wallet or AgentPort-owned attachment adapter, and
-must not run with a persistent user secret in a third-party page.
+| layer | contains | must not contain |
+|---|---|---|
+| public app contract (`@agentport/client`) | connect request, session handle/events, site tools, stable public errors | sockets, secret keys, pairing, certs, revocation, concrete session opening |
+| private attachment core (`@agentport/attachment`) | attachment authorization, sealed transport, grant construction, concrete session, identity-bound resume, code flow | root signing, owned-agent directory, pairing, certificate issuance, revocation |
+| private wallet core (`@agentport/wallet-core`) | signer abstraction, owned-agent directory, pairing/certs, revocation, attachment/controller authorization | site application API or site tool implementation |
 
-This ruling makes accidental misuse harder and reviewable. It does not stop a
-determined app from importing wallet internals, copying source, or implementing
-the wire itself, and no security claim may rely on it doing so.
+`connect.js` depends on the public contract and attachment core, never wallet
+core. The hosted wallet depends on wallet core. The extension service worker
+depends on wallet core and attachment core; its page-world provider depends
+only on public/provider contracts. Both internal packages begin `private: true`
+until their own clean-install, versioning, compatibility, and publication
+contract is accepted. Renaming a workspace package must not imply a published
+API that the release process does not ship.
+
+`AgentWallet`, `WalletOptions`, root socket exports, and
+`createWalletProvider` disappear rather than moving intact. `installProvider`
+contains no key authority; it lives in an explicit provider-author subpath and
+is dogfooded by the extension's page-world injection instead of keeping the
+extension's current hand-written parallel provider installation.
+
+Importing wallet or attachment machinery from the default client root becomes
+a type error. All first-party consumers move in the same change, and the old
+exports are deleted with no deprecated aliases. This makes accidental misuse
+harder and the authority graph reviewable. It does not stop a determined app
+from copying source or implementing the wire, and no security claim relies on
+it doing so.
 
 ### R3. The local demo may demonstrate custody, but not disguise it as app code
 
 The minimal example remains useful only if it shows the architecture it is
-teaching. Its site and wallet roles must be separate modules or separate
-origins, and the site half must consume the same `AgentPort.connect()` contract
-recommended to external builders.
+teaching. A custody demonstration puts its wallet on a separate origin,
+extension context, daemon surface, or other independently protected signer.
+Separate modules on the same origin are organization, not isolation: they can
+read the same storage and call one another. The site half consumes the emitted
+classic `connect.js` and the same `AgentPort.connect()` contract recommended to
+external builders.
 
-If an in-page development wallet remains, it is an explicit development
-fixture imported from the privileged package. It uses the same delegation
-path as production rather than opening a direct-owner attachment. It must not
-persist a root key under the site's origin in a build presented as deployable.
+If an in-page development wallet remains, it is labelled an unsafe protocol
+fixture, uses no persistent root key, and is never presented as deployable or
+as evidence of custody. Exercising delegation in a second same-origin module
+proves the protocol shape and nothing about key custody.
 
 The production demo, app-builder guide, and README must contain no direct
 `AgentWallet` construction. A clean-browser "arrive as a stranger" review
 must copy only the documented app-builder snippet and reach a working consent
-surface without learning a wallet API.
+surface without learning a wallet API. At least one deployed first-party
+surface loads the emitted `/connect.js`; bundling `site/src/connect.ts` into a
+different ESM artifact is not dogfooding the thing a stranger receives.
 
 ### R4. A user root key is control-plane authority, not an attachment identity
 
-Browser site attachments use fresh attachment keys. The user root key may
-authorize an attachment, manage owned agents, revoke authority, and authenticate
-a wallet control channel; it is not used as the client identity of a website
-session.
+Owner authentication alone is not attachment authorization. Except for the
+separately justified relay-synthesized code flow, every website
+`session.open` requires a bounded root-signed `SessionAuthorization` (the
+replacement for today's `SessionDelegation`) naming:
 
-The current direct-owner `session.open` branch is removed for website
-attachments. The supported attachment forms become:
+- one Ed25519 attachment identity distinct from the user root;
+- one target agent and wallet-observed origin;
+- the exact grant hash, issuance time, and expiry;
+- optionally, one distinct controller public key and its exact decision and
+  question rights.
 
-| attachment | session key | authorization | user-authority destination |
+The Ed25519 attachment identity is stable for the logical attachment. X25519
+sealing keys remain ephemeral and fresh on every open or resume. The client
+EPK proof binds the complete authorization or its domain-separated digest, so
+a relay cannot substitute another valid authorization with different control
+rights.
+
+Resume requires both the bearer token and proof by the stored attachment
+identity. `AgentDaemon#onSessionResume` compares the relay-stamped client with
+the session's existing `clientKey` and never overwrites it from an arbitrary
+resumer. The page or extension persists the bounded attachment secret beside
+its resume authority; it never persists the user root there. Authorization
+expiry bounds the whole resumable attachment, not only its first open.
+
+The supported forms become:
+
+| attachment | Ed25519 identity | authorization | user-authority destination |
 |---|---|---|---|
-| extension-backed site | fresh attachment key | origin/grant-bound wallet authorization | extension control surface |
-| hosted-wallet site | fresh attachment key | origin/grant-bound delegation | none after popup closes; refuse capabilities that need it |
-| code flow | fresh authority-free key | daemon's local connect decision | daemon handlers actually installed for that capability |
+| extension-backed site | fresh bounded attachment key | root-signed origin/grant authorization with controller key and separate rights | extension chrome, proven by controller signatures |
+| hosted-wallet site | fresh bounded attachment key | root-signed origin/grant authorization with no controller rights | none after popup closes; refuse capabilities that need it |
+| code flow | fresh authority-free key | daemon's EPK-specific local connect decision | daemon handlers actually installed for that capability |
 
-The extension is not exempt merely because its current service worker safely
-holds the user key. Separating its attachment key from its root key limits key
-reuse, makes the wire express the same roles in every browser tier, and removes
-"no delegation means trusted UI" as a policy shortcut.
+The extension is not exempt merely because its service worker currently holds
+the root key. Separating root, attachment, controller, and X25519 roles limits
+key reuse and removes "no delegation means trusted UI" as a policy shortcut.
 
-A page that has already stolen or been deliberately given an exportable root
-key can still sign any authorization that root key is empowered to sign. R4
-does not pretend otherwise. It reduces the authority of ordinary attachment
-keys and removes a protocol path that turns root possession directly into a
-trusted application session.
+A page that stole or was deliberately given an exportable root can still mint
+a valid attachment and controller authorization. Removing direct-owner open is
+least-authority containment for ordinary attachment keys, not attestation of
+where the root ran. Acceptance evidence demonstrates this residual power with
+a positive root-signed authorization test instead of hiding it.
 
-### R5. User decisions travel on an authenticated control path, never by inference
+### R5. User decisions require independent controller authority, not inference
 
-The daemon must not infer a trusted approval or elicitation surface from the
-absence of a delegation. `AgentDaemon#trustedSurfaces` is replaced by policy
-derived from actual destinations:
+A second relay channel is not required for the first coherent design. The
+extension keeps one end-to-end sealed attachment channel, but holds a
+controller key distinct from the attachment key. `runtime_own_tool` approvals
+and elicitation answers carry controller signatures inside ciphertext. The
+relay cannot read them, and possession of the attachment key alone cannot
+forge them.
+
+Controller proofs bind the session, pending request id, authority domain or
+canonical question digest, call hash where one exists, the decision or answer,
+and an anti-replay value. The daemon verifies the controller and its exact
+rights from `SessionAuthorization` before settling the pending operation.
+Cross-request, cross-session, and cross-domain reuse fails.
+
+The routing rules are:
 
 - a `site_tool` decision may return from the site attachment because it is the
   site's own capability and remains bounded by the signed grant;
-- a `runtime_own_tool` decision may return only from an authenticated user
-  control channel or a daemon-local approval handler;
-- an elicitation answer may return only from an authenticated user control
-  channel or a daemon-local question handler; and
-- when the required destination does not exist, the capability is refused in
-  `session.opened`/`session.resumed`, logged, and rendered to the user.
+- a `runtime_own_tool` decision may return only with a valid controller proof
+  or from a daemon-local approval handler;
+- an elicitation answer may return only with a valid controller proof or from
+  a daemon-local question handler; and
+- absent authority is reported independently as `mayUseOwnTools: false` or
+  `mayAsk: false` in `session.opened`/`session.resumed`, authenticated by the
+  agent's EPK proof, logged, and rendered to the user.
 
-The code that advertises each capability must be the code that can route to
-its destination, preserving ADR-024 R12. A signed boolean claiming that a
-surface exists is insufficient. The acceptance check must observe where the
-request and answer actually travelled.
+A forged page answer is refused and logged; it does **not** settle or cancel a
+legitimate controller request, because that would give the page a veto. The
+request settles only through a valid controller/local answer, abort, session
+close, controller loss, or its own bounded deadline. Approval gets a deadline
+as elicitation already does; neither path may wait forever.
 
-For an extension-backed attachment, the extension's service worker maintains
-or brokers the user control channel and renders in extension chrome. The page
-attachment cannot originate control answers. For the hosted-wallet tier, a
-popup that has closed is not a control channel; capabilities requiring one
-remain unavailable until a real, non-clickjackable destination exists. The
-code flow continues to use daemon handlers and advertises only the handlers
-the embedder installed.
+The code that advertises each capability is the code that has installed its
+real destination, preserving ADR-024 R12. The extension service worker that
+installs extension-chrome handlers is the code that requests controller
+rights, and real-browser evidence observes the request reach that window. A
+signed rights bit alone is not evidence that honest UI was used. Hosted-wallet
+authorizations omit controller rights after the popup closes. Code flow derives
+each field directly from its installed daemon handler.
+
+A separate sealed controller channel remains a future option for a controller
+on another device or for hiding control requests from the attachment endpoint.
+It is not necessary for attachment-key separation and is not sufficient to
+solve exportable-root compromise, so this ADR does not require it.
 
 ### R6. Production root signing must become unavailable to third-party page JavaScript
 
@@ -222,18 +314,27 @@ boundaries reduce accidental exposure, and origin isolation reduces who can
 read a hosted-wallet key, but XSS or a compromised dependency on that origin
 still obtains it.
 
-The production custody destination is a non-exportable, user-mediated signer:
+The production custody destination is a non-exportable, user-mediated signer.
+Two designs remain viable and neither is the current raw-key API:
 
-- a passkey/WebAuthn-backed key whose use is bound to the wallet's relying
-  party and user-verification policy; or
-- a NIP-46-style remote signer/bunker whose policy binds the operation,
-  requester, origin, expiry, and user gesture where required.
+- A WebAuthn credential supplies a protocol-verifiable WebAuthn proof or
+  authorizes a bounded wallet-device/controller credential. WebAuthn does not
+  sign arbitrary AgentPort canonical bodies, so this requires a new proof
+  format. Using a passkey merely to unwrap Ed25519 material is only at-rest
+  protection; once JavaScript reconstructs the raw key, same-origin compromise
+  can export it.
+- A NIP-46-style remote signer/bunker retains the root elsewhere and enforces
+  operation, requester, origin, agent, grant, expiry, and user-interaction
+  policy rather than acting as an unrestricted signing oracle.
 
 Raw-key custody remains an explicitly transitional tier. It must not be used
 as evidence that the caller is extension chrome or the wallet origin. General
 availability cannot claim that arbitrary page-held roots are contained until
 one of the non-exportable or remote-signing designs is implemented and its
-recovery/revocation story is accepted.
+recovery/revocation story is accepted. Today both the hosted wallet's
+`localStorage` key and the extension's `chrome.storage.local` key are
+exportable; origin/process isolation makes the latter safer from a hostile
+site, not non-exportable.
 
 This is the limit no amount of E2EE changes: encryption can keep a secret from
 the relay; it cannot keep a secret from JavaScript to which the secret was
@@ -241,29 +342,62 @@ given.
 
 ### R7. State the E2EE endpoint precisely
 
-Documentation and UI must say that session content is encrypted between the
-active client attachment and the daemon. On an ordinary integration, the site
-tab is intentionally the application-side plaintext consumer. The claim is
-that the relay, network observer, and unrelated origins cannot read the
-content—not that the website receiving agent output cannot read it.
+Documentation and UI state the endpoint for each tier:
+
+- extension: the extension service-worker attachment adapter and daemon;
+- hosted-wallet and code-flow page attachments: the site tab and daemon; and
+- daemon-local approval or elicitation: the daemon handler and runtime.
+
+On an ordinary page attachment, the site tab is intentionally the
+application-side plaintext consumer. The claim is that the relay, network
+observer, and unrelated origins cannot read the content—not that the website
+receiving agent output cannot read it. Controller proofs travel inside the
+same sealed content and do not make the page blind to data intentionally
+delivered to its attachment endpoint.
 
 The custody claim is separate: the page receives an ephemeral attachment key
 and bounded authorization, while the root user key remains in the wallet,
 extension, daemon-adjacent signer, or bunker. Neither claim may be used as a
-shorthand for the other.
+shorthand for the other. The claim does not cover resume until R4's
+identity-bound resume has replaced the current bearer-only handoff.
 
-### R8. Ship as a protocol boundary, with no direct-owner compatibility path
+### R8. Deliver two gates; the wire gate has no direct-owner compatibility path
 
-R4 and R5 change session authorization and answer routing, so the relay,
-daemon, wallet, extension, `connect.js`, and examples deploy together under a
-new protocol version. The old direct-owner website session path is deleted in
-the same change.
+The defects are independent enough to close in two gates and coupled enough
+that each gate must delete what it replaces.
 
-Control-plane operations that still authenticate with the user root key are
-enumerated explicitly. A frame missing from that set is denied. Session
-opening is not reintroduced as a fallback when a control channel or delegation
-is unavailable; the user receives a visible refusal naming the missing
-surface.
+**Gate A — misuse boundary, no wire change.** Split the public contract,
+attachment core, and wallet core; remove privileged root exports and the
+combined `AgentWallet`; standardize public errors; reduce the classic global;
+migrate every first-party consumer; make the extension use the shared provider
+installer; and dogfood the emitted `/connect.js`. Gate A ships without waiting
+for controller or signer protocol work.
+
+**Gate B — custody protocol.** In one new protocol version, repair resume,
+replace delegation with complete attachment/controller authorization, bind it
+into both handshake proofs, authenticate `mayUseOwnTools` and `mayAsk`, add
+bounded controller proofs and deadlines, and delete the direct-owner website
+open branches at both relay and daemon. Every positive direct-owner fixture
+migrates; direct owner remains only as a hostile negative case.
+
+Root-authenticated control-plane operations are enumerated explicitly:
+directory access, pairing/certificate issuance, revocation, and attachment or
+controller authorization. A frame missing from that set is denied.
+`session.open` is not in it. Missing controller authority is never repaired by
+rerouting to the page.
+
+The hosted relay, hosted browser artifacts, and daemon source change together,
+but distribution is not atomic: npm and load-unpacked extensions can lag the
+Cloudflare deployment. An old peer fails visibly at `hello` until upgraded;
+there is no legacy parser, heuristic endpoint fallback, or direct-owner
+compatibility branch. Live and resumable sessions from the old version end.
+
+Before Gate B, the release workflow must fail a wire change without a new CLI
+version, build every separately typechecked browser/extension/example target,
+and exercise the exact packed CLI artifact against production. The current
+remote smoke imports daemon source from the checkout, so it can pass while the
+published CLI remains old. Manual extension distribution remains an explicit
+availability gap, not a reason to retain the old protocol.
 
 ## Acceptance evidence
 
@@ -272,47 +406,84 @@ other.
 
 ### Misuse-resistance evidence
 
-1. A fixture importing `AgentWallet` or `WalletOptions` from
-   `@agentport/client` fails to typecheck for that reason.
-2. Reverting the export split makes that fixture compile; the observed failure
-   is recorded before the check is accepted.
-3. Every first-party production website uses `AgentPort.connect()` as its
-   app-facing call. Privileged imports are confined to an explicit custody
-   allowlist reviewed as a trust-boundary change.
-4. The README and app-builder guide can be followed from a clean browser
-   without copying a root key, wallet constructor, certificate call, or pairing
-   implementation into the site.
-5. The local example labels and visually separates its development wallet,
-   while its site half uses the production app-builder contract.
+1. A non-empty structural export assertion proves `AgentWallet` and
+   `WalletOptions` are absent from `keyof typeof import('@agentport/client')`.
+   A separate negative-compile fixture checks the exact missing-export
+   diagnostic. Restoring either export makes the structural guard fail and the
+   negative fixture unexpectedly compile; missing packages or unrelated
+   module-resolution errors are not accepted.
+2. Real esbuild metafiles prove `connect.js`, the extension page-world bundle,
+   and its content bundle contain no wallet-core input. The hosted wallet and
+   extension service worker are the only browser graphs allowed to contain it.
+   Adding one value import to `site/src/connect.ts` makes the check name that
+   forbidden graph edge.
+3. The classic-script VM check asserts the exact `AgentPort` global and stable
+   public error union. Restoring `provider`, `getProvider`, or a private error
+   dialect fails at the public boundary rather than during a later relay call.
+4. Privileged imports are confined to a source/package allowlist reviewed as a
+   trust-boundary change. This check is deliberately string-keyed and is
+   described as such; moving an import fails closed until its new owner is
+   reviewed.
+5. A deployed first-party surface is observed requesting `/connect.js` and
+   invoking its global from the connect button. Its ESM bundle excludes
+   `site/src/connect.ts`. Removing the script and re-importing the source fail
+   for different, intended reasons.
+6. The README and app-builder guide work from a clean browser without copying
+   a root key, wallet constructor, certificate call, or pairing implementation
+   into the site. Whether the path is understandable remains a human stranger
+   walk, not a green source assertion.
+7. A custody demo uses a separate origin/context and proves the site cannot
+   read wallet storage. Any same-origin fixture is labelled unsafe and proves
+   protocol behavior only. Visual honesty remains a recorded human review.
 
 These checks prove that our API and repository resist accidental misuse. They
 do not prove that third-party JavaScript cannot reimplement the protocol.
 
 ### Security evidence
 
-1. A valid owner key and certificate attempting the removed direct-owner
-   website `session.open` path is refused over a real socket with a stable
-   reason and deadline.
-2. Extension and hosted-wallet attachments use fresh session identities and
-   authorization bound to the exact origin, agent, grant, expiry, and
-   attachment key. Replays across any one of those fields fail at both relay
-   and daemon where each has authoritative evidence.
-3. A delegated page cannot originate a `runtime_own_tool` approval or an
-   elicitation answer. Forged answers are refused, logged, and settle the
-   waiting operation rather than hanging it.
-4. Extension-backed runtime approvals and elicitation answers are observed
-   travelling through the authenticated extension control path. Removing that
-   route makes the capability disappear from the attachment instead of
-   rerouting it to the page.
-5. Code-flow capabilities are advertised only when the corresponding daemon
-   handler exists. Removing either handler makes the precise policy assertion
-   fail.
-6. The relay remains unable to decrypt prompts, output, tool calls/results,
-   approvals, or elicitation in every surviving attachment tier.
-7. Root-key compromise is recorded as a blocking residual risk until the
-   selected non-exportable or remote signer is exercised end to end. No green
-   check may claim to prove where an exportable key was stored or which browser
-   execution context used it.
+1. A malicious-relay harness records a legitimate visible resume token, forces
+   detach, and attempts resume with its own valid Ed25519/X25519 keys. The
+   daemon refuses it within a deadline, does not change `clientKey`, and the
+   legitimate attachment identity subsequently resumes. Removing the identity
+   equality makes this exact attack become the plaintext endpoint.
+2. A valid owner key and certificate attempting direct-owner website
+   `session.open` is refused independently by the real relay and by the real
+   daemon behind a lying-relay fixture, each with a closed denial reason and
+   deadline. Restoring either branch breaks only its edge-specific check.
+3. A companion positive check proves the same exportable root can mint a valid
+   bounded authorization and open through it. That is recorded residual root
+   authority, not a security failure or custody proof.
+4. Authorization replay fails when changing attachment Ed25519 identity,
+   X25519 EPK, agent, wallet-observed origin, grant, issue/expiry time,
+   controller identity, or either controller right. Relay and daemon checks
+   are asserted only for facts each can authoritatively establish. Substituting
+   one otherwise-valid authorization invalidates the handshake proof.
+5. A page or stolen attachment key cannot forge a `runtime_own_tool` decision
+   or elicitation answer without the controller key. Forged frames are refused
+   and logged while a legitimate controller may still answer; with no valid
+   answer, the request settles only through its deadline, abort, loss, or
+   close.
+6. A real-Chrome integration drives a local relay, daemon, scripted runtime,
+   extension, and hostile page. It observes the request reach extension chrome,
+   proves page callbacks/messages receive none of it, supplies the controller
+   answer, then removes each handler and observes the corresponding capability
+   disappear rather than reroute.
+7. Code-flow capabilities are advertised only when the exact daemon handler
+   exists. Removing `onLocalApproval` and `onLocalAsk` separately changes only
+   the matching policy field and routing test.
+8. The relay remains unable to decrypt canaries in prompts, output, tool
+   calls/results, approvals, controller proofs, or elicitation across extension,
+   hosted-wallet, and code tiers. Plaintext sabotage fails the tier-specific
+   assertion.
+9. `session.opened` and `session.resumed` authenticate and render both
+   `mayUseOwnTools` and `mayAsk`. Collapsing them or omitting either from the
+   agent proof fails the policy-specific test.
+10. A release check rejects a new wire fingerprint/version without a new CLI
+    version, and the post-deploy smoke runs the exact saved CLI tarball rather
+    than imports from checkout source.
+11. Root-key location, honest third-party wallet UI, absence of XSS/extension
+    compromise, and human understanding remain explicitly unproven. No green
+    automated check may claim to establish them.
 
 Every new check is sabotaged once and its failure read before acceptance. A
 failure in URL routing, frame decoding, or an unrelated type assertion is not
@@ -342,6 +513,23 @@ be trivial to bypass.
 A page holding the signing key can sign or send the same value. A claim about
 the execution environment is not attestation of that environment.
 
+### Require a second relay channel before separating authority
+
+A separate sealed controller channel is useful when the controller lives on
+another device or its requests must be hidden from the attachment endpoint.
+It adds association, sealing, reconnect, loss, resume, and multi-controller
+state, while a root/controller compromise remains authoritative. Controller-
+signed responses on the existing sealed channel give the daemon independent
+answer authority with a smaller first cut. The route into extension chrome is
+still proved by browser evidence, not by the signature alone.
+
+### Keep bearer resume because the token is random
+
+The relay observes the token and is an in-scope adversary. Randomness does not
+help once the adversary has the value, and verifying a new EPK against a new
+self-chosen Ed25519 key proves only self-consistency. Resume must prove the
+stored attachment identity or a secret the relay never learns.
+
 ### Treat every direct-key client as trusted because compromise is already total
 
 This accurately describes the consequence of root compromise and turns it
@@ -353,46 +541,57 @@ question. ADR-024 already records the cost of that shape.
 
 Alternative wallets, self-hosted custody, the extension, and the hosted wallet
 need a shared implementation. Hiding it in the repository would create copied
-parallel implementations that drift. The right boundary is an explicit
-privileged package consumed by every wallet implementation, not no package.
+parallel implementations that drift. The right boundary is shared attachment
+and wallet cores with explicit owners. They stay workspace-private until their
+own publication contract exists; hiding them is not the long-term security
+property.
 
 ## Consequences
 
 - The ordinary integration becomes smaller: one script, one connect call, and
   site tools. A builder cannot accidentally persist a root key using the
   default client export.
-- Wallet authors receive a more explicit but less convenient package whose
-  name and documentation require them to acknowledge custody responsibility.
-- Extension attachments become slightly more complex because attachment data
-  and user-control answers are separate channels. That complexity represents
-  a real trust boundary currently compressed into `AgentWallet`.
+- Attachment and wallet code become separate implementations rather than one
+  class with a safer name. `connect.js` loses pairing, cert, directory,
+  revocation, and root-signing code it never needed.
+- Wallet authors eventually receive an explicit package whose name and
+  documentation require custody responsibility; it is not a supported npm
+  artifact until clean-install and release evidence exist.
+- Extension attachments gain separate attachment and controller identities,
+  while continuing to use one sealed channel initially. That complexity
+  represents a real authority boundary currently compressed into
+  `AgentWallet`.
 - Hosted-wallet attachments remain deliberately diminished for runtime-owned
   tools and elicitation when no trusted answer surface remains open. The UI
   must say so.
-- A protocol version bump and lockstep deployment are required. There is no
-  compatibility path for direct-owner website sessions.
+- Resume secrets now include a bounded attachment identity that must survive a
+  reload. Compromise of that identity loses the attachment, not the user root
+  or controller authority.
+- A protocol version bump and coordinated deployment are required. Old peers
+  fail visibly until upgraded; there is no compatibility path for direct-owner
+  website sessions.
 - Passkey or remote-signer custody remains required. Until it lands, an
   exportable root-key compromise is terminal for the authority that key owns,
   and the product must say that plainly.
 
 ## Open implementation choices
 
-The rulings above do not depend on these choices, which require focused design
-before implementation:
+The Sol review closed the package topology, resume identity, and first
+controller topology. These choices remain and require focused design before
+their corresponding work lands:
 
-1. Whether the privileged package is named `@agentport/wallet-core` or exposed
-   as an equally explicit non-root subpath. A separate package is preferred
-   because package ownership and dependency review then follow the trust
-   boundary.
-2. Whether the extension control path is a second relay role, a sealed channel
-   multiplexed over its existing socket, or a daemon-addressed approval
-   endpoint. It must authenticate the user controller independently of the
-   page attachment and preserve the relay-blind content property.
-3. Whether passkeys directly become the user signing key or unlock/wrap an
-   Ed25519 key used for protocol compatibility. The answer must cover backup,
-   recovery, multi-device use, revocation, and headless/self-hosted operation.
-4. How a wallet proves browser-observed origin to a non-browser daemon without
-   turning a wallet-authored string into universal browser attestation. The
-   current hosted-wallet delegation binds `MessageEvent.origin`; the accepted
-   design must state exactly which component observed each value and what a
-   compromised root signer can still forge.
+1. Whether WebAuthn directly supplies a new root proof format or authorizes a
+   bounded wallet-device credential. The answer must cover backup, recovery,
+   multi-device use, revocation, headless/self-hosted operation, and exactly
+   what requires user verification.
+2. Controller-key lifecycle inside the extension: generation, rotation,
+   resume persistence, and loss. Controller rights never transfer merely
+   because an attachment resume token did.
+3. Whether a later cross-device controller needs a second sealed relay role.
+   That is a new topology decision, not an implementation toggle on R5.
+
+Origin evidence is not left ambiguous: the hosted wallet binds the browser's
+`MessageEvent.origin`; the extension uses browser-provided sender metadata;
+the code flow uses the daemon-approved surface. The daemon verifies that the
+signed origin equals the opened surface. This is wallet-authorized origin, not
+universal browser attestation, and a compromised root signer can forge it.

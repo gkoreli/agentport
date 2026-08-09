@@ -27,6 +27,14 @@ existing tag can be redeployed and an already-published npm version is success.
 CI deploys stamp the root version plus commit identity without manufacturing a
 commit on the runner; local deploys keep the existing version-bump commit.
 
+The first independent review caught the release check checking the wrong
+thing: `scripts/remote-check.ts` imported the checkout daemon, so a new relay
+and old npm tarball could still produce a green smoke. The smoke now has one
+implementation bundled into `@gkoreli/agentport@0.1.7`; CI extracts and runs
+that exact saved tarball after deployment. The workflow also refuses
+CLI/daemon/protocol changes under an already-tagged CLI version and runs every
+separately excluded browser/Worker/extension/example typecheck before tagging.
+
 The README now gives a complete stranger-copyable integration with the exact
 public `/relay` and wallet endpoints, calls `AgentPort.connect()` from the user
 gesture a popup requires, and points to new app-builder and release guides.
@@ -43,14 +51,24 @@ availability; it does not fix the architectural footgun that made privileged
 wallet construction look like the ordinary app-builder API.
 
 ADR-025 records the two failures separately. Misuse resistance makes
-`AgentPort.connect()` the sole default website API and moves wallet machinery
-behind an explicitly privileged package boundary. Security containment makes
-browser attachment keys ephemeral, keeps the root key on the control plane,
-and routes runtime-owned approvals and user answers only to a destination the
-page cannot forge. It also states the non-negotiable limit: E2EE hides content
-from the relay, not from an endpoint holding the key, so production root
-custody ultimately needs a non-exportable passkey or remote signer. The ADR is
-proposed; this checkpoint changes no protocol behavior yet.
+`AgentPort.connect()` the sole cross-wallet website entry and splits today's
+combined client into a public contract, attachment-only transport, and wallet
+control core — moving the monolith behind a scarier name would leave the same
+footgun inside `connect.js`. Security containment gives each browser
+attachment a bounded identity, gives extension decisions a distinct controller
+proof, and keeps the root on the control plane.
+
+Three independent Sol reviews found a prerequisite more urgent than that
+redesign: resume currently accepts the relay-visible bearer token from any new
+authenticated client key and then replaces the session's stored `clientKey`.
+A malicious relay can force a detach and resume as the E2EE endpoint. The
+revised ADR makes identity-bound resume the first Gate B change, requires the
+legitimate attachment identity to survive rekey, and adds the missing
+malicious-relay evidence. It also states the non-negotiable limit: E2EE hides
+content from the relay only while the endpoint proof holds, and it never
+protects a root key given to page JavaScript. Production root custody still
+needs a genuinely non-exportable credential or policy-enforcing remote signer.
+The ADR is proposed; this checkpoint changes no protocol behavior yet.
 
 ### The extension can answer the agent's question, and now typechecks
 

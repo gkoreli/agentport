@@ -5,14 +5,12 @@
  * only ws's optional native accelerators stay external, exactly as ws itself
  * treats them.
  */
-import { build } from 'esbuild';
+import { build, type BuildOptions } from 'esbuild';
 import { readFileSync } from 'node:fs';
 
 const { version } = JSON.parse(readFileSync('package.json', 'utf8')) as { version: string };
 
-await build({
-  entryPoints: ['src/main.ts'],
-  outfile: 'dist/main.js',
+const shared: BuildOptions = {
   bundle: true,
   platform: 'node',
   target: 'node20',
@@ -28,4 +26,23 @@ await build({
     ].join('\n'),
   },
   logLevel: 'info',
+};
+
+await build({
+  ...shared,
+  entryPoints: ['src/main.ts'],
+  outfile: 'dist/main.js',
 });
+
+// This is release evidence, not a second smoke implementation: the repository
+// command imports the same source, while CI runs this copy from the exact
+// tarball it verified and will publish.
+export async function buildRemoteCheck(): Promise<void> {
+  await build({
+    ...shared,
+    entryPoints: ['src/remote-check.ts'],
+    outfile: 'dist/remote-check.js',
+  });
+}
+
+await buildRemoteCheck();
