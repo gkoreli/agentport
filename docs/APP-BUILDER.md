@@ -259,6 +259,11 @@ if (resumed) {
 }
 ```
 
+The stored record contains only the bounded attachment identity and its
+session-scoped resume data, never the wallet's root user key. Protocol v6
+requires both that original Ed25519 identity and a fresh EPK proof on resume;
+the visible token alone is insufficient.
+
 An in-flight prompt can be lost during a socket break even when the session
 reattaches. Treat its rejected promise as final and call `history()` if the
 visitor needs the agent's durable record of what happened.
@@ -330,6 +335,6 @@ An app may serve `connect.js` itself and proxy `/relay` to a self-hosted relay.
 In that configuration, omitting `data-relay` deliberately selects the app's
 same-origin `/relay`. An HTTPS app must expose the relay over WSS.
 
-All peers must come from the same compatible release. A relay is stateless,
-but wire compatibility is strict: deploy the relay before distributing newer
-browser or daemon endpoints.
+All peers must come from the same release. Protocol v6 is a hard coordinated
+cutover of relay and endpoints; do not stage a relay-first rollout or retain a
+v5 fallback.

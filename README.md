@@ -136,7 +136,7 @@ writing panel whose brain is the process in terminal 2.
 No browser needed to verify the protocol:
 
 ```bash
-npm run e2e            # local, mock runtime, 179 checks over real sockets
+npm run e2e            # local, mock runtime, 187 checks over real sockets
 npm run wire:check     # 521 wire-validation cases across 45 frame types
 npm run site:build     # bundle the demo surfaces
 npm run deploy         # build + wrangler deploy

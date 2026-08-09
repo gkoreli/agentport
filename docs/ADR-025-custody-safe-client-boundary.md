@@ -1,9 +1,10 @@
 # ADR-025: A page is not a wallet — misuse-resistant APIs and enforceable custody
 
 - **Status:** proposed; three independent Sol reviews integrated. The narrow
-  identity-bound resume prerequisite from R4 landed on 2026-08-08; the package
-  split, authorization replacement, controller proofs, and root-custody work
-  remain unimplemented.
+  identity-bound resume prerequisite from R4 and its attachment-lifetime
+  enforcement landed on 2026-08-08 in protocol v6; the package split,
+  authorization replacement, controller proofs, and root-custody work remain
+  unimplemented.
 - **Date:** 2026-08-08
 - **Owners:** AgentPort maintainers
 - **Depends on:** ADR-003 (end-to-end sealing), ADR-008 (wallet tiers),
@@ -97,29 +98,32 @@ site tools delivered to that tab. It must not also become the user's durable
 authority endpoint merely because both responsibilities currently fit in one
 class.
 
-### Prerequisite found during review: resume can change the E2EE endpoint
+### Prerequisite found during review: resume could change the E2EE endpoint
 
-Reviewing this boundary exposed an older defect that must be fixed before a
-second authority path is built. `session.opened` sends its resume token as
-visible lifecycle metadata, so a malicious relay knows it. On resume,
+Reviewing this boundary exposed an older defect that had to be fixed before a
+second authority path could be built. `session.opened` sent its resume token as
+visible lifecycle metadata, so a malicious relay knew it. The pre-fix
 `AgentDaemon#onSessionResume`
-(`packages/daemon/src/daemon.ts#onSessionResume`) checks that bearer token and
-verifies the fresh X25519 key against the *new* relay-stamped Ed25519 client,
-but never requires that client to equal the attachment's stored
-`clientKey`. It then overwrites `clientKey` with the new value.
+(`packages/daemon/src/daemon.ts#onSessionResume`) checked that bearer token and
+verified the fresh X25519 key against the *new* relay-stamped Ed25519 client,
+but did not require that client to equal the attachment's stored `clientKey`.
+It then overwrote `clientKey` with the new value.
 
-A malicious relay can therefore observe a legitimate token, force a detach,
+A malicious relay could therefore observe a legitimate token, force a detach,
 generate its own Ed25519 and X25519 keys, resume as the new client, and become
-the application-side plaintext endpoint. The retained attachment policy comes
-with it. The existing resume-theft checks do not cover that adversary: they
-test a socket without the token or a thief while the original attachment is
-still live, while the relay has the token and can manufacture the detach.
+the application-side plaintext endpoint. The retained attachment policy came
+with it. The resume-theft checks at that time did not cover that adversary:
+they tested a socket without the token or a thief while the original
+attachment was still live, while the relay had the token and could manufacture
+the detach.
 
-This means the current E2EE claim holds for a fresh attachment and does not
-hold across the current bearer-only resume. R4 makes attachment identity
-stable for the logical attachment and requires proof of that identity on every
-resume. A control design built before this repair would inherit the same
-takeover.
+That bearer-only endpoint transfer is closed in protocol v6. Resume now
+requires the visible token plus a fresh EPK proof by the original bounded
+Ed25519 attachment identity; the daemon never replaces that identity from a
+resumer. The version is itself signed into every EPK proof transcript, so the
+relay cannot split-negotiate an older versionless proof with one endpoint. A
+control design can now build on stable attachment identity without inheriting
+the takeover.
 
 ## Decision
 
@@ -225,9 +229,15 @@ different ESM artifact is not dogfooding the thing a stranger receives.
 identity is now immutable across resume. The daemon requires the original
 Ed25519 client's proof as well as the relay-visible token, the hosted/demo page
 persists only that bounded client secret beside the token in per-tab storage,
-and delegation expiry is re-checked. This closes the malicious-relay handoff
-without claiming the broader `SessionAuthorization` or controller design below
-has landed.
+and no bearer-only legacy record is accepted. Every EPK proof signs protocol
+v6 as part of its transcript. A fresh wallet retains the authenticated token
+after a successful resume and can therefore rekey the same handle after a
+second socket loss. The daemon enforces the minimum of grant and delegation
+expiry throughout live traffic—including prompt admission, tool dispatch on
+both sides of approval, and late results—and authenticated `revoked` denials
+clear page and extension resume records. This closes the malicious-relay
+handoff and the lifetime gaps without claiming the broader
+`SessionAuthorization` or controller design below has landed.
 
 Owner authentication alone is not attachment authorization. Except for the
 separately justified relay-synthesized code flow, every website
@@ -386,13 +396,14 @@ installer; and dogfood the emitted `/connect.js`. Gate A ships without waiting
 for controller or signer protocol work.
 
 **Gate B — custody protocol.** Its identity-bound resume prerequisite has
-landed using the existing frame fields in protocol v6; the version rejects
-older daemons that omit the rule. In one later protocol version, replace
+landed using the existing frame fields in protocol v6. The required semantics
+are part of the version and the version is signed into every EPK proof. In one
+later protocol version, replace
 delegation with complete attachment/controller authorization, bind it
 into both handshake proofs, authenticate `mayUseOwnTools` and `mayAsk`, add
 bounded controller proofs and deadlines, and delete the direct-owner website
-open branches at both relay and daemon. Every positive direct-owner fixture
-migrates; direct owner remains only as a hostile negative case.
+open branches at both relay and daemon. Every positive direct-owner fixture is
+replaced; direct owner remains only as a hostile negative case.
 
 Root-authenticated control-plane operations are enumerated explicitly:
 directory access, pairing/certificate issuance, revocation, and attachment or
@@ -400,18 +411,20 @@ controller authorization. A frame missing from that set is denied.
 `session.open` is not in it. Missing controller authority is never repaired by
 rerouting to the page.
 
-The hosted relay, hosted browser artifacts, and daemon source change together,
-but distribution is not atomic: npm and load-unpacked extensions can lag the
-Cloudflare deployment. An old peer fails visibly at `hello` until upgraded;
-there is no legacy parser, heuristic endpoint fallback, or direct-owner
-compatibility branch. Live and resumable sessions from the old version end.
+Protocol v6 is a hard coordinated cutover: the hosted relay, site and wallet
+artifacts, daemon CLI, and extension endpoint change as one release boundary.
+There is no v5 parser, proof fallback, heuristic endpoint path, or retained
+v5 session; existing live and resumable sessions end at cutover.
 
-Before Gate B, the release workflow must fail a wire change without a new CLI
-version, build every separately typechecked browser/extension/example target,
-and exercise the exact packed CLI artifact against production. The current
-remote smoke imports daemon source from the checkout, so it can pass while the
-published CLI remains old. Manual extension distribution remains an explicit
-availability gap, not a reason to retain the old protocol.
+The release workflow fails a wire change without a new CLI version, builds the
+site and wallet plus every separately typechecked browser/extension/example
+target before tagging, and exercises the exact packed CLI artifact against
+production. `packages/cli/build.ts#buildRemoteCheck` bundles the smoke into the
+CLI tarball, and CI extracts that saved artifact rather than importing daemon
+source from the checkout. A manual `deploy: false` retry still runs this exact
+artifact's production proof, and npm remains locked behind its successful
+deploy job. Manual extension distribution remains an explicit availability
+gap, not a reason to retain the old protocol.
 
 ## Acceptance evidence
 
@@ -583,9 +596,9 @@ property.
 - Resume secrets now include a bounded attachment identity that survives a
   reload. Compromise of that identity loses the attachment, not the user root
   or controller authority.
-- A protocol version bump and coordinated deployment are required. Old peers
-  fail visibly until upgraded; there is no compatibility path for direct-owner
-  website sessions.
+- A protocol version bump and coordinated deployment are required. Protocol v6
+  is a hard relay/endpoints cutover with no v5 fallback; old live and resumable
+  sessions end.
 - Passkey or remote-signer custody remains required. Until it lands, an
   exportable root-key compromise is terminal for the authority that key owns,
   and the product must say that plainly.

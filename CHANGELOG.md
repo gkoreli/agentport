@@ -10,6 +10,11 @@ they moved.
 
 ## Unreleased
 
+## 0.0.13
+
+Completed on `main`; deployment is a separate release action, so the README's
+production status remains the authority until the coordinated release runs.
+
 ### Resume authority no longer transfers the E2EE endpoint
 
 The daemon used to accept a valid relay-visible resume token from any newly
@@ -24,10 +29,9 @@ a failed resume changes neither identity nor sealing state, and identity/token
 mismatches receive the same `not_resumable` denial as an unknown session. The
 real socket harness records the exact token through an on-path relay tap, uses
 it after forced detach, requires the different identity to be denied within a
-deadline, and then
-resumes successfully from a new wallet instance holding the original bounded
-identity. Restoring the old resumer-selected proof identity makes that attacker
-resume instead.
+deadline, and then resumes successfully from a new wallet instance holding the
+original bounded identity. Restoring the old resumer-selected proof identity
+makes that attacker resume instead.
 
 The hosted/demo page now persists that bounded attachment secret beside its
 resume capability in per-tab `sessionStorage`; it never persists or receives
@@ -35,13 +39,23 @@ the user's root key. Stored records are exact-shape and bounds checked, and old
 bearer-only records are cleared rather than silently assigned a fresh identity.
 The extension already resumes through its stable extension-held identity, so
 its record remains extension-only and does not expose a key to the page.
+After a successful resume, a fresh `AgentWallet` retains the authenticated
+token in memory. A later socket loss therefore rekeys the same live handle
+again instead of dropping a session that had already survived one reload.
 
-Finally, delegated resume now re-checks delegation expiry as well as grant
-expiry and revocation. A grant that outlives its root-signed delegation can no
-longer carry the logical attachment beyond that outer authorization boundary.
+The daemon now enforces the attachment's effective lifetime as
+`min(grant.expiresAt, delegation.expiresAt)` on live traffic as well as resume:
+before admitting a prompt, when tool dispatch begins, again after approval, and
+when a late site-tool result returns. A connection that stays open cannot
+extend authority past either deadline. Authenticated `revoked` denials are
+terminal for stored page and extension resume records, so withdrawn authority
+is not retried on every later load.
+
 The lockstep protocol is now `agentport/6` even though the frame shape did not
-change: an older daemon silently omits the endpoint-binding rule, so the hosted
-relay must refuse that mixed deployment and force the daemon upgrade.
+change. The required identity-bound-resume semantics are part of the version,
+and `PROTOCOL_VERSION` is signed into every EPK proof transcript so a relay
+cannot split-negotiate an older, otherwise valid proof with one endpoint. This
+is a hard coordinated cutover of relay and endpoints; there is no v5 fallback.
 ADR-025 remains proposed: this lands only its narrow R4 resume prerequisite,
 not the package split, complete authorization replacement, controller proofs,
 or non-exportable root custody.
@@ -56,12 +70,18 @@ installed incompatible with the relay they immediately dialled.
 
 The release workflow now watches every source that contributes to a hosted or
 wire-speaking artifact, verifies the repository before tagging, preserves the
-exact npm tarball it checked, deploys the matching site/relay and wallet through
-the same deploy script used locally, runs the bounded production smoke, and
-only then publishes that saved tarball. Manual retries are idempotent: an
-existing tag can be redeployed and an already-published npm version is success.
-CI deploys stamp the root version plus commit identity without manufacturing a
-commit on the runner; local deploys keep the existing version-bump commit.
+exact npm tarball it checked, builds both hosted browser artifacts before a tag
+can be created, deploys the matching site/relay and wallet through the same
+deploy script used locally, runs the bounded production smoke, and only then
+publishes that saved tarball. Manual retries are idempotent: an existing tag can
+be redeployed and an already-published npm version is success. A manual
+`deploy: false` retry still enters the deploy-stage job and proves that exact
+tarball against the already-deployed relay; a skipped Cloudflare mutation can
+no longer satisfy the npm dependency by skipping the whole job. CI deploys
+stamp the root version plus commit identity without manufacturing a commit on
+the runner; local deploys keep the existing version-bump commit. Wrangler is
+pinned exactly at 4.120.0 so the production deploy toolchain cannot drift under
+an unchanged lockfile.
 
 The first independent review caught the release check checking the wrong
 thing: `scripts/remote-check.ts` imported the checkout daemon, so a new relay
@@ -95,16 +115,17 @@ attachment a bounded identity, gives extension decisions a distinct controller
 proof, and keeps the root on the control plane.
 
 Three independent Sol reviews found a prerequisite more urgent than that
-redesign: resume currently accepts the relay-visible bearer token from any new
-authenticated client key and then replaces the session's stored `clientKey`.
-A malicious relay can force a detach and resume as the E2EE endpoint. The
-revised ADR makes identity-bound resume the first Gate B change, requires the
-legitimate attachment identity to survive rekey, and adds the missing
-malicious-relay evidence. It also states the non-negotiable limit: E2EE hides
-content from the relay only while the endpoint proof holds, and it never
-protects a root key given to page JavaScript. Production root custody still
-needs a genuinely non-exportable credential or policy-enforcing remote signer.
-The ADR is proposed; this checkpoint changes no protocol behavior yet.
+redesign. At that checkpoint, resume accepted the relay-visible bearer token
+from any newly authenticated client key and then replaced the session's stored
+`clientKey`; a malicious relay could force a detach and resume as the E2EE
+endpoint. The revised ADR made identity-bound resume the first Gate B change,
+required the legitimate attachment identity to survive rekey, and added the
+missing malicious-relay evidence. That checkpoint itself changed no protocol
+behavior; the completed v6 repair is recorded at the top of this release. The
+ADR also states the non-negotiable limit: E2EE hides content from the relay
+only while the endpoint proof holds, and it never protects a root key given to
+page JavaScript. Production root custody still needs a genuinely
+non-exportable credential or policy-enforcing remote signer.
 
 ### The extension can answer the agent's question, and now typechecks
 

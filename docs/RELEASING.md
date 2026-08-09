@@ -1,6 +1,6 @@
 # Release and deployment
 
-AgentPort has several artifacts but one wire compatibility boundary:
+AgentPort has several artifacts but one hard wire release boundary:
 
 - the Cloudflare Worker serves the site, `connect.js`, and `/relay`;
 - the separate wallet Worker serves the hosted consent application;
@@ -8,7 +8,7 @@ AgentPort has several artifacts but one wire compatibility boundary:
 - the extension is another browser endpoint when distributed manually.
 
 The relay and every endpoint that changed wire shape or required security
-semantics must deploy together.
+semantics cut over together. There is no compatibility window or fallback.
 `packages/protocol/src/messages.ts#PROTOCOL_VERSION` makes a mismatch fail
 visibly during `hello`; `relay speaks agentport/N` means the release was only
 partially shipped.
@@ -21,7 +21,8 @@ it:
 
 1. installs from the lockfile and runs type, wire, and end-to-end checks;
 2. runs the separately excluded site, Worker, wallet, extension, and example
-   typechecks plus their browser-boundary harnesses;
+   typechecks plus their browser-boundary harnesses, then builds the site and
+   wallet artifacts before any tag can be created;
 3. builds the self-contained CLI and keeps that exact tarball as an artifact;
 4. refuses a change under `packages/cli`, `packages/daemon`, or
    `packages/protocol` when that CLI version already has a tag;
@@ -41,6 +42,10 @@ With `deploy: false`, it deliberately leaves Cloudflare unchanged but still
 downloads the saved tarball and proves the already-deployed production relay
 matches it before retrying npm. It is not an unchecked publish shortcut.
 Publishing an already present npm version is an idempotent success.
+
+Wrangler is pinned exactly at `4.120.0` in the root package and lockfile. Keep
+that exact pin: the deploy executable is part of the release input, not an
+ambient latest-version dependency.
 
 The production job requires a protected GitHub `production` environment with:
 
@@ -68,7 +73,7 @@ For a wire-changing release, use this order:
    hosted wallet, then creates the root-version commit.
 4. Run `npx tsx scripts/remote-check.ts` against the deployed relay.
 5. Push the local commits together. The CLI-version change then triggers npm
-   publication only after Cloudflare is already compatible.
+   publication only after production proves the exact coordinated release.
 6. From a clean directory outside the monorepo, run the published CLI and
    confirm it connects to the hosted relay.
 
