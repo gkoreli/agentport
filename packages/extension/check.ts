@@ -453,15 +453,27 @@ const { ENVELOPE, TO_PAGE, TO_WALLET } = await import('./src/bridge.js');
 
 const win = new Window({ url: 'https://elicit.test/' });
 const globals = globalThis as Record<string, unknown>;
+// Node 24 exposes browser-shaped globals such as navigator through configurable
+// getter-only properties. Assignment therefore throws before the harness can
+// exercise anything. Define each test global explicitly; configurability lets
+// the later page-harness fixture replace the first happy-dom window.
+const installGlobal = (key: string, value: unknown): void => {
+  Object.defineProperty(globals, key, {
+    configurable: true,
+    enumerable: true,
+    writable: true,
+    value,
+  });
+};
 // `location` joined this list when the WebMCP shim began scoping its registry
 // to the page's origin at module load — inpage.ts installs the shim as a side
 // effect of being imported, so a global missing here fails before any check
 // runs, with a ReferenceError rather than an assertion.
 for (const key of ['window', 'document', 'navigator', 'location', 'MessageEvent', 'CustomEvent', 'Event']) {
-  globals[key] = (win as unknown as Record<string, unknown>)[key];
+  installGlobal(key, (win as unknown as Record<string, unknown>)[key]);
 }
 // esbuild substitutes this at build time; the source reads it as a global.
-globals['__AGENTPORT_VERSION__'] = rootPackage.version;
+installGlobal('__AGENTPORT_VERSION__', rootPackage.version);
 
 const CHANNEL = 'ch_check';
 const injected = win.document.createElement('script');
@@ -590,7 +602,7 @@ console.log('extension elicitation round-trip check passed');
 {
   const pageWin = new Window({ url: 'https://harness.test/' });
   for (const key of ['window', 'document', 'location', 'getSelection', 'getComputedStyle', 'NodeFilter', 'HTMLElement', 'SVGElement', 'HTMLInputElement', 'HTMLTextAreaElement', 'CSS']) {
-    globals[key] = (pageWin as unknown as Record<string, unknown>)[key];
+    installGlobal(key, (pageWin as unknown as Record<string, unknown>)[key]);
   }
   // happy-dom has no layout engine: every getBoundingClientRect is 0x0, which
   // would make isVisible reject the whole document and pass these assertions
@@ -693,7 +705,7 @@ console.log('extension elicitation round-trip check passed');
   // Truthful results. "Clicked" used to mean "we called .click() and asked no
   // further questions" — {ok:true} was unconditional for click, fill and
   // scroll, including on a disabled control that does nothing at all.
-  globals['MutationObserver'] = (pageWin as unknown as Record<string, unknown>)['MutationObserver'];
+  installGlobal('MutationObserver', (pageWin as unknown as Record<string, unknown>)['MutationObserver']);
   const fresh = (await tools.get('page.listElements')!.handler({})) as {
     elements: { handle: string; kind: string; label: string }[];
   };

@@ -111,6 +111,7 @@ jobs:
           npm run wallet:check
           npm run ui:smoke
           npm run check:extension
+          AGENTPORT_CHROME=/usr/bin/google-chrome npm run ui:extension-smoke
           npm run source:check
           npm run docs:check
           npm run e2e
