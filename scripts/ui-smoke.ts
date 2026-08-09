@@ -3,8 +3,19 @@ import { Window } from 'happy-dom';
 
 const window = new Window({ url: 'https://inkwell.test/' });
 const g = globalThis as Record<string, unknown>;
+// Node 24 exposes browser-shaped globals such as navigator through configurable
+// getter-only properties. Define the happy-dom fixture explicitly so the smoke
+// reaches its assertions instead of failing during environment installation.
+const installGlobal = (key: string, value: unknown): void => {
+  Object.defineProperty(g, key, {
+    configurable: true,
+    enumerable: true,
+    writable: true,
+    value,
+  });
+};
 for (const key of ['window', 'document', 'HTMLElement', 'Element', 'Node', 'customElements', 'navigator', 'location', 'sessionStorage', 'CustomEvent', 'Event', 'KeyboardEvent', 'HTMLInputElement', 'ShadowRoot', 'DocumentFragment', 'Text', 'Comment', 'MutationObserver', 'ResizeObserver', 'requestAnimationFrame', 'cancelAnimationFrame']) {
-  g[key] = (window as unknown as Record<string, unknown>)[key];
+  installGlobal(key, (window as unknown as Record<string, unknown>)[key]);
 }
 
 let failures = 0;
@@ -216,7 +227,7 @@ class FakeRelay {
     this.reply(seal(this.#channel.send, frame as never));
   }
 }
-(globalThis as Record<string, unknown>).WebSocket = FakeRelay;
+installGlobal('WebSocket', FakeRelay);
 (window as unknown as Record<string, unknown>).WebSocket = FakeRelay;
 // Exercise the documented popup-blocked tier so this existing smoke test
 // continues into the unchanged connect-code modal and fake relay.
