@@ -12,8 +12,10 @@ they moved.
 
 ## 0.0.13
 
-Completed on `main`; deployment is a separate release action, so the README's
-production status remains the authority until the coordinated release runs.
+Deployed as the coordinated `agentport/6` hard cutover. The hosted Worker,
+relay, and wallet were published together and the exact packed
+`@gkoreli/agentport@0.1.7` artifact passed the production pairing, sealed
+session, approval, tool-call, and prompt smoke before the source was pushed.
 
 ### Resume authority no longer transfers the E2EE endpoint
 
@@ -72,9 +74,12 @@ The release workflow now watches every source that contributes to a hosted or
 wire-speaking artifact, verifies the repository before tagging, preserves the
 exact npm tarball it checked, builds both hosted browser artifacts before a tag
 can be created, deploys the matching site/relay and wallet through the same
-deploy script used locally, runs the bounded production smoke, and only then
-publishes that saved tarball. Manual retries are idempotent: an existing tag can
-be redeployed and an already-published npm version is success. A manual
+deploy script used locally unless the protected environment records that exact
+commit as already deployed, runs the bounded production smoke, and only then
+publishes that saved tarball. A stale marker cannot authorize a later push, so
+an undeployed commit still requires the dedicated CI credential and fails
+closed when it is absent. Manual retries are idempotent: an existing tag can be
+redeployed and an already-published npm version is success. A manual
 `deploy: false` retry still enters the deploy-stage job and proves that exact
 tarball against the already-deployed relay; a skipped Cloudflare mutation can
 no longer satisfy the npm dependency by skipping the whole job. CI deploys

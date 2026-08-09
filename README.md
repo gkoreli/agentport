@@ -96,8 +96,8 @@ remote agent** a **site-defined toolset**. That's this.
 **https://agentport.gogakoreli.workers.dev** — one Cloudflare Worker serving both
 demo surfaces and the relay they connect to.
 
-> **Deployment status:** `@gkoreli/agentport@0.1.6` and the hosted relay both
-> speak `agentport/5`. The production pairing, sealed-session, tool-call, and
+> **Deployment status:** `@gkoreli/agentport@0.1.7` and the hosted relay both
+> speak `agentport/6`. The production pairing, sealed-session, tool-call, and
 > prompt smoke passes. See [Release and deployment](docs/RELEASING.md).
 
 Start your agent and pair it with Chrome:

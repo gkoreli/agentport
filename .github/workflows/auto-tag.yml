@@ -187,7 +187,14 @@ jobs:
         run: npm ci
 
       - name: Deploy matching Worker, relay, and wallet
-        if: github.event_name == 'push' || inputs.deploy
+        # A matching protected-environment marker certifies that this exact
+        # commit was already deployed manually. Every other push must deploy
+        # here; missing CI credentials therefore fail closed before npm.
+        if: >-
+          ${{
+            (github.event_name == 'push' && vars.CLOUDFLARE_DEPLOYED_COMMIT != github.sha) ||
+            (github.event_name == 'workflow_dispatch' && inputs.deploy)
+          }}
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
