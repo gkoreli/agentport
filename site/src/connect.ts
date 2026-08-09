@@ -507,7 +507,12 @@ const provider: AgentProvider & {
       // deleting it here is how a one-second race used to become a
       // permanently lost session.
       const reason = err instanceof ResumeError ? err.reason : '';
-      if (reason === 'not_resumable' || reason === 'grant_expired' || reason === 'authorization_expired') {
+      if (
+        reason === 'not_resumable' ||
+        reason === 'grant_expired' ||
+        reason === 'authorization_expired' ||
+        reason === 'revoked'
+      ) {
         log.info('previous session is gone; starting fresh', {
           sessionId: record.id,
           data: { reason, surface: request.name },

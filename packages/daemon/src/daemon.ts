@@ -281,6 +281,22 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     return this.#options.now?.() ?? Date.now();
   }
 
+  /**
+   * The attachment may exercise only the intersection of its grant and the
+   * outer delegation that authorised it. This is consulted on LIVE traffic,
+   * not just open/resume: staying connected must not turn a short delegation
+   * into a longer grant, and a tool result arriving after the boundary must
+   * not complete work whose authority ended while it was in flight.
+   */
+  #authorityError(session: Pick<SessionState, 'grant' | 'delegation'>): Error | undefined {
+    const now = this.#now();
+    if (session.grant.expiresAt <= now) return new Error('capability grant expired');
+    if (session.delegation && session.delegation.expiresAt <= now) {
+      return new Error('delegation authorization expired');
+    }
+    return undefined;
+  }
+
   get identity(): AgentIdentity {
     return this.#options.identity;
   }
@@ -373,7 +389,7 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
       for (const [epk, offer] of this.#offerSeals) {
         if (offer.at < staleOffer) this.#offerSeals.delete(epk);
       }
-      const cutoff = Date.now() - DETACH_GRACE_MS;
+      const cutoff = this.#now() - DETACH_GRACE_MS;
       for (const session of [...this.#sessions.values()]) {
         if (session.detachedAt !== undefined && session.detachedAt < cutoff) {
           void this.#closeSession(session, 'client_never_returned', false).catch((err: unknown) => {
@@ -397,7 +413,7 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
       // The relay is stateless: losing it detaches every session but kills
       // none. Clients come back with their tokens through whatever relay
       // socket exists next, and this daemon is the one that remembers them.
-      const now = Date.now();
+      const now = this.#now();
       for (const session of this.#sessions.values()) {
         if (session.detachedAt === undefined) session.detachedAt = now;
       }
@@ -483,7 +499,7 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
    * authority: the guarantee is the tombstone, not the count.
    */
   async revoke(origin: string): Promise<number> {
-    const at = Date.now();
+    const at = this.#now();
     this.#revocations.add({ origin, at });
 
     const doomed = [...this.#sessions.values()].filter((session) => session.surface.origin === origin);
@@ -662,7 +678,7 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
       case 'session.detach': {
         const session = this.#sessions.get(frame.s);
         if (session && session.detachedAt === undefined) {
-          session.detachedAt = Date.now();
+          session.detachedAt = this.#now();
           // A page-owned tool or approval cannot finish after its execution
           // context disappears. Keeping these promises pending wedges the ACP
           // turn forever and can make the model retry the same MCP call.
@@ -764,6 +780,15 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
         const pending = session.toolCalls.get(frame.id);
         if (!pending) return;
         session.toolCalls.delete(frame.id);
+        const authorityError = this.#authorityError(session);
+        if (authorityError) {
+          this.#log.warn('refused a surface tool result after attachment authority expired', {
+            sessionId: frame.s,
+            data: { toolCallId: frame.id },
+          });
+          pending.reject(authorityError);
+          return;
+        }
         this.#log.info('surface tool result received', {
           sessionId: frame.s,
           data: { toolCallId: frame.id, ok: frame.ok },
@@ -1002,7 +1027,8 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     // Local policy lives here. A real daemon would consult a per-origin
     // allowlist; v0 accepts any session the relay authorised, but still
     // refuses grants it cannot honour.
-    if (frame.grant.expiresAt <= Date.now()) {
+    const now = this.#now();
+    if (frame.grant.expiresAt <= now) {
       this.#send({ t: 'session.denied', s: frame.s, reason: 'grant_expired' });
       return;
     }
@@ -1026,7 +1052,7 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
         delegation.origin !== frame.surface.origin ||
         delegation.grantHash !== hashGrant(frame.grant) ||
         !delegationLifetimeOk(delegation) ||
-        delegation.expiresAt <= Date.now()
+        delegation.expiresAt <= now
       ) {
         this.#send({ t: 'session.denied', s: frame.s, reason: 'bad_delegation' });
         return;
@@ -1177,6 +1203,22 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     const session = this.#sessions.get(frame.s);
     if (!session) return;
 
+    const authorityError = this.#authorityError(session);
+    if (authorityError) {
+      this.#log.warn('refused a prompt after attachment authority expired', {
+        sessionId: session.id,
+        data: { promptId: frame.id },
+      });
+      this.#sendSession(session, {
+        t: 'done',
+        s: session.id,
+        promptId: frame.id,
+        stopReason: 'error',
+        error: authorityError.message,
+      });
+      return;
+    }
+
     const controller = new AbortController();
     session.prompts.set(frame.id, controller);
 
@@ -1261,9 +1303,10 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     args: Record<string, unknown>,
     signal?: AbortSignal,
   ): Promise<unknown> {
+    const authorityError = this.#authorityError(session);
+    if (authorityError) throw authorityError;
     const tool = session.tools.find((candidate) => candidate.name === name);
     if (!tool) throw new Error(`tool "${name}" is not in this session's grant`);
-    if (session.grant.expiresAt <= Date.now()) throw new Error('capability grant expired');
 
     // Only the code-carrying fallback lacks browser consent and moves this
     // gate to the daemon. A delegated session was authorised for this exact
@@ -1285,6 +1328,12 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
       });
       if (!approved) throw new Error('declined by owner');
     }
+
+    // The local consent surface may have taken the attachment across its
+    // deadline. Never dispatch a call on authority that ended while the user
+    // was deciding.
+    const afterApproval = this.#authorityError(session);
+    if (afterApproval) throw afterApproval;
 
     const id = randomId('call_');
     const deferred = new Deferred<unknown>();

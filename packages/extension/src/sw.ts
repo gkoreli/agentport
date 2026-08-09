@@ -937,7 +937,12 @@ async function resumeFromStore(
     return entry;
   } catch (err) {
     const reason = err instanceof ResumeError ? err.reason : '';
-    if (reason === 'not_resumable' || reason === 'grant_expired' || reason === 'authorization_expired') {
+    if (
+      reason === 'not_resumable' ||
+      reason === 'grant_expired' ||
+      reason === 'authorization_expired' ||
+      reason === 'revoked'
+    ) {
       // Proven dead. Anything else is transient — keep the token for retry.
       observe(clearResume(origin, key, record.id), 'failed to clear dead resume record', {
         sessionId: record.id,

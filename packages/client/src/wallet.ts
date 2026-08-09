@@ -44,10 +44,11 @@ const DEFAULT_SESSION_TTL_MS = 60 * 60 * 1000;
 
 /**
  * A resume refusal with the relay's reason attached, so callers can tell a
- * dead session ('not_resumable', 'grant_expired', 'authorization_expired') from a transient race
- * ('already_attached': the old tab's socket close has not reached the relay
- * yet). Deleting a resume record over a transient reason turns a lost race
- * into a permanently lost session — the exact bug this type exists to stop.
+ * dead session ('not_resumable', 'grant_expired', 'authorization_expired',
+ * 'revoked') from a transient race ('already_attached': the old tab's socket
+ * close has not reached the relay yet). Deleting a resume record over a
+ * transient reason turns a lost race into a permanently lost session — the
+ * exact bug this type exists to stop.
  */
 export class ResumeError extends Error {
   constructor(readonly reason: string) {
@@ -392,6 +393,10 @@ export class AgentWallet extends Emitter<WalletEvents> {
       if (!token || !agent || !request) {
         // A session with no resume authority cannot come back; saying so is
         // better than leaving a handle that silently swallows prompts.
+        this.#log.warn('session has incomplete resume state after reconnect', {
+          sessionId: id,
+          data: { token: Boolean(token), agent: Boolean(agent), request: Boolean(request) },
+        });
         session.dropped('not_resumable');
         continue;
       }
@@ -648,6 +653,13 @@ export class AgentWallet extends Emitter<WalletEvents> {
           ownTools: resumed.ownTools,
         }),
       );
+      // A fresh wallet reconstructed from durable storage did not mint this
+      // token, so it is not in #resumeTokens yet. Adopt it only AFTER the
+      // daemon's signed response proves the resume: storing an unauthenticated
+      // bearer from the request would let a forged/failed reply poison the
+      // reconnect path. The same logical attachment can now survive its next
+      // socket interruption without replacing the page's handle.
+      this.#resumeTokens.set(request.id, request.token);
       this.#agentKeys.set(request.id, request.agent);
       if (existing) {
         existing.reattached({
