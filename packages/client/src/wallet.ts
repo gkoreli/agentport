@@ -44,7 +44,7 @@ const DEFAULT_SESSION_TTL_MS = 60 * 60 * 1000;
 
 /**
  * A resume refusal with the relay's reason attached, so callers can tell a
- * dead session ('not_resumable', 'grant_expired') from a transient race
+ * dead session ('not_resumable', 'grant_expired', 'authorization_expired') from a transient race
  * ('already_attached': the old tab's socket close has not reached the relay
  * yet). Deleting a resume record over a transient reason turns a lost race
  * into a permanently lost session — the exact bug this type exists to stop.
@@ -560,8 +560,9 @@ export class AgentWallet extends Emitter<WalletEvents> {
   }
 
   /**
-   * Re-attach to a session this origin already established — the page-refresh
-   * path. The token was issued to this client alone and dies with the session.
+   * Re-attach to a session this identity already established — the page-refresh
+   * path. The daemon requires both this identity's proof and the token; the
+   * relay sees the token, so the token alone cannot choose a new endpoint.
    */
   async resumeSession(request: {
     id: string;

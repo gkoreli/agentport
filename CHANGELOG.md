@@ -10,6 +10,42 @@ they moved.
 
 ## Unreleased
 
+### Resume authority no longer transfers the E2EE endpoint
+
+The daemon used to accept a valid relay-visible resume token from any newly
+authenticated client identity, verify that identity's self-consistent fresh
+EPK proof, and then overwrite the session's stored `clientKey`. A malicious
+relay could therefore force detach, resume with its own Ed25519/X25519 keys,
+and become the application-side plaintext endpoint.
+
+Resume now requires both the daemon-minted token and proof by the Ed25519
+attachment identity captured at open. `clientKey` is immutable session state:
+a failed resume changes neither identity nor sealing state, and identity/token
+mismatches receive the same `not_resumable` denial as an unknown session. The
+real socket harness records the exact token through an on-path relay tap, uses
+it after forced detach, requires the different identity to be denied within a
+deadline, and then
+resumes successfully from a new wallet instance holding the original bounded
+identity. Restoring the old resumer-selected proof identity makes that attacker
+resume instead.
+
+The hosted/demo page now persists that bounded attachment secret beside its
+resume capability in per-tab `sessionStorage`; it never persists or receives
+the user's root key. Stored records are exact-shape and bounds checked, and old
+bearer-only records are cleared rather than silently assigned a fresh identity.
+The extension already resumes through its stable extension-held identity, so
+its record remains extension-only and does not expose a key to the page.
+
+Finally, delegated resume now re-checks delegation expiry as well as grant
+expiry and revocation. A grant that outlives its root-signed delegation can no
+longer carry the logical attachment beyond that outer authorization boundary.
+The lockstep protocol is now `agentport/6` even though the frame shape did not
+change: an older daemon silently omits the endpoint-binding rule, so the hosted
+relay must refuse that mixed deployment and force the daemon upgrade.
+ADR-025 remains proposed: this lands only its narrow R4 resume prerequisite,
+not the package split, complete authorization replacement, controller proofs,
+or non-exportable root custody.
+
 ### The release is one verified transaction, not three independently moving artifacts
 
 The hosted Worker/relay, hosted wallet, and npm daemon speak one lockstep wire

@@ -770,7 +770,9 @@ they are not confidential. The relay stores none of them durably; seeing a
 resume token in transit is different from minting, judging, or retaining it.
 The daemon owns resume authority and rejects token guessing with a bounded
 attempt count, constant-time comparison, and a generic unprovable-session
-response.
+response. Because the relay sees a valid token, resume additionally requires
+an EPK proof by the Ed25519 client identity captured at open. That stored
+identity is immutable: a resumer cannot replace it.
 
 ### Capability, content, and provenance boundaries
 
@@ -784,13 +786,17 @@ response.
   machine. The relay never buffers content and the site never persists a
   transcript across reload. History restoration asks the daemon/runtime.
 - The site may persist only the session id, agent address, relay address,
-  surface selector, and resume token required to reattach. The extension also
+  surface selector, bounded attachment identity, and resume token required to
+  reattach. The attachment identity is not the user root and lives beside the
+  capability only in per-tab storage. The extension also
   records the origin/name lookup key and grant expiry in extension-only session
   storage. A resume token is a bearer secret scoped to its existing session
   and still bounded by the original grant and expiry.
-- Session attachment keys live in endpoint memory and are removed when the
-  session closes. JavaScript cannot guarantee physical zeroization; the design
-  therefore relies on ephemerality, non-persistence, and short ownership.
+- X25519 sealing keys live only in endpoint memory and are replaced on every
+  resume. A resumable page attachment's bounded Ed25519 identity lives beside
+  its token until the tab/session ends. JavaScript cannot guarantee physical
+  zeroization; the design therefore relies on scoped authority and bounded
+  persistence.
 
 ### Fail-closed rules
 
@@ -800,8 +806,9 @@ response.
 - Plaintext content frames are dropped; content is never retried unsealed.
 - AEAD failure, counter mismatch, or forbidden inner frame type is dropped
   without advancing receive state.
-- Expired grants, unknown tools, declined approval, invalid resume authority,
-  and attempts to replace a live attachment are denied.
+- Expired grants or delegations, unknown tools, declined approval, invalid
+  resume authority or identity, and attempts to replace a live attachment are
+  denied.
 - Malformed JSON and frames without an object envelope and string type are
   rejected. Exhaustive per-frame runtime schema validation is a blocking gap
   recorded below.
@@ -819,7 +826,7 @@ response.
 | Content is always sealed | protocol sealing; wallet and daemon send/receive boundaries | on-path observer plus plaintext-proof stripping checks |
 | Handshake metadata cannot be rewritten | canonical epk proof bindings | grant-rewrite and missing/invalid proof checks |
 | Ciphertext is ordered and authentic | channel counter and AEAD state | tamper, replay, wrong-AAD, and counter tests |
-| Resume preserves authority and rekeys | daemon-owned token/grant state; fresh endpoint epks | theft, live-session replacement, expiry, and rekey checks |
+| Resume preserves identity and authority while rekeying | daemon-owned token/client/grant/delegation state; fresh endpoint epks | malicious-relay token theft after forced detach, legitimate same-identity recovery, authorization expiry, live-session replacement, and rekey checks |
 | Conversation remains at the edge | daemon/runtime history; relay count-and-drop behavior | refresh replay proves history came from agent side |
 
 `npm run e2e` is the minimum acceptance test for these invariants, alongside
@@ -835,8 +842,10 @@ assertion cannot fail for the claimed property does not count as evidence.
   TypeScript types inferred from them.
 - The E2E suite covers ownership denial, grant restriction, approval refusal,
   on-path observation, tampering, replay, proof stripping, grant rewriting,
-  resume-token theft, and edge-owned history. It does not yet directly attack
-  invalid cert rebinding, self-reported identity replacement, grant expiry, or
+  identity-bound resume-token theft after forced detach, and edge-owned
+  history. It does not yet directly attack invalid cert rebinding,
+  self-reported identity replacement outside resume, grant expiry outside the
+  resume boundary, or
   every cross-role/non-participant route. Those rows above remain required
   test work, not implied coverage. (Old and resumed attachment keys *are* now
   compared — e2e asserts the fingerprint words change across a rekey, since
@@ -1037,8 +1046,9 @@ client redial (`c522087`) means a closed socket is something the client heals
 from, so revocation makes a session **unresumable at the daemon**, and the
 acceptance check drives the reconnect path rather than the socket. And the
 grant-binding fix means the delegation now commits to the grant, so retaining
-it on the session is what lets a resume — which presents only a bearer token —
-be re-judged against an origin the user has since cut off.
+it on the session is what lets a resume — which presents a token and proof by
+the original bounded attachment identity, but not the delegation again — be
+re-judged against expiry and an origin the user has since cut off.
 
 Two defects were closed on the way, both found by mapping the design onto real
 code. Absent ownership was **permission**, not refusal: `cert && client !==

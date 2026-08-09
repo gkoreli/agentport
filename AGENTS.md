@@ -141,6 +141,12 @@ section is the short implementation checklist, not a second protocol spec.
    asserted by a check that observes where the frame went.** A check that
    reads `policy.mayAsk` passes just as happily on a daemon that hands the
    question to the requesting site.
+9. **Resume preserves the attachment identity.** The daemon requires the
+   relay-visible token AND proof by the Ed25519 client captured at open; it
+   never adopts a resumer's identity. A page reload persists only that bounded
+   attachment secret beside the token in per-tab storage, never the user root.
+   Grant, delegation, and revocation boundaries are all re-judged before a
+   fresh X25519 channel replaces the detached one.
 
 These are mandatory acceptance properties. ADR-018 maps them to current
 evidence and names the remaining blocking coverage gaps. If you change routing
@@ -160,7 +166,7 @@ Open the demo, hit **Pair a new agent**, paste the code, then **Connect
 agent**. The daemon's pairing link (`/pair#code=…`) auto-fills the dialog.
 
 ```bash
-npm run e2e        # full loop over real sockets, no browser, 175 checks
+npm run e2e        # full loop over real sockets, no browser, 179 checks
 npm run webmcp:harvest # our belief about the WebMCP draft, checked
 npm run wire:check # wire validation: 521 fixture cases across all 45 frames
 npm run agui:check # every emitted AG-UI event parsed by @ag-ui/core's schemas
@@ -530,7 +536,7 @@ Working: pairing, cert issuance and verification, directory + presence,
 capability grants with TTL, prompt streaming, plan reporting, tool-call
 round-trip, approval round-trip, cancellation, reconnect with in-place session
 resume, session teardown, revocation, authority-tagged approvals, the agent
-asking its own user a question, and the full demo UI. 175 e2e checks and 521
+asking its own user a question, and the full demo UI. 179 e2e checks and 521
 wire-validation cases pass.
 
 Not built yet, in rough priority order:
@@ -626,8 +632,11 @@ every content frame crosses the relay as `{t:'enc', s, n, c}` under
 XChaCha20-Poly1305. The relay cannot see content or its inner frame type.
 Lifecycle frames remain clear: notably surface metadata, the capability grant
 (including tool names), public identities and keys, agent/runtime labels, and
-resume authority in transit. Resume uses endpoint-generated fresh keys carried
-by `session.resume`/`session.resumed`; the relay only forwards them.
+resume authority in transit. Resume uses endpoint-generated fresh X25519 keys
+carried by `session.resume`/`session.resumed`; the Ed25519 attachment identity
+stays stable and proves the request alongside the daemon-minted token. The
+relay only forwards them and cannot transfer the attachment with the token it
+sees.
 
 Because the relay can no longer see inner frame types, its per-type
 `mayOriginate` check applies only to lifecycle frames; for sealed content the
@@ -658,7 +667,7 @@ One rule: **conversation belongs to the user's own machine.**
 | what | where | who can read it |
 |---|---|---|
 | transcript | the agent's own session store (Claude Code's, on the user's disk) | the user |
-| resume token | sessionStorage on the site origin, per tab | that tab |
+| attachment identity + resume token | sessionStorage on the site origin, per tab | that tab; the identity is bounded to this attachment, never the user root |
 | ownership certs | the wallet and the daemon's identity file | relay verifies per connection, stores nothing |
 | resume authority | the daemon (it mints and judges the token) | relay routes resume frames, holds no tokens |
 | conversation frames | in flight only, sealed | relay forwards ciphertext, never stores |

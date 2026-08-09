@@ -106,11 +106,13 @@ interface SessionState {
   sealChannel: SealChannel;
   /**
    * Session authority lives HERE (ADR-016): the daemon mints the resume
-   * token, judges resume attempts, survives relay restarts, and counts what
-   * the client missed while detached. The relay only ever routes.
+   * token, retains the client identity it was issued to, judges both on
+   * resume, survives relay restarts, and counts what the client missed while
+   * detached. The relay only ever routes.
    */
   resumeToken: string;
-  clientKey?: string;
+  /** Stable Ed25519 identity of this logical attachment, captured at open. */
+  readonly clientKey: string;
   detachedAt?: number;
   missed: number;
   resumeAttempts: number;
@@ -888,10 +890,39 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
       this.#send({ t: 'session.denied', s: frame.s, reason: 'not_resumable' });
       return;
     }
-    if (!timingSafeEqualStr(session.resumeToken, frame.token)) {
+    // The token is visible to the relay, so it is necessary but never
+    // sufficient resume authority. The resumer must also prove the SAME
+    // Ed25519 attachment identity captured at open. Compare both before any
+    // state changes, and use the same generic denial as an unknown session so
+    // a wrong identity learns nothing from possession of an observed token.
+    const tokenMatches = timingSafeEqualStr(session.resumeToken, frame.token);
+    const clientMatches = typeof frame.client === 'string' && timingSafeEqualStr(session.clientKey, frame.client);
+    if (!tokenMatches || !clientMatches) {
       this.#send({ t: 'session.denied', s: frame.s, reason: 'not_resumable' });
       return;
     }
+    // A malicious relay may stamp the stored public key without possessing
+    // it. Prove that identity before returning lifecycle-specific reasons:
+    // only the original attachment may learn whether it is still attached,
+    // expired, or revoked. The fresh EPK remains mandatory, so replaying an
+    // old signed resume cannot make the relay an endpoint it can decrypt.
+    if (
+      !frame.epk ||
+      !frame.epkSig ||
+      !verifyEpk(
+        session.clientKey,
+        frame.s,
+        frame.epk,
+        frame.epkSig,
+        resumeProofBinding(frame.agent, frame.token),
+      )
+    ) {
+      this.#send({ t: 'session.denied', s: frame.s, reason: 'not_resumable' });
+      return;
+    }
+    // A proven resumer resets failed guesses even when it loses the ordinary
+    // refresh race. Otherwise five transient already_attached retries would
+    // permanently lock out the real attachment.
     session.resumeAttempts = 0;
     // Attached means a live client the relay has not reported dead: a valid
     // token must not hijack a session out from under it. The refresh race
@@ -900,40 +931,32 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
       this.#send({ t: 'session.denied', s: frame.s, reason: 'already_attached' });
       return;
     }
-    if (session.grant.expiresAt <= Date.now()) {
+    const now = this.#now();
+    if (session.grant.expiresAt <= now) {
       this.#send({ t: 'session.denied', s: frame.s, reason: 'grant_expired' });
       return;
     }
     // Revocation closes and forgets a session, so the lookup above normally
     // fails first. This closes the race the review names: a resume already in
     // flight when the tombstone lands must not slip through the window
-    // between recording it and finishing teardown (ADR-022 R4). It is also
-    // the only check a bearer token cannot walk past — resume proves
-    // possession of a token, never identity, and the hosted flow resumes from
-    // a fresh key by construction.
-    if (session.delegation && isRevoked(this.#revocations.list(), session.delegation)) {
-      this.#send({ t: 'session.denied', s: frame.s, reason: 'revoked' });
-      return;
+    // between recording it and finishing teardown (ADR-022 R4). It is kept in
+    // addition to the stable-identity check above: the same attachment
+    // identity may still hold an authorization the user has since revoked.
+    if (session.delegation) {
+      // A delegation authorizes the WHOLE logical attachment, not merely its
+      // first open. A longer-lived grant must not carry a resumed session
+      // past the root-signed authorization that created it.
+      if (session.delegation.expiresAt <= now) {
+        this.#send({ t: 'session.denied', s: frame.s, reason: 'authorization_expired' });
+        return;
+      }
+      if (isRevoked(this.#revocations.list(), session.delegation)) {
+        this.#send({ t: 'session.denied', s: frame.s, reason: 'revoked' });
+        return;
+      }
     }
-    if (
-      !frame.client ||
-      !frame.epk ||
-      !frame.epkSig ||
-      !verifyEpk(
-        frame.client,
-        frame.s,
-        frame.epk,
-        frame.epkSig,
-        resumeProofBinding(frame.agent, frame.token),
-      )
-    ) {
-      this.#send({ t: 'session.denied', s: frame.s, reason: 'bad_epk_proof' });
-      return;
-    }
-
     const mine = generateSealKeyPair();
     session.sealChannel = deriveSealChannel(mine.secretKey, frame.epk, frame.s, 'agent');
-    session.clientKey = frame.client;
     session.detachedAt = undefined;
     const missed = session.missed;
     session.missed = 0;
@@ -964,7 +987,7 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
         this.#options.identity.secretKey,
         frame.s,
         mine.publicKey,
-        answerProofBinding('resume', frame.client, frame.epk, session.surface, session.grant, {
+        answerProofBinding('resume', session.clientKey, frame.epk, session.surface, session.grant, {
           agentName: resumedAgentName,
           runtime: this.#options.identity.runtime,
           missed,

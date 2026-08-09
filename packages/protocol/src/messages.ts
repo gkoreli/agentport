@@ -107,11 +107,11 @@ export const WIRE_FINGERPRINT = 'e26265ee0c54cf583ca452bc';
  * The wire dialect both ends must agree on, checked at `hello` before
  * anything else happens (`relay/src/core.ts`).
  *
- * BUMP THIS WHENEVER THE WIRE CHANGES — a new frame type, a new field, a
- * changed signed body. Its entire job is to turn "these two peers disagree"
- * into one legible error at the handshake, instead of a confusing
- * `unexpected_key` on the first real frame, after pairing and auth have
- * already appeared to succeed.
+ * BUMP THIS WHENEVER THE WIRE OR ITS REQUIRED SECURITY SEMANTICS CHANGE — a
+ * new frame type, a new field, a changed signed body, or a peer-side rule an
+ * older endpoint would silently omit. Its entire job is to turn "these two
+ * peers disagree" into one legible error at the handshake, instead of a
+ * confusing failure after pairing and auth have already appeared to succeed.
  *
  * v2: `grantHash` and `issuedAt` on SessionDelegation (both signed, so the
  * canonical body changed too), `domain` and `callHash` on the approval pair,
@@ -128,13 +128,18 @@ export const WIRE_FINGERPRINT = 'e26265ee0c54cf583ca452bc';
  * daemon owner's consent screen, so the break is the point. Content fields
  * (`text`, plan step bodies, a user's own typed answers) stay `str`.
  *
+ * v6: resume is identity-bound. The frame shape is unchanged, but an older
+ * daemon treats the relay-visible token as transferable endpoint authority.
+ * Versioning the semantic break makes the hosted relay refuse that unsafe
+ * mixed deployment instead of reporting compatibility.
+ *
  * This is no longer hand-maintained on its own: `WIRE_FINGERPRINT` above is
  * recomputed from the schemas on every `wire:check` run, so a wire change that
  * forgot this constant is a red build. It caught the v4 change on the first
  * run after it was written — which is the only evidence worth having that a
  * guard works.
  */
-export const PROTOCOL_VERSION = 'agentport/5';
+export const PROTOCOL_VERSION = 'agentport/6';
 
 export type Hex = string;
 
@@ -561,10 +566,10 @@ export const SessionOpened = obj({
   agentName: name,
   runtime: name,
   /**
-   * Bearer secret stamped by the relay, letting THIS client re-attach to this
-   * session after a reload. Scoped to one session, dies with it, and grants
-   * nothing beyond a grant the user already approved and which still expires
-   * on its own schedule.
+   * Bearer secret stamped by the relay, used together with THIS client's
+   * stable Ed25519 proof to re-attach after a reload. Scoped to one session,
+   * dies with it, and grants nothing by itself or beyond the original
+   * grant/authorization boundaries.
    */
   resume: opt(tokenField),
   /** Agent's ephemeral X25519 public key; answers the client's `epk`. */

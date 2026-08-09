@@ -7,7 +7,8 @@ AgentPort has several artifacts but one wire compatibility boundary:
 - `@gkoreli/agentport` is the daemon CLI users run;
 - the extension is another browser endpoint when distributed manually.
 
-The relay and every endpoint that changed wire shape must deploy together.
+The relay and every endpoint that changed wire shape or required security
+semantics must deploy together.
 `packages/protocol/src/messages.ts#PROTOCOL_VERSION` makes a mismatch fail
 visibly during `hello`; `relay speaks agentport/N` means the release was only
 partially shipped.

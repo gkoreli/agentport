@@ -110,9 +110,10 @@ await daemon.start();
 check('daemon reached the relay', true);
 
 console.log('\n2. a keyless page asks for an agent');
+const pageKeys = generateKeyPair();
 const page = new AgentWallet({
   relayUrl,
-  userSecretKey: generateKeyPair().secretKey,
+  userSecretKey: pageKeys.secretKey,
   socketFactory: (url) => new NodeWebSocket(url) as never,
 });
 await page.connect();
@@ -146,8 +147,8 @@ check('it wrote through the site tool', called.includes('append'), called);
 check('the document changed', doc.text.split('\n\n').length > 1, doc.text);
 
 console.log('\n4. refresh: drop the client, re-attach, restore from the agent');
-// Simulate a page reload: the tab's socket dies, a brand-new ephemeral client
-// appears, and it must pick the conversation back up.
+// Simulate a page reload: the tab's socket dies, a fresh wallet instance
+// restores the bounded attachment identity and picks the conversation back up.
 const token = page.resumeTokenFor(session.id);
 check('relay issued a resume token', typeof token === 'string' && token.length > 0);
 
@@ -159,7 +160,7 @@ check('relay issued a resume token', typeof token === 'string' && token.length >
 // missed the bug that lost every real refresh.)
 const reloaded = new AgentWallet({
   relayUrl,
-  userSecretKey: generateKeyPair().secretKey,
+  userSecretKey: pageKeys.secretKey,
   socketFactory: (url) => new NodeWebSocket(url) as never,
 });
 await reloaded.connect();

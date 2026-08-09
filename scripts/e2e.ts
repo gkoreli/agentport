@@ -623,7 +623,37 @@ const resumeDaemon = new AgentDaemon({
 });
 await resumeDaemon.start();
 
-const tab = new AgentWallet({ relayUrl, userSecretKey: generateKeyPair().secretKey, socketFactory });
+// Put a literal recording intermediary on the victim's client leg. This sees
+// exactly the lifecycle metadata the relay sees, including session.opened's
+// resume capability, while forwarding the real socket protocol unchanged.
+const { WebSocketServer: ResumeTapServer } = await import('ws');
+const resumeObserved: string[] = [];
+const resumeTap = new ResumeTapServer({ port: 0, host: '127.0.0.1' });
+resumeTap.on('connection', (inbound) => {
+  const upstream = new NodeWebSocket(relayUrl);
+  const queued: string[] = [];
+  upstream.on('open', () => {
+    for (const message of queued.splice(0)) upstream.send(message);
+  });
+  inbound.on('message', (data) => {
+    const message = data.toString();
+    resumeObserved.push(message);
+    if (upstream.readyState === NodeWebSocket.OPEN) upstream.send(message);
+    else queued.push(message);
+  });
+  upstream.on('message', (data) => {
+    const message = data.toString();
+    resumeObserved.push(message);
+    inbound.send(message);
+  });
+  inbound.on('close', () => upstream.close());
+  upstream.on('close', () => inbound.close());
+});
+await new Promise((resolve) => resumeTap.on('listening', resolve));
+const resumeTapUrl = `ws://127.0.0.1:${(resumeTap.address() as { port: number }).port}`;
+
+const resumeClientKeys = generateKeyPair();
+const tab = new AgentWallet({ relayUrl: resumeTapUrl, userSecretKey: resumeClientKeys.secretKey, socketFactory });
 await tab.connect();
 const req = await tab.beginConnect({
   surface: { name: 'Inkwell', origin: 'https://inkwell.test' },
@@ -632,18 +662,27 @@ const req = await tab.beginConnect({
 });
 resumeDaemon.claimConnect(req.code);
 const liveSession = await req.accepted;
-const resumeToken = tab.resumeTokenFor(liveSession.id)!;
-check('a resume token was issued', typeof resumeToken === 'string' && resumeToken.length >= 32);
+const walletResumeToken = tab.resumeTokenFor(liveSession.id)!;
+const observedOpened = resumeObserved
+  .map((raw) => JSON.parse(raw) as Record<string, unknown>)
+  .find((frame) => frame.t === 'session.opened' && frame.s === liveSession.id);
+const resumeToken = typeof observedOpened?.resume === 'string' ? observedOpened.resume : '';
+check(
+  'the malicious relay observed the exact valid resume token on the wire',
+  resumeToken.length >= 32 && resumeToken === walletResumeToken,
+  { observed: resumeToken.length, issued: walletResumeToken.length },
+);
 
 // Say something, so there is a conversation worth restoring.
 doc.text = 'Resume test.';
 await liveSession.prompt('Add a line.');
 
-// While the original tab is still attached, nobody else may take the session.
-const thief = new AgentWallet({ relayUrl, userSecretKey: generateKeyPair().secretKey, socketFactory });
-await thief.connect();
+// Even another wallet instance holding the legitimate attachment identity may
+// not replace it while the original endpoint is still live.
+const duplicate = new AgentWallet({ relayUrl, userSecretKey: resumeClientKeys.secretKey, socketFactory });
+await duplicate.connect();
 let hijack = '';
-await thief
+await duplicate
   .resumeSession({ id: liveSession.id, agent: resumeAgentKeys.publicKey, token: resumeToken, tools: inkwellTools(), decide: () => true })
   .catch((err: Error) => {
     hijack = err.message;
@@ -653,6 +692,32 @@ check('a live session cannot be stolen even with the token', hijack.includes('al
 // Now the tab "refreshes" — the socket drops without ending the session.
 tab.disconnect();
 await new Promise((resolve) => setTimeout(resolve, 150));
+
+// This is the malicious relay's actual power, not a guessed-token proxy for
+// it: the relay observed the exact clear token above, can manufacture the
+// detach, and can authenticate a fresh client/EPK pair of its own. That must
+// still not transfer the attachment to its new Ed25519 endpoint. The deadline
+// makes a dropped denial fail as a test instead of hanging forever.
+const thief = new AgentWallet({ relayUrl, userSecretKey: generateKeyPair().secretKey, socketFactory });
+await thief.connect();
+const stolenTokenOutcome = await Promise.race([
+  thief
+    .resumeSession({
+      id: liveSession.id,
+      agent: resumeAgentKeys.publicKey,
+      token: resumeToken,
+      tools: inkwellTools(),
+      decide: () => true,
+    })
+    .then(() => 'resumed')
+    .catch((err: Error) => err.message),
+  new Promise<string>((resolve) => setTimeout(() => resolve('deadline'), 3_000)),
+]);
+check(
+  'a relay-observed valid token cannot resume under a different client identity',
+  stolenTokenOutcome.includes('not_resumable'),
+  stolenTokenOutcome,
+);
 
 let wrongToken = '';
 await thief
@@ -681,7 +746,14 @@ check(
   const impostorKeys = generateKeyPair();
   const impostor = new NodeWebSocket(relayUrl);
   const impostorFrames: string[] = [];
-  await new Promise((resolve) => impostor.on('open', resolve));
+  const impostorOpen = await Promise.race([
+    new Promise<string>((resolve) => {
+      impostor.once('open', () => resolve('open'));
+      impostor.once('error', (err) => resolve(`error: ${err.message}`));
+    }),
+    new Promise<string>((resolve) => setTimeout(() => resolve('deadline'), 3_000)),
+  ]);
+  check('the unrelated agent socket opens within its deadline', impostorOpen === 'open', impostorOpen);
   impostor.on('message', (data) => impostorFrames.push(data.toString()));
   const answered = new Deferred<void>();
   impostor.on('message', (data) => {
@@ -696,13 +768,24 @@ check(
     }
     if (frame.t === 'ready') answered.resolve();
   });
-  impostor.send(canonicalJson({ t: 'hello', v: PROTOCOL_VERSION, role: 'agent' }));
-  await answered.promise;
+  if (impostorOpen === 'open') impostor.send(canonicalJson({ t: 'hello', v: PROTOCOL_VERSION, role: 'agent' }));
+  const impostorReady = impostorOpen === 'open'
+    ? await Promise.race([
+      answered.promise.then(() => 'ready'),
+      new Promise<string>((resolve) => setTimeout(() => resolve('deadline'), 3_000)),
+    ])
+    : impostorOpen;
+  check('the unrelated agent authenticates within its deadline', impostorReady === 'ready', impostorReady);
 
   // A resume is now in flight to Resume Agent. Its token is wrong, so the real
   // daemon will refuse it — which makes a forged ACCEPTANCE the sharp test: if
   // the relay let an unrelated agent answer, this doomed resume would succeed.
-  const racer = new AgentWallet({ relayUrl, userSecretKey: generateKeyPair().secretKey, socketFactory });
+  const racer = new AgentWallet({
+    relayUrl,
+    userSecretKey: generateKeyPair().secretKey,
+    socketFactory,
+    handshakeTimeoutMs: 2_000,
+  });
   await racer.connect();
   const racing = racer.resumeSession({
     id: liveSession.id,
@@ -711,23 +794,28 @@ check(
     tools: inkwellTools(),
     decide: () => true,
   });
-  impostor.send(canonicalJson({
-    t: 'session.resumed',
-    s: liveSession.id,
-    agentName: 'Impostor',
-    runtime: 'demo-writer',
-    surface: { name: 'Inkwell', origin: 'https://inkwell.test' },
-    grant: { tools: [], alwaysAsk: [], expiresAt: Date.now() + 60_000 },
-    missed: 0,
-    // Well-formed on purpose: this check is about ROUTING AUTHORITY, so the
-    // forgery has to survive the decoder and be refused for who sent it. A
-    // frame missing a required field would be rejected as bad_frame and prove
-    // only that the schema works.
-    ownTools: false,
-    epk: 'a'.repeat(64),
-    epkSig: 'b'.repeat(128),
-  }));
-  const outcome = await racing.then(() => 'resumed').catch((err: Error) => err.message);
+  if (impostorReady === 'ready') {
+    impostor.send(canonicalJson({
+      t: 'session.resumed',
+      s: liveSession.id,
+      agentName: 'Impostor',
+      runtime: 'demo-writer',
+      surface: { name: 'Inkwell', origin: 'https://inkwell.test' },
+      grant: { tools: [], alwaysAsk: [], expiresAt: Date.now() + 60_000 },
+      missed: 0,
+      // Well-formed on purpose: this check is about ROUTING AUTHORITY, so the
+      // forgery has to survive the decoder and be refused for who sent it. A
+      // frame missing a required field would be rejected as bad_frame and prove
+      // only that the schema works.
+      ownTools: false,
+      epk: 'a'.repeat(64),
+      epkSig: 'b'.repeat(128),
+    }));
+  }
+  const outcome = await Promise.race([
+    racing.then(() => 'resumed').catch((err: Error) => err.message),
+    new Promise<string>((resolve) => setTimeout(() => resolve('deadline'), 3_000)),
+  ]);
   check(
     'an unrelated agent cannot answer a resume it was not routed',
     outcome.includes('not_resumable'),
@@ -743,7 +831,7 @@ check(
 }
 
 // The legitimate tab comes back.
-const reopened = new AgentWallet({ relayUrl, userSecretKey: generateKeyPair().secretKey, socketFactory });
+const reopened = new AgentWallet({ relayUrl, userSecretKey: resumeClientKeys.secretKey, socketFactory });
 await reopened.connect();
 const { session: back } = await reopened.resumeSession({
   id: liveSession.id,
@@ -764,8 +852,10 @@ check(
 
 back.close();
 thief.close();
+duplicate.close();
 reopened.close();
 await resumeDaemon.stop();
+resumeTap.close();
 
 // --- 10. the relay is blind: an on-path observer learns nothing --------------
 // The adversary model made literal: a recording proxy sits between the wallet
@@ -982,7 +1072,8 @@ console.log('\n12. sessions outlive the relay itself');
   });
   await survivorDaemon.start();
 
-  const user = new AgentWallet({ relayUrl: url, userSecretKey: generateKeyPair().secretKey, socketFactory });
+  const survivorClient = generateKeyPair();
+  const user = new AgentWallet({ relayUrl: url, userSecretKey: survivorClient.secretKey, socketFactory });
   await user.connect();
   const pairOffer = await user.claimPairing(await survivorPairing.promise);
   await user.approvePairing(pairOffer);
@@ -1005,7 +1096,7 @@ console.log('\n12. sessions outlive the relay itself');
   await r2.listening();
   await daemonBack.promise;
 
-  const laterTab = new AgentWallet({ relayUrl: url, userSecretKey: generateKeyPair().secretKey, socketFactory });
+  const laterTab = new AgentWallet({ relayUrl: url, userSecretKey: survivorClient.secretKey, socketFactory });
   await laterTab.connect();
   const { session: after } = await laterTab.resumeSession({
     id: before.id,
@@ -1737,7 +1828,7 @@ console.log('\n15. revocation (ADR-022)');
   raced.pageWallet.disconnect();
   await new Promise((resolve) => setTimeout(resolve, 200));
   revocations.add({ origin: 'https://raced.test', at: Date.now() });
-  const racer = new AgentWallet({ relayUrl: url15, userSecretKey: generateKeyPair().secretKey, socketFactory });
+  const racer = new AgentWallet({ relayUrl: url15, userSecretKey: raced.page.secretKey, socketFactory });
   await racer.connect();
   let racedResume = '';
   await racer
@@ -1758,7 +1849,7 @@ console.log('\n15. revocation (ADR-022)');
   const token = revivable.pageWallet.resumeTokenFor(revivableId);
   await daemon15.revoke('https://revivable.test');
   await new Promise((resolve) => setTimeout(resolve, 50));
-  const rejoin = new AgentWallet({ relayUrl: url15, userSecretKey: generateKeyPair().secretKey, socketFactory });
+  const rejoin = new AgentWallet({ relayUrl: url15, userSecretKey: revivable.page.secretKey, socketFactory });
   await rejoin.connect();
   let resumed = '';
   await rejoin
@@ -2558,6 +2649,7 @@ console.log('\n19. delegated resume, and a runtime that ignores its policy');
     }
   }
 
+  let now19 = Date.now();
   const daemon19 = new AgentDaemon({
     relayUrl: url19,
     identity: {
@@ -2568,13 +2660,14 @@ console.log('\n19. delegated resume, and a runtime that ignores its policy');
       cert: cert19,
     },
     createRuntime: () => new DisobedientRuntime(),
+    now: () => now19,
   });
   await daemon19.start();
 
   const pageKeys = generateKeyPair();
   const origin19 = 'https://delegated-resume.test';
-  const grant19 = buildGrant({ surface: { name: 'Delegated' }, tools: [] });
-  const issued19 = Date.now();
+  const grant19 = buildGrant({ surface: { name: 'Delegated' }, tools: [], ttlMs: 2 * 60 * 60 * 1000 });
+  const issued19 = now19;
   const approved19 = {
     grant: grant19,
     delegation: signDelegation(owner19.secretKey, {
@@ -2604,13 +2697,14 @@ console.log('\n19. delegated resume, and a runtime that ignores its policy');
   check('a runtime cannot ask where the page would answer', pageWasAsked === false, pageWasAsked);
   check('and its ask resolves as unanswered rather than hanging', askAttempted[0] === false, askAttempted);
 
-  // Now the resume. A refreshed tab is a NEW page key by construction, so it
-  // presents only the bearer token — exactly the real hosted-wallet flow.
+  // A refreshed page reconstructs a NEW wallet instance but restores the SAME
+  // bounded attachment key beside the token. The user's root key is not in
+  // either page instance — exactly the hosted-wallet flow.
   const token19 = firstTab.resumeTokenFor(delegated19.id)!;
   firstTab.disconnect();
   await new Promise((resolve) => setTimeout(resolve, 250));
 
-  const secondTab = new AgentWallet({ relayUrl: url19, userSecretKey: generateKeyPair().secretKey, socketFactory });
+  const secondTab = new AgentWallet({ relayUrl: url19, userSecretKey: pageKeys.secretKey, socketFactory });
   await secondTab.connect();
   let resumeFailure = '';
   const resumed19 = await secondTab
@@ -2626,6 +2720,33 @@ console.log('\n19. delegated resume, and a runtime that ignores its policy');
     resumed19?.session.info.agentName,
   );
 
+  // The grant deliberately lives an hour longer than the root-signed
+  // delegation. Resume must re-check that outer authorization boundary, not
+  // merely the token, grant, and revocation tombstone.
+  secondTab.disconnect();
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  now19 = issued19 + 60 * 60 * 1000 + 1;
+  const afterAuthorization = new AgentWallet({
+    relayUrl: url19,
+    userSecretKey: pageKeys.secretKey,
+    socketFactory,
+    handshakeTimeoutMs: 2_000,
+  });
+  await afterAuthorization.connect();
+  const expiredAuthorization = await Promise.race([
+    afterAuthorization
+      .resumeSession({ id: delegated19.id, agent: agent19.publicKey, token: token19, tools: [] })
+      .then(() => 'resumed')
+      .catch((err: Error) => err.message),
+    new Promise<string>((resolve) => setTimeout(() => resolve('deadline'), 3_000)),
+  ]);
+  check(
+    'a delegated session cannot resume past its root-signed authorization expiry',
+    expiredAuthorization.includes('authorization_expired'),
+    expiredAuthorization,
+  );
+
+  afterAuthorization.close();
   secondTab.close();
   firstTab.close();
   await daemon19.stop();

@@ -1,7 +1,9 @@
 # ADR-025: A page is not a wallet — misuse-resistant APIs and enforceable custody
 
-- **Status:** proposed; three independent Sol reviews integrated; no
-  implementation has landed. Resume repair (R4) is a security prerequisite.
+- **Status:** proposed; three independent Sol reviews integrated. The narrow
+  identity-bound resume prerequisite from R4 landed on 2026-08-08; the package
+  split, authorization replacement, controller proofs, and root-custody work
+  remain unimplemented.
 - **Date:** 2026-08-08
 - **Owners:** AgentPort maintainers
 - **Depends on:** ADR-003 (end-to-end sealing), ADR-008 (wallet tiers),
@@ -219,6 +221,14 @@ different ESM artifact is not dogfooding the thing a stranger receives.
 
 ### R4. A user root key is control-plane authority, not an attachment identity
 
+**Implemented prerequisite (2026-08-08):** today's existing attachment
+identity is now immutable across resume. The daemon requires the original
+Ed25519 client's proof as well as the relay-visible token, the hosted/demo page
+persists only that bounded client secret beside the token in per-tab storage,
+and delegation expiry is re-checked. This closes the malicious-relay handoff
+without claiming the broader `SessionAuthorization` or controller design below
+has landed.
+
 Owner authentication alone is not attachment authorization. Except for the
 separately justified relay-synthesized code flow, every website
 `session.open` requires a bounded root-signed `SessionAuthorization` (the
@@ -358,8 +368,10 @@ delivered to its attachment endpoint.
 The custody claim is separate: the page receives an ephemeral attachment key
 and bounded authorization, while the root user key remains in the wallet,
 extension, daemon-adjacent signer, or bunker. Neither claim may be used as a
-shorthand for the other. The claim does not cover resume until R4's
-identity-bound resume has replaced the current bearer-only handoff.
+shorthand for the other. Resume now preserves today's attachment identity and
+no longer accepts the bearer token as transferable endpoint authority. The
+broader R4 custody claim still awaits complete bounded authorization and
+separate root/controller identities.
 
 ### R8. Deliver two gates; the wire gate has no direct-owner compatibility path
 
@@ -373,8 +385,10 @@ migrate every first-party consumer; make the extension use the shared provider
 installer; and dogfood the emitted `/connect.js`. Gate A ships without waiting
 for controller or signer protocol work.
 
-**Gate B — custody protocol.** In one new protocol version, repair resume,
-replace delegation with complete attachment/controller authorization, bind it
+**Gate B — custody protocol.** Its identity-bound resume prerequisite has
+landed using the existing frame fields in protocol v6; the version rejects
+older daemons that omit the rule. In one later protocol version, replace
+delegation with complete attachment/controller authorization, bind it
 into both handshake proofs, authenticate `mayUseOwnTools` and `mayAsk`, add
 bounded controller proofs and deadlines, and delete the direct-owner website
 open branches at both relay and daemon. Every positive direct-owner fixture
@@ -441,11 +455,13 @@ do not prove that third-party JavaScript cannot reimplement the protocol.
 
 ### Security evidence
 
-1. A malicious-relay harness records a legitimate visible resume token, forces
-   detach, and attempts resume with its own valid Ed25519/X25519 keys. The
-   daemon refuses it within a deadline, does not change `clientKey`, and the
-   legitimate attachment identity subsequently resumes. Removing the identity
-   equality makes this exact attack become the plaintext endpoint.
+1. **Implemented prerequisite evidence.** A malicious-relay harness records a
+   legitimate visible resume token, forces detach, and attempts resume with its
+   own valid Ed25519/X25519 keys. The daemon refuses it within a deadline, does
+   not change `clientKey`, and the legitimate attachment identity subsequently
+   resumes. Restoring the old resumer-selected proof identity makes this exact
+   attack become the plaintext endpoint. The full R4 authorization/controller
+   evidence remains part of Gate B.
 2. A valid owner key and certificate attempting direct-owner website
    `session.open` is refused independently by the real relay and by the real
    daemon behind a lying-relay fixture, each with a closed denial reason and
@@ -564,7 +580,7 @@ property.
 - Hosted-wallet attachments remain deliberately diminished for runtime-owned
   tools and elicitation when no trusted answer surface remains open. The UI
   must say so.
-- Resume secrets now include a bounded attachment identity that must survive a
+- Resume secrets now include a bounded attachment identity that survives a
   reload. Compromise of that identity loses the attachment, not the user root
   or controller authority.
 - A protocol version bump and coordinated deployment are required. Old peers

@@ -170,8 +170,10 @@ Add direct, non-vacuous tests for every ADR-018 enforcement row. At minimum:
   authority;
 - old attachment ciphertext rejected after resume;
 - old and resumed attachments demonstrably derive different keys;
-- resume token theft by the wrong identity, live-session replacement, attempt
-  exhaustion, and indistinguishable invalid-session responses;
+- identity-bound resume-token theft after forced detach and live-session
+  replacement are now covered by the real socket harness; attempt exhaustion
+  remains required, and invalid token/identity/session responses remain
+  indistinguishable;
 - plaintext content in every content direction; and
 - malformed ciphertext that fails without advancing channel state.
 
@@ -406,7 +408,7 @@ Evidence: `npm run wire:check` — 521 fixture cases across all 45 frame types
 (valid, boundary-accepted, missing/unknown/wrong-type/oversize/deep, and raw
 hostile seeds including non-canonical and `__proto__` smuggles), a coverage
 gate over `FRAME_SCHEMAS`, programmatic bounds, and sealed-path checks on real
-crypto. `npm run e2e` — 175 checks over real sockets. `npm run integration`
+crypto. `npm run e2e` — 179 checks over real sockets. `npm run integration`
 against a local relay — full ACP-shaped stack. `npm run ui:smoke` — 49 checks.
 `npm run typecheck` plus the four out-of-references projects and
 `npm run check:extension`.

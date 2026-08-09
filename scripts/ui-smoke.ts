@@ -3,7 +3,7 @@ import { Window } from 'happy-dom';
 
 const window = new Window({ url: 'https://inkwell.test/' });
 const g = globalThis as Record<string, unknown>;
-for (const key of ['window', 'document', 'HTMLElement', 'Element', 'Node', 'customElements', 'navigator', 'location', 'CustomEvent', 'Event', 'KeyboardEvent', 'HTMLInputElement', 'ShadowRoot', 'DocumentFragment', 'Text', 'Comment', 'MutationObserver', 'ResizeObserver', 'requestAnimationFrame', 'cancelAnimationFrame']) {
+for (const key of ['window', 'document', 'HTMLElement', 'Element', 'Node', 'customElements', 'navigator', 'location', 'sessionStorage', 'CustomEvent', 'Event', 'KeyboardEvent', 'HTMLInputElement', 'ShadowRoot', 'DocumentFragment', 'Text', 'Comment', 'MutationObserver', 'ResizeObserver', 'requestAnimationFrame', 'cancelAnimationFrame']) {
   g[key] = (window as unknown as Record<string, unknown>)[key];
 }
 
@@ -16,7 +16,7 @@ const check = (label: string, ok: boolean, detail?: unknown) => {
 const { openConnectModal } = await import('../site/src/modal.js');
 const { mountPanel } = await import('../site/src/agentport-ui.js');
 const { signal, flush, html } = await import('@nisli/core');
-const { answerProofBinding, canonicalJson, deriveSealChannel, generateKeyPair, generateSealKeyPair, openSealed, seal, signEpk } = await import('../packages/protocol/src/index.js');
+const { answerProofBinding, canonicalJson, deriveSealChannel, generateKeyPair, generateSealKeyPair, openSealed, publicKeyOf, seal, signEpk } = await import('../packages/protocol/src/index.js');
 void signal;
 
 console.log('1. connect modal');
@@ -67,6 +67,7 @@ const RESUME_TOKEN = 'a1b2c3d4'.repeat(4);
 class FakeRelay {
   static dialled: string[] = [];
   static frames: string[] = [];
+  static clients: string[] = [];
   static latest: FakeRelay | undefined;
   readyState = 1;
   #listeners: Record<string, (event?: unknown) => void> = {};
@@ -121,6 +122,7 @@ class FakeRelay {
     if (frame.t === 'hello') this.#reply({ t: 'challenge', nonce: 'a'.repeat(32) });
     if (frame.t === 'identify') {
       this.#client = String(frame.pubkey);
+      FakeRelay.clients.push(this.#client);
       this.#reply({ t: 'ready', role: 'client', pubkey: frame.pubkey });
     }
     if (frame.t === 'connect.begin') {
@@ -214,18 +216,33 @@ class FakeRelay {
 // continues into the unchanged connect-code modal and fake relay.
 (window as unknown as { open: () => null }).open = () => null;
 
+// Records written before identity-bound resume carried only the bearer token.
+// They must disappear rather than being silently paired with a fresh key.
+const AgentPortConnect = (await import('../site/src/connect.js')).default;
+window.sessionStorage.setItem('agentport.session:Legacy', JSON.stringify({
+  id: 'sess_legacy',
+  agent: 'a'.repeat(64),
+  token: 'b'.repeat(48),
+  relay: 'wss://inkwell.test/relay',
+  surface: 'Legacy',
+}));
+const legacyResume = await AgentPortConnect.resume({ name: 'Legacy', tools: [] });
+check('an old bearer-only resume record is refused', legacyResume === null);
+check('the refused incomplete record is cleared', window.sessionStorage.getItem('agentport.session:Legacy') === null);
+
+const inkwellUiTools = [
+  {
+    name: 'inkwell.document.read',
+    description: 'Read the document',
+    inputSchema: { type: 'object', properties: {} },
+    handler: () => ({}),
+  },
+];
 const clickMount = window.document.createElement('div');
 window.document.body.appendChild(clickMount);
 mountPanel(clickMount as unknown as HTMLElement, {
   name: 'Inkwell',
-  tools: [
-    {
-      name: 'inkwell.document.read',
-      description: 'Read the document',
-      inputSchema: { type: 'object', properties: {} },
-      handler: () => ({}),
-    },
-  ],
+  tools: inkwellUiTools,
 });
 flush();
 
@@ -259,6 +276,35 @@ const rendered = () => render.textContent ?? '';
 check('the connected-session notice rendered', /tools lent/.test(rendered()), rendered().slice(0, 200));
 check('no function source leaked into the DOM', !/=>/.test(rendered()), rendered().slice(0, 200));
 check('empty state is gone once connected', !/Bring your own agent/.test(rendered()), rendered().slice(0, 200));
+
+const storedResume = JSON.parse(window.sessionStorage.getItem('agentport.session:Inkwell') ?? 'null') as Record<string, unknown> | null;
+check(
+  'the page-scoped resume record has one exact bounded shape',
+  storedResume !== null &&
+    Object.keys(storedResume).sort().join(',') === 'agent,clientSecretKey,id,relay,surface,token' &&
+    typeof storedResume['clientSecretKey'] === 'string' &&
+    /^[0-9a-f]{64}$/.test(storedResume['clientSecretKey']),
+  storedResume ? Object.keys(storedResume) : storedResume,
+);
+check(
+  'the persisted key proves the identity that opened the attachment',
+  typeof storedResume?.['clientSecretKey'] === 'string' &&
+    publicKeyOf(storedResume['clientSecretKey']) === FakeRelay.clients[0],
+  { stored: storedResume ? publicKeyOf(String(storedResume['clientSecretKey'])) : undefined, opened: FakeRelay.clients[0] },
+);
+// The rest of this smoke drives the panel's original socket directly. A
+// positive reload creates a second socket, so restore the test's pointer after
+// proving that path rather than accidentally steering later agent events into
+// the resume-only wallet.
+const panelRelay = FakeRelay.latest;
+const resumedFromRecord = await AgentPortConnect.resume({ name: 'Inkwell', tools: inkwellUiTools });
+check('the stored record positively resumes the attachment', resumedFromRecord !== null);
+check(
+  'the reloaded wallet authenticates as the original attachment identity',
+  FakeRelay.clients[1] === FakeRelay.clients[0],
+  FakeRelay.clients,
+);
+FakeRelay.latest = panelRelay;
 
 console.log('\n5. panel AG-UI path');
 const panelInput = clickMount.querySelector('[data-slot="chat-composer-input"]') as unknown as HTMLTextAreaElement;

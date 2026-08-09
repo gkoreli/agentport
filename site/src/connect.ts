@@ -21,9 +21,12 @@ import {
   type AgentSessionHandle,
 } from '@agentport/client';
 import {
+  ID_PATTERN,
+  TOKEN_PATTERN,
   delegationLifetimeOk,
   generateKeyPair,
   hashGrant,
+  publicKeyOf,
   randomId,
   toErr,
   type CapabilityGrant,
@@ -88,10 +91,11 @@ const webMcp = createWebMcpHarvester({
  * Where a resumable session is remembered.
  *
  * sessionStorage, not localStorage: it is per-tab and dies when the tab
- * closes, which matches what the token grants — re-attaching to a session the
- * user already approved, whose grant still expires on its own schedule. It is
- * deliberately NOT the "remember my agents across sites" feature; that needs a
- * persistent identity and its own opt-in.
+ * closes, which matches what the resume capability grants — re-attaching the
+ * SAME bounded attachment identity to a session the user already approved,
+ * whose grant/delegation still expire on their own schedules. It is
+ * deliberately NOT the "remember my agents across sites" feature and never
+ * stores the user's root identity.
  */
 const RESUME_KEY = 'agentport.session';
 
@@ -108,10 +112,15 @@ interface ResumeRecord {
   id: string;
   /** The agent the session lives on — resume routes by it (stateless relay). */
   agent: string;
+  /** Bounded identity of this attachment only; never the user's root key. */
+  clientSecretKey: string;
   token: string;
   relay: string;
   surface: string;
 }
+
+const RESUME_RECORD_KEYS = ['agent', 'clientSecretKey', 'id', 'relay', 'surface', 'token'] as const;
+const MAX_RESUME_RECORD_CHARS = 4096;
 
 function rememberSession(record: ResumeRecord): void {
   try {
@@ -130,16 +139,68 @@ function forgetSession(surface: string): void {
 }
 
 function rememberedSession(surface: string): ResumeRecord | null {
+  let raw: string | null;
   try {
-    const raw = sessionStorage.getItem(resumeKeyFor(surface));
-    if (!raw) return null;
-    const record = JSON.parse(raw) as ResumeRecord;
-    if (record.relay !== RELAY || record.surface !== surface) return null;
-    return record;
+    raw = sessionStorage.getItem(resumeKeyFor(surface));
   } catch {
-    // Missing, blocked, or malformed storage means there is safely no resumable session.
+    // Blocked storage means there is safely no resumable session.
     return null;
   }
+  if (!raw) return null;
+
+  let value: unknown;
+  try {
+    if (raw.length > MAX_RESUME_RECORD_CHARS) throw new Error('resume record is too large');
+    value = JSON.parse(raw);
+  } catch {
+    forgetSession(surface);
+    log.warn('discarded malformed session resume record', { data: { surface } });
+    return null;
+  }
+
+  if (!isRecord(value)) {
+    forgetSession(surface);
+    log.warn('discarded incomplete or invalid session resume record', { data: { surface } });
+    return null;
+  }
+  const exactKeys = Object.keys(value).length === RESUME_RECORD_KEYS.length
+    && RESUME_RECORD_KEYS.every((key) => Object.hasOwn(value, key));
+  if (
+    !exactKeys ||
+    typeof value['id'] !== 'string' ||
+    !ID_PATTERN.test(value['id']) ||
+    typeof value['agent'] !== 'string' ||
+    !/^[0-9a-f]{64}$/.test(value['agent']) ||
+    typeof value['clientSecretKey'] !== 'string' ||
+    !/^[0-9a-f]{64}$/.test(value['clientSecretKey']) ||
+    typeof value['token'] !== 'string' ||
+    !TOKEN_PATTERN.test(value['token']) ||
+    value['relay'] !== RELAY ||
+    value['surface'] !== surface
+  ) {
+    forgetSession(surface);
+    log.warn('discarded incomplete or invalid session resume record', { data: { surface } });
+    return null;
+  }
+
+  // Validate that the stored scalar is usable as an Ed25519 key before it is
+  // handed to AgentWallet. Rebuild a fresh exact object so storage prototypes
+  // and unknown properties never cross this boundary.
+  try {
+    publicKeyOf(value['clientSecretKey']);
+  } catch {
+    forgetSession(surface);
+    log.warn('discarded invalid attachment identity in session resume record', { data: { surface } });
+    return null;
+  }
+  return {
+    id: value['id'],
+    agent: value['agent'],
+    clientSecretKey: value['clientSecretKey'],
+    token: value['token'],
+    relay: RELAY,
+    surface,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -284,13 +345,26 @@ async function requestHostedDelegation(
   });
 }
 
-function rememberLiveSession(wallet: AgentWallet, session: AgentSession, surface: string): void {
+function rememberLiveSession(
+  wallet: AgentWallet,
+  session: AgentSession,
+  surface: string,
+  clientSecretKey: string,
+): void {
   const token = wallet.resumeTokenFor(session.id);
   const agentKey = wallet.agentKeyFor(session.id);
+  // A mismatched caller is an implementation bug, not a record to persist:
+  // the secret stored beside the token must prove the identity that opened it.
+  if (publicKeyOf(clientSecretKey) !== wallet.publicKey) {
+    const err = new Error('attachment identity does not match the wallet that opened the session');
+    log.error('could not persist session for resume', { sessionId: session.id, err, data: { surface } });
+    throw err;
+  }
   if (token && agentKey) {
     rememberSession({
       id: session.id,
       agent: agentKey,
+      clientSecretKey,
       token,
       relay: RELAY,
       surface,
@@ -324,7 +398,7 @@ async function connectWithHostedWallet(
       tools,
       decide: request.decide,
     });
-    rememberLiveSession(wallet, session, request.name);
+    rememberLiveSession(wallet, session, request.name, delegate.secretKey);
     return session;
   } catch (err) {
     wallet.close();
@@ -339,10 +413,12 @@ async function connectWithCode(
   // Open first, so every later failure is visible to the user.
   const modal = openConnectModal(request.name);
 
+  const client = generateKeyPair();
   const wallet = new AgentWallet({
     relayUrl: RELAY,
-    // Ephemeral and authority-free. Discarded when the tab goes away.
-    userSecretKey: generateKeyPair().secretKey,
+    // Authority-free and scoped to this attachment. It survives only beside
+    // that attachment's resume capability in this tab's sessionStorage.
+    userSecretKey: client.secretKey,
   });
   try {
     await wallet.connect();
@@ -365,7 +441,7 @@ async function connectWithCode(
   modal.setCode(code);
   try {
     const session = await Promise.race([accepted, modal.cancelled]);
-    rememberLiveSession(wallet, session, request.name);
+    rememberLiveSession(wallet, session, request.name, client.secretKey);
     modal.status('connected');
     setTimeout(() => modal.close(), 400);
     return session;
@@ -411,7 +487,7 @@ const provider: AgentProvider & {
     if (!record) return null;
     const tools = webMcp.harvest(request.tools);
 
-    const wallet = new AgentWallet({ relayUrl: RELAY, userSecretKey: generateKeyPair().secretKey });
+    const wallet = new AgentWallet({ relayUrl: RELAY, userSecretKey: record.clientSecretKey });
     try {
       await wallet.connect();
       const resumed = await wallet.resumeSession({
@@ -431,7 +507,7 @@ const provider: AgentProvider & {
       // deleting it here is how a one-second race used to become a
       // permanently lost session.
       const reason = err instanceof ResumeError ? err.reason : '';
-      if (reason === 'not_resumable' || reason === 'grant_expired') {
+      if (reason === 'not_resumable' || reason === 'grant_expired' || reason === 'authorization_expired') {
         log.info('previous session is gone; starting fresh', {
           sessionId: record.id,
           data: { reason, surface: request.name },
