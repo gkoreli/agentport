@@ -233,3 +233,8 @@ npx tsc -p packages/extension/tsconfig.json
 npm run check:extension
 AGENTPORT_CHROME=/path/to/chrome-for-testing npm run ui:extension-smoke
 ```
+
+Use Chrome for Testing or unbranded Chromium. Official branded Chrome removed
+the `--load-extension` automation flag in version 137, so pointing the harness
+at a current consumer Chrome binary is refused rather than allowed to produce
+an unrelated iframe timeout.

@@ -206,8 +206,40 @@ async function chromeExecutable(): Promise<string> {
   const discovered = await walkForChrome('/tmp/agentport-cft');
   if (discovered) return discovered;
   throw new Error(
-    'Set AGENTPORT_CHROME to a Chrome/Chrome-for-Testing executable, or unpack Chrome for Testing under /tmp/agentport-cft',
+    'Set AGENTPORT_CHROME to Chrome for Testing or unbranded Chromium, or unpack Chrome for Testing under /tmp/agentport-cft',
   );
+}
+
+async function chromeVersion(command: string): Promise<string> {
+  return new Promise<string>((resolveVersion, rejectVersion) => {
+    const child = spawn(command, ['--version'], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let output = '';
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      rejectVersion(new Error(`${command} --version did not answer within 5000ms`));
+    }, 5_000);
+    child.stdout?.setEncoding('utf8');
+    child.stderr?.setEncoding('utf8');
+    child.stdout?.on('data', (chunk: string) => { output += chunk; });
+    child.stderr?.on('data', (chunk: string) => { output += chunk; });
+    child.once('error', (error) => {
+      clearTimeout(timer);
+      rejectVersion(error);
+    });
+    child.once('exit', (code, signal) => {
+      clearTimeout(timer);
+      if (code !== 0) {
+        rejectVersion(new Error(`${command} --version exited with ${code ?? signal ?? 'unknown status'}`));
+        return;
+      }
+      const version = output.trim();
+      if (!version) {
+        rejectVersion(new Error(`${command} --version returned no version`));
+        return;
+      }
+      resolveVersion(version);
+    });
+  });
 }
 
 const HOSTILE_TAGS = [
@@ -378,7 +410,14 @@ async function main(): Promise<void> {
   let client: CdpClient | undefined;
 
   try {
-    console.log(`Launching ${basename(chrome)}`);
+    const version = await chromeVersion(chrome);
+    const branded = /^Google Chrome (\d+)\./.exec(version);
+    if (branded && Number(branded[1]) >= 137) {
+      throw new Error(
+        `${version} refuses --load-extension; use Chrome for Testing or unbranded Chromium for the real extension smoke`,
+      );
+    }
+    console.log(`Launching ${basename(chrome)} (${version})`);
     const args = [
       '--headless=new',
       '--disable-background-networking',

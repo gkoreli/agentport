@@ -49,6 +49,12 @@ Wrangler is pinned exactly at `4.120.0` in the root package and lockfile. Keep
 that exact pin: the deploy executable is part of the release input, not an
 ambient latest-version dependency.
 
+The real unpacked-extension gate similarly installs Chrome for Testing
+`151.0.7922.76` through a commit-pinned setup action. Do not replace it with
+the runner's branded Google Chrome: official Chrome removed command-line
+unpacked-extension loading in version 137, so the browser runs while silently
+loading no test subject.
+
 The production job requires a protected GitHub `production` environment with:
 
 - secret `CLOUDFLARE_API_TOKEN` — a narrowly scoped Cloudflare token with

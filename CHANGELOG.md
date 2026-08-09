@@ -88,6 +88,13 @@ the runner; local deploys keep the existing version-bump commit. Wrangler is
 pinned exactly at 4.120.0 so the production deploy toolchain cannot drift under
 an unchanged lockfile.
 
+The real-extension release gate runs against pinned Chrome for Testing 151.
+Official branded Chrome removed unpacked-extension command-line loading in 137;
+using the runner's branded binary silently skipped the extension and reported
+an unrelated overlay timeout. The harness now refuses that unsupported browser
+up front instead of manufacturing evidence from a test subject that never
+loaded.
+
 The first independent review caught the release check checking the wrong
 thing: `scripts/remote-check.ts` imported the checkout daemon, so a new relay
 and old npm tarball could still produce a green smoke. The smoke now has one

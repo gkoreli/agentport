@@ -292,8 +292,8 @@ Registry ownership follows the trust boundary:
 
 `scripts/ui-smoke.ts` covers the site and injected template surfaces under
 happy-dom. `scripts/extension-ui-smoke.ts` loads the real unpacked extension in
-Chrome, verifies that the page cannot enumerate the iframe, and asserts the
-shared `UI-CHAT` tree renders in the extension origin.
+Chrome for Testing, verifies that the page cannot enumerate the iframe, and
+asserts the shared `UI-CHAT` tree renders in the extension origin.
 
 The agent panel's transcript is the protocol-neutral Nisli chat set in
 `src/nisli-ui/ui/chat`, backed by the semantic store in

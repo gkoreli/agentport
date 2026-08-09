@@ -96,7 +96,16 @@ jobs:
           node-version: "24"
           package-manager-cache: false
 
+      # Official branded Chrome removed --load-extension in 137. Chrome for
+      # Testing deliberately retains it for unpacked-extension automation.
+      - uses: browser-actions/setup-chrome@2e1d749697dd1612b833dba4a722266286fbefcd # v2.1.2
+        id: setup-chrome
+        with:
+          chrome-version: 151.0.7922.76
+
       - name: Install and verify
+        env:
+          AGENTPORT_CHROME: ${{ steps.setup-chrome.outputs.chrome-path }}
         run: |
           npm ci
           npm run typecheck
@@ -111,7 +120,8 @@ jobs:
           npm run wallet:check
           npm run ui:smoke
           npm run check:extension
-          AGENTPORT_CHROME=/usr/bin/google-chrome npm run ui:extension-smoke
+          "$AGENTPORT_CHROME" --version
+          npm run ui:extension-smoke
           npm run source:check
           npm run docs:check
           npm run e2e
