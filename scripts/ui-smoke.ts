@@ -78,6 +78,7 @@ const RESUME_TOKEN = 'a1b2c3d4'.repeat(4);
 class FakeRelay {
   static dialled: string[] = [];
   static frames: string[] = [];
+  static sealed: Array<Record<string, unknown> & { t: string }> = [];
   static clients: string[] = [];
   static latest: FakeRelay | undefined;
   readyState = 1;
@@ -127,7 +128,11 @@ class FakeRelay {
     if (frame.t === 'enc' && this.#channel) {
       try {
         // Surface the inner type so assertions can see through the sealing.
-        FakeRelay.frames.push(`enc:${(openSealed(this.#channel.receive, frame as never, 'client') as { t: string }).t}`);
+        const inner = openSealed(this.#channel.receive, frame as never, 'client') as Record<string, unknown> & { t: string };
+        FakeRelay.frames.push(`enc:${inner.t}`);
+        // And the frame itself: a check that can only see the TYPE cannot tell
+        // an answer carrying the user's choices from an empty one.
+        FakeRelay.sealed.push(inner);
       } catch {
         // counter frames the fake does not consume stay opaque; fine.
       }
@@ -599,6 +604,92 @@ check(
   flush();
 }
 
+
+// The agent asking its own USER something (ADR-024). Like the approval card
+// above, the frame is injected rather than routed: the daemon refuses the
+// capability to a delegated attachment, keeps the connect tier's questions at
+// its own terminal, and the extension answers them in extension chrome — so
+// the tier that receives this on the wire is a DIRECT-KEY attachment
+// (examples/inkwell, or an embedder that builds its own AgentWallet around
+// this panel). What is under test is the RENDERER: given a question, can the
+// user answer it, and does the answer reach the agent?
+//
+// It has to be tested somewhere. Until this section the panel had no listener
+// at all, so a question rendered as nothing, the turn sat blocked for the
+// daemon's five-minute ask deadline, and then decayed to a skip.
+console.log('\n8. the agent asks its user a question');
+{
+  const askOptions = () => clickMount.querySelectorAll('[data-slot="chat-ask-option"]');
+  FakeRelay.latest?.sealedReply({
+    t: 'ask',
+    s: 'sess_test',
+    id: 'ask_ui',
+    message: 'Which draft should I tighten?',
+    fields: [
+      { key: 'draft', label: 'Draft', options: ['The intro', 'The whole thing'] },
+      { key: 'note', label: 'Anything else I should know?' },
+    ],
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  flush();
+  check('the question renders as a form', clickMount.querySelector('[data-slot="chat-ask"]') !== null, rendered().slice(-320));
+  check('it shows the agent’s own words', rendered().includes('Which draft should I tighten?'), rendered().slice(-320));
+  // Both field kinds, because a renderer that draws only free text answers
+  // half the questions that can arrive and skips the rest.
+  check('every field is drawn', clickMount.querySelectorAll('[data-slot="chat-ask-field"]').length === 2);
+  check('an options field becomes choices', askOptions().length === 2, askOptions().length);
+  check('a free-text field becomes an input', clickMount.querySelector('[data-slot="chat-ask-input"]') !== null);
+
+  // Optional all the way down on purpose: when this section fails it is
+  // because the card is absent, and a check that CRASHES there stops every
+  // assertion behind it — including the skip path, which is the one the
+  // daemon's deadline depends on. A missing element must fail, not throw.
+  (askOptions()[0] as unknown as HTMLButtonElement | undefined)?.click();
+  flush();
+  check('choosing an option marks it chosen', askOptions()[0]?.getAttribute('aria-selected') === 'true');
+  const noteInput = clickMount.querySelector('[data-slot="chat-ask-input"]') as unknown as HTMLInputElement | null;
+  if (noteInput) {
+    noteInput.value = 'Keep the ending';
+    noteInput.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+  flush();
+  (clickMount.querySelector('[data-slot="chat-ask-send"]') as unknown as HTMLButtonElement | null)?.click();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  flush();
+
+  const answer = FakeRelay.sealed.find((frame) => frame.t === 'answer');
+  check('the answer crosses the sealed session', answer !== undefined, FakeRelay.frames.slice(-4));
+  // The values, not just the frame type: an answer that reaches the agent
+  // carrying nothing is the skip it was supposed to replace.
+  check(
+    'it carries what the user actually chose',
+    answer?.outcome === 'answered' &&
+      JSON.stringify(answer.values) ===
+        JSON.stringify([{ key: 'draft', value: 'The intro' }, { key: 'note', value: 'Keep the ending' }]),
+    answer,
+  );
+  check('the card settles and disappears', clickMount.querySelector('[data-slot="chat-ask"]') === null, rendered().slice(-260));
+  check('the transcript keeps the question', rendered().includes('Question from your agent'), rendered().slice(-260));
+
+  // The skip path is a real answer — "proceed without one" — and the daemon
+  // depends on it arriving rather than waiting out its deadline.
+  FakeRelay.latest?.sealedReply({
+    t: 'ask',
+    s: 'sess_test',
+    id: 'ask_ui_2',
+    message: 'Should I also rewrite the title?',
+    fields: [{ key: 'title', label: 'New title' }],
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  flush();
+  check('a second question opens its own card', clickMount.querySelector('[data-slot="chat-ask"]') !== null);
+  (clickMount.querySelector('[data-slot="chat-ask-skip"]') as unknown as HTMLButtonElement | null)?.click();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  flush();
+  const skipped = FakeRelay.sealed.filter((frame) => frame.t === 'answer').at(-1);
+  check('skipping answers the question rather than ignoring it', skipped?.outcome === 'skipped', skipped);
+  check('and the skipped question also leaves the screen', clickMount.querySelector('[data-slot="chat-ask"]') === null);
+}
 
 console.log(failures === 0 ? '\nUI smoke passed' : `\n${failures} failed`);
 process.exit(failures === 0 ? 0 : 1);

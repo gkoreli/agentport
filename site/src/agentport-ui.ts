@@ -24,11 +24,11 @@ const VERSION = typeof __AGENTPORT_VERSION__ === 'string' ? __AGENTPORT_VERSION_
  * safe here; the injected modal deliberately avoids it (see modal.ts).
  */
 
-import { component, computed, each, html, onCleanup, signal, when } from '@nisli/core';
+import { component, computed, each, html, onCleanup, signal, when, type Signal } from '@nisli/core';
 import AgentPortConnect from './connect.js';
 import { aguiStream, type AguiAdapter, type AguiEvent } from '@agentport/agui';
 import type { AgentSessionHandle, ApprovalPrompt, SessionEvents, SiteTool } from '@agentport/client';
-import { toErr, type HistoryEntry, type PlanStep } from '@agentport/protocol';
+import { toErr, type FormField, type HistoryEntry, type PlanStep } from '@agentport/protocol';
 import { Chat, createChatStore, type ChatController } from '../../src/nisli-ui/ui/chat/index.js';
 import { siteLogger } from './observe.js';
 
@@ -114,6 +114,7 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
   let attachmentEpoch = 0;
   let disposed = false;
   let approvalCardSeq = 0;
+  let askCardSeq = 0;
 
   // PROVENANCE. The site stores no transcript at all — not in localStorage,
   // not in sessionStorage, nowhere. On reload the panel re-attaches to the
@@ -220,6 +221,31 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
                 : displayJson(approval.call.arguments),
             });
             chat.apply({ type: 'tool.end', id, status: approval.granted ? 'complete' : 'cancelled' });
+          } else if (event.name === 'agentport.ask') {
+            // WHICH TIERS CAN REACH THIS — because rendering is not
+            // reachability, and reading it as such is how the next person
+            // concludes the drop-in tier asks questions.
+            //
+            // Not the three tiers `connect.js` can take, today. The daemon
+            // declares the elicitation capability only for an attachment with
+            // NO delegation, and then routes the connect tier's questions to
+            // its own terminal (ADR-024 R11/R12). So: the hosted wallet's
+            // delegated attachment is refused the capability outright, the
+            // connect-code tier keeps its questions at the terminal, and the
+            // extension tier deliberately leaves `ask` off the service
+            // worker's forwarding list and refuses an answer composed in page
+            // world.
+            //
+            // What DOES arrive here is a DIRECT-KEY attachment — a client
+            // that holds the user key, which is `examples/inkwell` and any
+            // embedder building its own `AgentWallet` around this panel. The
+            // card below is that surface, and it is the same panel the day a
+            // tier changes; a question with nobody listening is a five-minute
+            // stall and a silent skip, which is the failure this exists for.
+            pendingAsks.value = [
+              ...pendingAsks.value,
+              { id: ++askCardSeq, question: event.value, picked: signal(new Map<string, string[]>()) },
+            ];
           } else if (event.name === 'agentport.reattached') {
             // Say it out loud. The connection dropped and came back on FRESH
             // sealing keys, so anyone who compared fingerprint words has new
@@ -242,6 +268,9 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
           } else if (event.name === 'agentport.closed') {
             for (const approval of pendingApprovals.value) approval.resolve(false);
             pendingApprovals.value = [];
+            // A question outlives nothing: there is no channel to answer into,
+            // and the daemon tore its own side down with the session.
+            pendingAsks.value = [];
             notice.value = `session closed (${event.value.reason})`;
             status.value = 'disconnected';
             online.value = false;
@@ -297,6 +326,103 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
     approval.resolve(granted);
   };
 
+  /**
+   * A question the agent asked its user (ADR-024), waiting for an answer.
+   *
+   * Per-card state lives in its OWN signal rather than in the array, so typing
+   * an answer does not rebuild every other card, and the array only changes
+   * when a question arrives or settles.
+   */
+  interface PendingAsk {
+    id: number;
+    question: SessionEvents['ask'];
+    /**
+     * Field key → chosen values. A Map, not an object, because these keys came
+     * over the wire and `__proto__` is legal by the id pattern — a Map has no
+     * prototype chain to walk into. This is the same rule the extension's
+     * question window uses (`packages/extension/src/consent.ts`), deliberately:
+     * two surfaces drawing one protocol shape must not disagree about what an
+     * answer is.
+     */
+    picked: Signal<Map<string, string[]>>;
+  }
+  const pendingAsks = signal<PendingAsk[]>([]);
+
+  const pickedFor = (ask: PendingAsk, key: string): string[] => ask.picked.value.get(key) ?? [];
+
+  const setPicked = (ask: PendingAsk, key: string, values: string[]): void => {
+    ask.picked.value = new Map(ask.picked.value).set(
+      key,
+      values.filter((value) => value !== ''),
+    );
+  };
+
+  const toggleOption = (ask: PendingAsk, field: FormField, option: string): void => {
+    const current = pickedFor(ask, field.key);
+    if (field.multi) {
+      setPicked(ask, field.key, current.includes(option) ? current.filter((value) => value !== option) : [...current, option]);
+      return;
+    }
+    // Tapping the chosen option again clears it. The user has to be able to get
+    // back to "I did not answer this", which is not the same as any option.
+    setPicked(ask, field.key, current[0] === option ? [] : [option]);
+  };
+
+  /**
+   * The Map as `session.answer()` wants it: one string per field, several
+   * choices joined, and an empty field omitted entirely — omitting every field
+   * is what makes the answer a SKIP, which is a real outcome and not an error.
+   *
+   * `Object.fromEntries`, not an object literal with assignment: assigning to
+   * `__proto__` on an ordinary object invokes the setter instead of creating
+   * the property, so a field legitimately keyed `__proto__` would be silently
+   * dropped from the answer the user gave.
+   */
+  const answersFrom = (picked: ReadonlyMap<string, readonly string[]>): Record<string, string> =>
+    Object.fromEntries(
+      [...picked.entries()]
+        .map(([key, values]) => [key, values.filter((value) => value !== '').join(', ')] as const)
+        .filter(([, value]) => value !== ''),
+    ) as Record<string, string>;
+
+  /** What the transcript records once a question is behind us. */
+  const answerSummary = (ask: PendingAsk, answers: Record<string, string>): string =>
+    ask.question.fields
+      .filter((field) => answers[field.key] !== undefined)
+      .map((field) => `${field.label}: ${answers[field.key] ?? ''}`)
+      .join('\n');
+
+  const settleAsk = (ask: PendingAsk, answers: Record<string, string>): void => {
+    if (!pendingAsks.value.includes(ask)) return;
+    pendingAsks.value = pendingAsks.value.filter((candidate) => candidate !== ask);
+    const answered = Object.keys(answers).length > 0;
+    // The question and its outcome belong in the conversation, not only in a
+    // card that disappears: the agent's next turn was steered by this, and a
+    // user re-reading the transcript has to be able to see what they said.
+    const rowId = `ask-${toolSeq++}`;
+    chat.apply({ type: 'tool.start', id: rowId, name: 'Question from your agent', input: ask.question.message });
+    chat.apply({
+      type: 'tool.end',
+      id: rowId,
+      status: answered ? 'complete' : 'cancelled',
+      output: answered ? [text(answerSummary(ask, answers))] : [text('Skipped — the agent continues without an answer.')],
+    });
+    if (!session) {
+      // Nothing to answer into. Said out loud rather than swallowed: the agent
+      // is waiting on the far side and its turn will decay to a skip.
+      log.warn('a question was answered after the session ended', { data: { surface: config.name } });
+      notice.value = 'the session ended before your answer could be sent';
+      return;
+    }
+    try {
+      // `answer` with no values IS the skip; there is no second verb for it.
+      session.answer(ask.question.id, answered ? answers : undefined);
+    } catch (err) {
+      log.error('could not send the answer', { sessionId: session.id, err, data: { surface: config.name } });
+      notice.value = `could not send your answer: ${toErr(err).message}`;
+    }
+  };
+
   const detachEvents = (): void => {
     const previous = eventIterator;
     eventIterator = null;
@@ -306,6 +432,10 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
     // approvals fail closed.
     for (const approval of pendingApprovals.value) approval.resolve(false);
     pendingApprovals.value = [];
+    // An agent's question dies with the attachment too — but silently, because
+    // unlike an approval it has no "no" to fail closed to: the answer would go
+    // into a channel that no longer exists.
+    pendingAsks.value = [];
   };
 
   const attach = (next: AgentSessionHandle): void => {
@@ -572,6 +702,76 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
             <div class="ap-approval-actions">
               <button class="deny" @click=${() => settleApproval(approval.value.id, false)}>Deny</button>
               <button @click=${() => settleApproval(approval.value.id, true)}>Allow</button>
+            </div>
+          </section>`;
+        },
+      )}
+      ${each(
+        pendingAsks,
+        (ask) => ask.id,
+        (ask) => {
+          const message = computed(() => ask.value.question.message);
+          const fields = computed(() => ask.value.question.fields);
+          return html`<section data-slot="chat-ask" aria-live="polite">
+            <div data-slot="chat-ask-label">Your agent is asking you</div>
+            <p data-slot="chat-ask-message">${message}</p>
+            ${each(
+              fields,
+              (field) => field.key,
+              (field) => {
+                const label = computed(() => field.value.label);
+                const options = computed(() => field.value.options ?? []);
+                // Two field kinds and nothing else: the wire shape is closed
+                // (`FormField`), so a renderer that draws both draws every
+                // question that can arrive.
+                return html`<div data-slot="chat-ask-field">
+                  <span data-slot="chat-ask-field-label">${label}</span>
+                  ${when(
+                    computed(() => options.value.length === 0),
+                    () => html`<input
+                      data-slot="chat-ask-input"
+                      type="text"
+                      placeholder="Leave blank to skip"
+                      @input=${(event: Event) =>
+                        setPicked(ask.value, field.value.key, [(event.target as HTMLInputElement).value])}
+                    />`,
+                  )}
+                  ${when(
+                    computed(() => options.value.length > 0),
+                    () => html`<div data-slot="chat-ask-options">
+                      ${each(
+                        options,
+                        (option) => option,
+                        (option) => {
+                          const selected = computed(() =>
+                            pickedFor(ask.value, field.value.key).includes(option.value) ? 'true' : 'false',
+                          );
+                          return html`<button
+                            data-slot="chat-ask-option"
+                            type="button"
+                            aria-selected=${selected}
+                            @click=${() => toggleOption(ask.value, field.value, option.value)}
+                          >
+                            ${computed(() => option.value)}
+                          </button>`;
+                        },
+                      )}
+                    </div>`,
+                  )}
+                </div>`;
+              },
+            )}
+            <p data-slot="chat-ask-hint">
+              Skipping answers nothing and lets your agent carry on without one. It is never read as approval.
+            </p>
+            <div data-slot="chat-ask-actions">
+              <button data-slot="chat-ask-skip" @click=${() => settleAsk(ask.value, {})}>Skip</button>
+              <button
+                data-slot="chat-ask-send"
+                @click=${() => settleAsk(ask.value, answersFrom(ask.value.picked.value))}
+              >
+                Send answer
+              </button>
             </div>
           </section>`;
         },

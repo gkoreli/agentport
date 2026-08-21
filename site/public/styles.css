@@ -184,6 +184,27 @@ a { color: var(--accent); }
 [data-slot="chat-generation-controls"] { display: flex; }
 [data-slot="chat-generation-stop"] { border: 1px solid var(--line); background: transparent; color: var(--text); padding: 8px 11px; }
 
+/* A question the agent asked its user (ADR-024). It sits above the transcript
+   with the approval card rather than inside the scrollback, for the same
+   reason: an unanswered question stalls the turn until the daemon's deadline
+   and then decays to a skip, so it must not be able to scroll out of sight.
+   The question text and every label are agent-authored — rendered as data,
+   never as markup. */
+[data-slot="chat-ask"] { border: 1px solid #4b5670; border-radius: 10px; background: #171d29; padding: 12px; margin-bottom: 10px; display: grid; gap: 8px; }
+[data-slot="chat-ask-label"] { color: #ffd37c; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; }
+[data-slot="chat-ask-message"] { margin: 0; font-size: 13px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+[data-slot="chat-ask-field"] { display: grid; gap: 5px; }
+[data-slot="chat-ask-field-label"] { color: var(--muted); font-size: 11px; }
+[data-slot="chat-ask-input"] { border: 1px solid var(--line); border-radius: 8px; background: #0b0d10; color: var(--text); font: inherit; font-size: 13px; padding: 7px 9px; outline: none; }
+[data-slot="chat-ask-input"]:focus { border-color: var(--accent); }
+[data-slot="chat-ask-options"] { display: flex; flex-wrap: wrap; gap: 6px; }
+[data-slot="chat-ask-option"] { border: 1px solid var(--line); border-radius: 999px; background: transparent; color: var(--text); padding: 5px 10px; font-size: 12px; font-weight: 500; }
+[data-slot="chat-ask-option"][aria-selected="true"] { border-color: var(--accent); background: rgba(124,156,255,.14); }
+[data-slot="chat-ask-hint"] { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.45; }
+[data-slot="chat-ask-actions"] { display: flex; justify-content: flex-end; gap: 8px; }
+[data-slot="chat-ask-actions"] button { padding: 6px 12px; font-size: 12px; }
+[data-slot="chat-ask-skip"] { color: var(--text); background: transparent; border: 1px solid var(--line); }
+
 button {
   font: inherit; font-size: 14px; font-weight: 600; border: 0; border-radius: 9px;
   padding: 9px 16px; cursor: pointer; background: var(--accent); color: #0b0d10;

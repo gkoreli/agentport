@@ -127,6 +127,22 @@ await session.handle({
   domain: 'site_tool',
   summary: 'Continue?',
 });
+// The agent asking its own USER a question, mid-turn (ADR-024). The adapter
+// had no listener for it at all, so the frame arrived, `AgentSession` emitted
+// `ask`, and nothing came out of the stream — the turn then sat blocked for
+// the daemon's five-minute ask deadline and decayed to a skip. Driven here as
+// a wire-shaped frame, with both field kinds, because a question with only a
+// free-text field would exercise half of what a renderer must draw.
+await session.handle({
+  t: 'ask',
+  s: session.id,
+  id: 'ask_1',
+  message: 'Which draft should I edit?',
+  fields: [
+    { key: 'draft', label: 'Draft', options: ['Draft A', 'Draft B'] },
+    { key: 'note', label: 'Anything else I should know?' },
+  ],
+});
 await session.handle({ t: 'done', s: session.id, promptId: firstPrompt, stopReason: 'end_turn' });
 assert.equal(await successfulRun, 'Saved it.');
 
@@ -169,6 +185,7 @@ assert.deepEqual(
     'TOOL_CALL_END',
     'TOOL_CALL_RESULT',
     'CUSTOM:agentport.approval',
+    'CUSTOM:agentport.ask',
     'TEXT_MESSAGE_END',
     'REASONING_MESSAGE_END',
     'REASONING_END',
@@ -225,6 +242,26 @@ const approval = streamEvents.find(
 );
 assert.equal(approval?.value.granted, true);
 assert.ok(!streamEvents.some((event) => event.type === 'CUSTOM' && event.name === ('agentport.verify' as string)));
+
+// A question must arrive with everything a renderer needs to ANSWER it: the
+// id `session.answer(id, …)` takes, and both field kinds intact. Dropping the
+// fields would leave a renderer able only to skip, which is the same stalled
+// turn wearing a form.
+const question = streamEvents.find(
+  (event): event is Extract<AguiEvent, { type: 'CUSTOM'; name: 'agentport.ask' }> =>
+    event.type === 'CUSTOM' && event.name === 'agentport.ask',
+);
+assert.equal(question?.value.id, 'ask_1');
+assert.equal(question?.value.message, 'Which draft should I edit?');
+assert.deepEqual(question?.value.fields, [
+  { key: 'draft', label: 'Draft', options: ['Draft A', 'Draft B'] },
+  { key: 'note', label: 'Anything else I should know?' },
+]);
+assert.ok(
+  subscribedEvents.some((event) => event.type === 'CUSTOM' && event.name === 'agentport.ask'),
+  'onAguiEvent subscribers must see the question too',
+);
+
 assert.ok(subscribedEvents.some((event) => event.type === 'RUN_STARTED'));
 assert.ok(subscribedEvents.some((event) => event.type === 'RUN_ERROR'));
 assert.ok(subscribedEvents.some((event) => event.type === EventType.TOOL_CALL_RESULT));

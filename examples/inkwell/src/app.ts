@@ -19,6 +19,7 @@ import {
   type AgentSessionHandle,
   type AgentConnectRequest,
   type ApprovalPrompt,
+  type SessionEvents,
   type SiteTool,
 } from '@agentport/client';
 import { generateKeyPair, isGated, type AgentSummary } from '@agentport/protocol';
@@ -191,6 +192,117 @@ function line(kind: string, text: string): HTMLDivElement {
 
 let session: AgentSessionHandle | null = null;
 
+/**
+ * [SITE] The agent asking its own USER a question, mid-turn (ADR-024).
+ *
+ * Inkwell is the tier that actually receives one: it holds the user key in the
+ * page, so the daemon counts it a trusted answer surface and sends the `ask`
+ * frame here instead of keeping the question at its own terminal. Nothing
+ * listened for it, so the question arrived, `AgentSession` emitted it, and the
+ * turn then sat blocked for the daemon's five-minute deadline before decaying
+ * to a skip — with nothing on screen to say why.
+ *
+ * Everything the agent authored is written with `textContent`. The message and
+ * the field labels are its words, not ours, and they are data.
+ */
+function askUser(target: AgentSessionHandle, question: SessionEvents['ask']): void {
+  const card = document.createElement('div');
+  card.className = 'msg ask';
+  card.style.cssText = 'display:grid; gap:8px;';
+
+  const heading = document.createElement('div');
+  heading.className = 'msg meta';
+  heading.textContent = 'Your agent is asking you';
+  const message = document.createElement('div');
+  message.textContent = question.message;
+  card.append(heading, message);
+
+  /** Field key → what the user put in it, read at send time. */
+  const readers = new Map<string, () => string>();
+
+  for (const field of question.fields) {
+    const row = document.createElement('label');
+    row.style.cssText = 'display:grid; gap:4px;';
+    const caption = document.createElement('span');
+    caption.className = 'msg meta';
+    caption.textContent = field.label;
+    row.append(caption);
+
+    if (field.options) {
+      const select = document.createElement('select');
+      select.multiple = field.multi === true;
+      select.style.cssText =
+        'background:#0d0f12; border:1px solid var(--line); border-radius:8px; color:var(--text); font:inherit; font-size:14px; padding:8px;';
+      if (!select.multiple) {
+        // The user has to be able to stay at "I did not answer this", which is
+        // not the same as any of the options the agent offered.
+        const blank = document.createElement('option');
+        blank.value = '';
+        blank.textContent = '— no answer —';
+        select.append(blank);
+      }
+      for (const option of field.options) {
+        const item = document.createElement('option');
+        item.value = option;
+        item.textContent = option;
+        select.append(item);
+      }
+      row.append(select);
+      // Several choices become one answer, joined — the same rule the
+      // extension's question window uses, because two surfaces drawing one
+      // protocol shape must not disagree about what an answer is.
+      readers.set(field.key, () =>
+        Array.from(select.selectedOptions)
+          .map((option) => option.value)
+          .filter((value) => value !== '')
+          .join(', '),
+      );
+    } else {
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.placeholder = 'Leave blank to skip';
+      row.append(input);
+      readers.set(field.key, () => input.value.trim());
+    }
+    card.append(row);
+  }
+
+  const actions = document.createElement('div');
+  actions.style.cssText = 'display:flex; gap:8px; justify-content:flex-end;';
+  const skip = document.createElement('button');
+  skip.className = 'ghost';
+  skip.textContent = 'Skip';
+  const send = document.createElement('button');
+  send.textContent = 'Send answer';
+  actions.append(skip, send);
+  card.append(actions);
+
+  const settle = (values?: Record<string, string>) => {
+    // Answered once. The card stays as a record of what was asked.
+    actions.remove();
+    try {
+      // No values IS the skip — a real answer meaning "carry on without one",
+      // never an error and never a cancellation.
+      target.answer(question.id, values);
+    } catch (err) {
+      line('meta', `could not send the answer: ${(err as Error).message}`);
+      return;
+    }
+    line('meta', values ? 'answer sent' : 'question skipped');
+  };
+
+  skip.addEventListener('click', () => settle());
+  send.addEventListener('click', () => {
+    const entries = [...readers.entries()]
+      .map(([key, read]) => [key, read()] as [string, string])
+      .filter(([, value]) => value !== '');
+    settle(entries.length > 0 ? Object.fromEntries(entries) : undefined);
+  });
+
+  log.append(card);
+  log.scrollTop = log.scrollHeight;
+}
+
 function attach(next: AgentSessionHandle): void {
   session = next;
   $('empty').style.display = 'none';
@@ -209,6 +321,7 @@ function attach(next: AgentSessionHandle): void {
     log.scrollTop = log.scrollHeight;
   });
   next.on('thought', (event) => line('meta', event.text));
+  next.on('ask', (question) => askUser(next, question));
   next.on('tool', (event) => line(`tool ${event.ok ? 'ok' : 'err'}`, `${event.name}${event.ok ? '' : ` — ${event.error}`}`));
   next.on('done', () => {
     current = null;

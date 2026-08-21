@@ -82,6 +82,27 @@ export type AgentPortReattachedEvent = BaseEvent & {
   value: SessionEvents['reattached'];
 };
 
+/**
+ * The agent is asking its own user a question, mid-turn (ADR-024).
+ *
+ * CUSTOM rather than a standard event because AG-UI has no elicitation in its
+ * vocabulary: nothing in `EventType` carries a form back to the agent, and
+ * inventing a TEXT_MESSAGE for it would render a question the user cannot
+ * answer. A renderer that ignores this one is not merely missing a nicety —
+ * the turn stalls until the daemon's ask deadline and then decays to a skip,
+ * which is the bug that made this event exist.
+ *
+ * Answer it with `session.answer(value.id, …)`. Answering is the renderer's
+ * job, not the adapter's: the adapter holds no consent surface, and a stream
+ * translator that silently answered for the user would be forging exactly the
+ * authority ADR-024 R11 protects.
+ */
+export type AgentPortAskEvent = BaseEvent & {
+  type: EventType.CUSTOM;
+  name: 'agentport.ask';
+  value: SessionEvents['ask'];
+};
+
 /** The subset of the AG-UI event union this adapter can produce. */
 export type AguiEvent =
   | RunStartedEvent
@@ -101,6 +122,7 @@ export type AguiEvent =
   | ReasoningEndEvent
   | ActivitySnapshotEvent
   | AgentPortApprovalEvent
+  | AgentPortAskEvent
   | AgentPortReattachedEvent
   | AgentPortClosedEvent;
 
@@ -158,20 +180,49 @@ class Translator {
     this.#session = session;
     this.#emit = emit;
     this.#finish = finish;
-    this.#off = [
-      session.on('delta', (event: SessionEvents['delta']) => this.#onDelta(event)),
-      session.on('thought', (event: SessionEvents['thought']) => this.#onThought(event)),
-      session.on('plan', (event: SessionEvents['plan']) => this.#onPlan(event)),
-      session.on('done', (event: SessionEvents['done']) => this.#onDone(event)),
-      session.on('tool', (event: SessionEvents['tool']) => this.#onTool(event)),
-      session.on('approval', (event: SessionEvents['approval']) =>
-        this.#emit({ type: EventType.CUSTOM, name: 'agentport.approval', value: event }),
-      ),
-      session.on('reattached', (event: SessionEvents['reattached']) =>
-        this.#emit({ type: EventType.CUSTOM, name: 'agentport.reattached', value: event }),
-      ),
-      session.on('closed', (event: SessionEvents['closed']) => this.#onClosed(event)),
-    ];
+    /**
+     * One entry per member of `SessionEvents`, and the RECORD TYPE is what
+     * makes that total: omit a member and this object stops compiling.
+     *
+     * It was an array literal, which is a registry the compiler cannot check
+     * — and it was already wrong. `ask` was missing for its whole existence,
+     * so the agent asked its user a question, `AgentSession` emitted it, and
+     * this adapter translated it into nothing at all. The turn then blocked
+     * for the daemon's five-minute ask deadline and decayed to a skip, with
+     * no event, no log, and nothing on screen to explain the pause. Same
+     * disease as the plain-`Set` in `messages.ts`: a handler set nobody could
+     * prove complete.
+     *
+     * The entries are subscription FACTORIES rather than bare handlers so the
+     * literal event name stays inside `session.on(...)`, where it types the
+     * listener's argument — no cast, and the emitted value keeps its real
+     * type all the way to the union.
+     *
+     * What this does NOT prove: that a key matches the name beside it. The
+     * compiler checks that every member is PRESENT, not that `plan:` listens
+     * to `'plan'`. That is a typo on one line, visible where it is made; the
+     * failure this guard exists for is the one nobody can see, an event with
+     * no line at all.
+     */
+    const subscriptions: Record<keyof SessionEvents, () => () => void> = {
+      delta: () => session.on('delta', (event) => this.#onDelta(event)),
+      thought: () => session.on('thought', (event) => this.#onThought(event)),
+      ask: () =>
+        session.on('ask', (event) => this.#emit({ type: EventType.CUSTOM, name: 'agentport.ask', value: event })),
+      plan: () => session.on('plan', (event) => this.#onPlan(event)),
+      reattached: () =>
+        session.on('reattached', (event) =>
+          this.#emit({ type: EventType.CUSTOM, name: 'agentport.reattached', value: event }),
+        ),
+      done: () => session.on('done', (event) => this.#onDone(event)),
+      tool: () => session.on('tool', (event) => this.#onTool(event)),
+      approval: () =>
+        session.on('approval', (event) =>
+          this.#emit({ type: EventType.CUSTOM, name: 'agentport.approval', value: event }),
+        ),
+      closed: () => session.on('closed', (event) => this.#onClosed(event)),
+    };
+    this.#off = Object.values(subscriptions).map((subscribe) => subscribe());
   }
 
   run(text: string): Promise<string> {
