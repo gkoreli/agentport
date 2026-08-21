@@ -181,6 +181,8 @@ npm run wire:check # wire validation: 521 fixture cases across all 45 frames
 npm run agui:check # every emitted AG-UI event parsed by @ag-ui/core's schemas
 npm run source:check # no invisible control characters in source (a NUL got in)
 npm run docs:check   # every code citation in the docs resolves to a real symbol
+npm run snippet:check # the integration snippet from BOTH front doors, extracted and EXECUTED
+npm run deployed:check # deployed front door vs this tree — exit 1 lags, 2 unreachable (release path)
 npm run typecheck  # tsc -b over all packages
 npm run deploy     # build the site + wrangler deploy
 
@@ -224,7 +226,15 @@ real peer can send. The AG-UI adapter's approval path was therefore exercised
 only on a shape that does not occur, which is the same defect as testing the
 ACP short-circuit with a field the agent never populates.
 
-So neither is a new line on that list. `npm run typecheck` runs
+`packages/cli` was the EIGHTH — the package that IS the published
+`npx @gkoreli/agentport`, in no project reference, not in the harness config,
+and esbuild-bundled. A deliberate type error in `packages/cli/src/doctor.ts`
+passed `npm run typecheck` without a mention. It is fixed the other way
+around from the five above: added to the ROOT project references (the comment
+in `tsconfig.json` records the find), so `npm run typecheck` covers it and no
+new separate command exists to be forgotten.
+
+So none of these is a new line on that list. `npm run typecheck` runs
 `tsconfig.harness.json` — everything that CHECKS this repo but is not shipped
 by it — because the lesson of the list is that a separate command is what gets
 forgotten: the extension's four errors survived a year of people running the
@@ -576,7 +586,18 @@ Not built yet, in rough priority order:
 
    What is genuinely left is DISTRIBUTION: there is no Chrome Web Store
    listing, so the extension is a load-unpacked build and the README says so
-   rather than implying a link. That is a release decision, not engineering.
+   rather than implying a link. An earlier version of this entry called that
+   "a release decision, not engineering", and a survey of the manifest and
+   the extension's own stubbed-list disproved it. It is engineering with a
+   worklist: the broad host permissions force a written single-purpose
+   justification and a hosted privacy policy that do not exist yet; the root
+   user key is stored as plaintext hex
+   (`packages/extension/src/storage.ts#ensureUserKey`) and needs
+   passkey wrapping before strangers hold it; there is no revocation UI, so a
+   store user could not see or cut off what holds their agent without the
+   CLI; and pairwise per-origin agent identity (ADR-009) must be designed
+   BEFORE listing, because an identifier scheme cannot be changed after
+   sites depend on it.
 
    Note what this does *not* block: `#trustedSurfaces` keys on DELEGATION, not
    on the wallet's implementation, so the extension already counts as a
