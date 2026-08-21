@@ -13,11 +13,24 @@
  * The page cannot address a widget session and the widget cannot be driven by
  * the page: both are keyed by references minted in the service worker, and each
  * reference is recorded here with the owner it was created for.
+ *
+ * WHAT STAYS IN THIS FILE, AND WHY IT IS NOT SPLIT FURTHER
+ *
+ * The widget's state machine moved out to `widget.ts`, where it can be driven
+ * without a browser. What is left is deliberately one piece. `records`,
+ * `pageCalls`, `waiters` and `readPageOutbound` are a SINGLE boundary, not four
+ * collaborating parts: the validator decides what a page may say, and the three
+ * maps are what makes each of those statements answerable exactly once, by the
+ * owner it was minted for. Splitting them would put the ownership check and the
+ * table it checks against in different files, and the invariant they enforce
+ * together — a page may only answer a call this document dispatched to it, and
+ * may never address a widget session — is the reason this extension exists.
+ * The panel below stays for a different reason: building an extension-origin
+ * iframe inside a closed shadow root is `chrome.runtime` work that cannot leave
+ * the content script at all.
  */
 
-import type { SiteTool } from '@agentport/client';
-import { createLogger, type HistoryEntry, type PlanStep, type ToolDefinition } from '@agentport/protocol';
-import type { ChatUpdate } from '../../../src/nisli-ui/ui/chat/index.js';
+import { createLogger, type ToolDefinition } from '@agentport/protocol';
 import {
   ENVELOPE,
   LIMITS,
@@ -26,7 +39,6 @@ import {
   isRecord,
   mintId,
   readPageOutbound,
-  sanitizePlanSteps,
   sanitizeTools,
   type ContentToWorker,
   type ExtensionProviderErrorReason,
@@ -35,19 +47,21 @@ import {
   type PageInbound,
   type WorkerToContent,
 } from './bridge.js';
-import type { OverlayAction, OverlayCommand, WidgetPhase } from './overlay.js';
+import type { OverlayAction, OverlayCommand } from './overlay.js';
 import { genericPageTools } from './pagetools.js';
 import { AGENTPORT_VERSION } from './version.js';
+import {
+  WidgetSurface,
+  type OverlayBridge,
+  type OverlayHost,
+  type ToolRoute,
+  type WidgetToolSource,
+} from './widget.js';
 
 const CHANNEL = mintId('ch_');
 const TOOL_CALL_TIMEOUT_MS = 30_000;
-/** The agent's own store answers this; a runtime that never answers must not
- *  leave the reattached widget waiting on a promise nobody settles. */
-const WIDGET_HISTORY_TIMEOUT_MS = 20_000;
 const PAIR_CODE = /^[A-Z2-9]{4}-[A-Z2-9]{4}$/;
 const log = createLogger('extension.content');
-
-type ToolRoute = 'page' | ((args: Record<string, unknown>) => unknown | Promise<unknown>);
 
 interface SessionRecord {
   ref: string;
@@ -120,7 +134,7 @@ function request<T>(build: (rid: string) => ContentToWorker, timeoutMs?: number)
 function closeRecord(record: SessionRecord, reason: string): void {
   records.delete(record.ref);
   if (record.owner === 'page') toPage({ t: 'event', ref: record.ref, event: 'closed', payload: { reason } });
-  else onWidgetClosed(reason);
+  else widget.closed(reason);
 }
 
 // --- page boundary ---------------------------------------------------------
@@ -260,7 +274,7 @@ window.addEventListener('message', (event: MessageEvent) => {
     }
     case 'webmcp.tools': {
       webmcpTools = sanitizeTools(body.tools);
-      if (webmcpTools.length > 0 && !overlaySuppressed) overlay().show();
+      if (webmcpTools.length > 0) revealOverlay();
       return;
     }
     default: {
@@ -422,7 +436,7 @@ function onWorkerMessage(message: WorkerToContent): void {
       } else if (record.owner === 'page') {
         toPage({ t: 'event', ref: message.ref, event: message.event, payload: message.payload });
       } else {
-        onWidgetEvent(message.event, message.payload);
+        widget.event(message.event, message.payload);
       }
       if (message.event === 'closed') records.delete(message.ref);
       return;
@@ -476,86 +490,28 @@ async function runToolCall(call: Extract<WorkerToContent, { t: 'tool.call' }>): 
 }
 
 // ---------------------------------------------------------------------------
-// Job 2 — the fallback surface
+// Job 2 — the panel the fallback surface is drawn in
 //
-// When the site does not speak `navigator.agent`, the extension becomes the
-// surface. Preference order for what the agent gets:
+// The state machine this panel drives — attachment, turn, plan, fingerprint
+// words, transcript bookkeeping — is `WidgetSurface` in `widget.ts`, which is
+// free of Chrome APIs and therefore assertable in `check.ts`. What is left here
+// is the part that cannot leave: an extension-origin iframe inside a closed
+// shadow root, built with `chrome.runtime` and wired over a private
+// `MessagePort`.
 //
-//   1. the site's own WebMCP tools, if it registered any — those carry intent;
-//   2. otherwise the generic `page.*` DOM toolset.
-//
-// Either way the grant goes through the same consent screen and the same
-// per-call approvals as a site-declared grant.
-//
-// A widget attachment outlives a same-origin navigation: the next document
-// asks the worker to hand it back (`reclaimWidget`, at document_start) and
-// rehydrates the transcript from the agent's own store. Only the generic
-// toolset can do that — a grant harvested from a document's own WebMCP
-// registrations belongs to THAT document, so the worker refuses to park it.
-// Leaving the origin is not a navigation the attachment follows at all: the
-// worker closes it when this tab's next top-level document announces a
-// different origin.
+// `widgetSurfaceAlive` is DELETED rather than moved. It was set true in exactly
+// the place `overlayInstance` is assigned and false in exactly the place
+// `overlayInstance` is cleared — both synchronously, with nothing between them
+// that reads either — so "is there a panel" already answered it, and the
+// `WidgetSurface` asks that question instead. Two variables that must agree are
+// two variables that can one day disagree.
 // ---------------------------------------------------------------------------
-
-interface OverlayBridge {
-  show(): void;
-  setState(phase: WidgetPhase, agentName?: string): void;
-  addUserMessage(content: string): void;
-  apply(update: ChatUpdate): void;
-  notice(text: string): void;
-  /** Replace the agent's checklist. An empty array clears it. */
-  plan(steps: readonly PlanStep[]): void;
-  /** Fingerprint words for the current attachment; '' hides the line. */
-  verify(words: string): void;
-  reset(): void;
-}
 
 let overlayInstance: OverlayBridge | undefined;
 let overlaySuppressed = false;
-let widgetSurfaceAlive = false;
-let widgetRef: string | undefined;
-let widgetPromptId: string | undefined;
-let widgetAttaching = false;
-let widgetToolSeq = 0;
-/** Set as soon as the agent says anything to THIS document. A history replay
- *  must never overwrite a transcript the user is already reading. */
-let widgetLiveSinceBind = false;
-const widgetTextMessages = new Set<string>();
-const widgetReasoningMessages = new Set<string>();
-/**
- * State of the CURRENT attachment, held here rather than only in the overlay.
- *
- * The overlay iframe does not exist yet at document_start, which is exactly
- * when `reclaimWidget` binds a session that may already be mid-turn — and a
- * `chat.reset` during a history replay clears the panel. Keeping the values
- * here means `showWidgetAttached` can restate them whenever the panel appears
- * or is cleared, instead of the user losing a plan or a set of fingerprint
- * words to a timing accident.
- */
-let widgetPlan: readonly PlanStep[] = [];
-let widgetVerify = '';
-
-interface WidgetAttachment {
-  ref: string;
-  info: { agentName: string; verify?: string };
-  /** Turns the agent is still working on, so a document that arrives mid-turn
-   *  renders a running turn instead of an idle composer. */
-  activePrompts?: string[];
-  /** The plan of the turn in flight, when the worker is holding one. */
-  plan?: unknown;
-}
-
-function displayJson(value: unknown): string {
-  try {
-    return JSON.stringify(value, null, 2) ?? String(value);
-  } catch {
-    return String(value);
-  }
-}
 
 function overlay(): OverlayBridge {
   if (overlayInstance) return overlayInstance;
-  widgetSurfaceAlive = true;
 
   // The page cannot traverse this closed root, so it cannot obtain the iframe
   // or its contentWindow. The content script alone keeps the MessagePort that
@@ -605,18 +561,11 @@ function overlay(): OverlayBridge {
     removalObserver?.disconnect();
     channel.port1.close();
     queued.length = 0;
-    const ref = widgetRef;
-    widgetRef = undefined;
-    widgetPromptId = undefined;
-    widgetAttaching = false;
-    widgetTextMessages.clear();
-    widgetReasoningMessages.clear();
-    widgetPlan = [];
-    widgetVerify = '';
-    widgetSurfaceAlive = false;
     overlaySuppressed = true;
+    // Cleared BEFORE the surface is told, so that everything the widget does in
+    // response already sees a document with nowhere to draw.
     overlayInstance = undefined;
-    if (ref) tell({ t: 'close', ref, reason });
+    widget.surfaceLost(reason);
   };
 
   channel.port1.onmessage = (event: MessageEvent<unknown>) => {
@@ -624,15 +573,10 @@ function overlay(): OverlayBridge {
     if (!isRecord(action) || typeof action['t'] !== 'string') return;
     switch ((action as OverlayAction).t) {
       case 'overlay.attach':
-        void attachWidget();
+        void widget.attach();
         return;
       case 'overlay.detach':
-        if (widgetRef) tell({ t: 'close', ref: widgetRef, reason: 'user_detached' });
-        widgetRef = undefined;
-        widgetPromptId = undefined;
-        widgetPlan = [];
-        widgetVerify = '';
-        overlay().reset();
+        widget.detach();
         return;
       case 'overlay.layout':
         if (typeof action['expanded'] === 'boolean') setExpanded(action['expanded']);
@@ -645,13 +589,13 @@ function overlay(): OverlayBridge {
           action['text'].length > LIMITS.textLength
         ) return;
         {
-          const accepted = sendFromWidget(action['text']);
+          const accepted = widget.send(action['text']);
           if (accepted) overlay().addUserMessage(action['text']);
           send({ t: 'overlay.action-result', id: action['id'], accepted });
         }
         return;
       case 'chat.cancel':
-        if (widgetRef && widgetPromptId) tell({ t: 'prompt.cancel', ref: widgetRef, promptId: widgetPromptId });
+        widget.cancel();
         return;
       default:
         return;
@@ -692,85 +636,24 @@ function overlay(): OverlayBridge {
   return overlayInstance;
 }
 
-/** What the widget asks for, on a fresh attach and on a reclaim alike. The
- *  `source` is how the worker knows whether this grant can outlive the
- *  document that declared it. */
-function widgetConnectRequest(tools: ToolDefinition[], source: 'webmcp' | 'page-dom'): PageConnectRequest {
-  return {
-    name: document.title || location.hostname,
-    route: location.pathname,
-    context: { url: location.href, title: document.title, source },
-    tools,
-    alwaysAsk: [],
-  };
-}
+/**
+ * The panel, as the widget is allowed to see it: built on demand, and
+ * separately observable WITHOUT being built. `overlaySuppressed` is not in this
+ * interface on purpose — it answers whether a document that already tore its
+ * panel down should get another one, which is this file's business rather than
+ * the state machine's.
+ */
+const overlayHost: OverlayHost = {
+  open: overlay,
+  panel: () => overlayInstance,
+};
 
-function bindWidget(ref: string, routes: Map<string, ToolRoute>): void {
-  records.set(ref, { ref, owner: 'widget', routes });
-  widgetRef = ref;
-  widgetAttaching = false;
-  widgetLiveSinceBind = false;
-}
-
-function showWidgetAttached(ui: OverlayBridge, agentName: string): void {
-  ui.setState('attached', agentName);
-  // The one place the attachment's own state is put on screen. It runs on a
-  // fresh attach, on a reclaim after navigation, and after a history replay's
-  // `reset` — so a plan and a set of fingerprint words are never lost to
-  // whichever of those happened to come last.
-  ui.verify(widgetVerify);
-  ui.plan(widgetPlan);
-  // A turn was already running when this document arrived; render it as such
-  // so the composer offers Stop instead of pretending the agent is idle.
-  if (widgetPromptId) ui.apply({ type: 'run.start' });
-}
-
-async function attachWidget(): Promise<void> {
-  const ui = overlay();
-  if (widgetRef || widgetAttaching) return;
-  widgetAttaching = true;
-  ui.setState('attaching');
-
-  const usingWebMcp = webmcpTools.length > 0;
-  const local: SiteTool[] = usingWebMcp ? [] : genericPageTools();
-  const definitions: ToolDefinition[] = usingWebMcp
-    ? webmcpTools
-    : local.map(({ handler: _handler, ...definition }) => definition);
-
-  try {
-    const value = await request<WidgetAttachment>((rid) => ({
-      t: 'connect',
-      rid,
-      from: 'widget',
-      request: widgetConnectRequest(definitions, usingWebMcp ? 'webmcp' : 'page-dom'),
-    }));
-
-    if (!widgetSurfaceAlive) {
-      widgetAttaching = false;
-      tell({ t: 'close', ref: value.ref, reason: 'widget_removed' });
-      return;
-    }
-
-    const routes = new Map<string, ToolRoute>();
-    if (usingWebMcp) for (const tool of webmcpTools) routes.set(tool.name, 'page');
-    else for (const tool of local) routes.set(tool.name, tool.handler);
-
-    bindWidget(value.ref, routes);
-    // A fresh attachment: fresh sealing keys, and no turn yet to have a plan.
-    widgetVerify = typeof value.info.verify === 'string' ? value.info.verify : '';
-    widgetPlan = [];
-    showWidgetAttached(ui, value.info.agentName);
-    ui.notice(
-      usingWebMcp
-        ? `Attached with ${webmcpTools.length} tool(s) this site published via WebMCP. This grant ends when you leave this page.`
-        : `Attached with the generic page toolset. Reads are free; anything that changes the page asks first.`,
-    );
-  } catch (err) {
-    widgetAttaching = false;
-    if (!widgetSurfaceAlive) return;
-    ui.setState('idle');
-    ui.notice(err instanceof Error ? err.message : String(err));
-  }
+/** Put the panel on screen unless this document already tore one down. The
+ *  suppression is checked here rather than inside `overlay()` because the paths
+ *  that ATTACH must still be able to build one — an attach can only come from a
+ *  panel the user is looking at. */
+function revealOverlay(): void {
+  if (!overlaySuppressed) overlay().show();
 }
 
 function documentReady(): Promise<void> {
@@ -781,333 +664,40 @@ function documentReady(): Promise<void> {
 }
 
 /**
- * Ask the worker whether this tab already has an attachment on this origin.
+ * The fallback surface for this document.
  *
- * Runs at document_start on every top-level page, before the overlay exists,
- * for two reasons: a tool call the agent issued just before the navigation is
- * parked in the worker waiting for a document to bind, and opening this port
- * is also how the worker learns which origin the tab is on now — which is what
- * makes a cross-origin navigation detach immediately instead of after the
- * orphan grace.
+ * Everything it needs from the browser arrives through these members, so the
+ * state machine itself has no ambient dependency and `check.ts` can drive the
+ * same transitions with a recording bridge and no DOM at all.
  */
-async function reclaimWidget(): Promise<void> {
-  if (widgetRef || widgetAttaching) return;
-  widgetAttaching = true;
-  const local = genericPageTools();
-  let value: WidgetAttachment | null;
-  try {
-    value = await request<WidgetAttachment | null>((rid) => ({
-      t: 'resume',
-      rid,
-      from: 'widget',
-      request: widgetConnectRequest(local.map(({ handler: _handler, ...definition }) => definition), 'page-dom'),
-    }));
-  } catch (err) {
-    widgetAttaching = false;
-    log.warn('could not ask the wallet whether this tab has an attachment to reclaim', {
-      err,
-      data: { origin: location.origin },
-    });
-    return;
-  }
-  if (!value) {
-    widgetAttaching = false;
-    return;
-  }
-
-  // Route bindings first: the parked tool call is answered from here, and it
-  // must not wait for the DOM or the overlay iframe.
-  bindWidget(value.ref, new Map(local.map((tool) => [tool.name, tool.handler])));
-  const active = value.activePrompts?.[0];
-  if (typeof active === 'string') widgetPromptId = active;
-  // The attachment survived the navigation; so does what it was doing. The
-  // worker held both, because this document kept nothing across the boundary.
-  widgetVerify = typeof value.info.verify === 'string' ? value.info.verify : '';
-  if (value.plan === undefined) {
-    widgetPlan = [];
-  } else {
-    const steps = sanitizePlanSteps(value.plan);
-    if (steps) {
-      widgetPlan = steps;
-    } else {
-      // Only our own plumbing can produce this — the snapshot passed the wire
-      // schema before the worker ever held it. Show no plan rather than a
-      // mangled one, and say so, because it means these two halves disagree.
-      widgetPlan = [];
-      log.error('the wallet handed back a plan this document cannot render', {
-        data: { origin: location.origin },
-      });
-    }
-  }
-
-  await documentReady();
-  if (widgetRef !== value.ref) return; // detached or closed while we waited
-  const ui = overlay();
-  ui.show();
-  showWidgetAttached(ui, value.info.agentName);
-  ui.notice('Reattached after navigation — same agent, same session.');
-  await rehydrateWidget(ui, value.ref, value.info.agentName);
-}
-
-/** The transcript lives in the agent's own store, never here: this document
- *  kept nothing across the navigation, so it asks the agent for it. */
-async function rehydrateWidget(ui: OverlayBridge, ref: string, agentName: string): Promise<void> {
-  let entries: HistoryEntry[];
-  try {
-    entries = await request<HistoryEntry[]>((rid) => ({ t: 'history', rid, ref }), WIDGET_HISTORY_TIMEOUT_MS);
-  } catch (err) {
-    log.warn('could not restore the conversation from the agent', { err, data: { origin: location.origin } });
-    ui.notice(`Could not restore the earlier conversation: ${err instanceof Error ? err.message : String(err)}`);
-    return;
-  }
-  if (widgetRef !== ref || !Array.isArray(entries) || entries.length === 0) return;
-  if (widgetLiveSinceBind) {
-    // The agent spoke while this was in flight. Replaying now would delete the
-    // words the user is reading, so say where the rest is instead.
-    ui.notice(`${entries.length} earlier message(s) remain in your agent's own history.`);
-    return;
-  }
-  ui.reset();
-  for (const entry of entries) {
-    const id = `history-${widgetToolSeq++}`;
-    if (entry.role === 'user') {
-      ui.addUserMessage(entry.text);
-    } else if (entry.role === 'agent') {
-      ui.apply({ type: 'message.start', id, role: 'assistant' });
-      ui.apply({ type: 'message.delta', id, content: { type: 'text', text: entry.text } });
-      ui.apply({ type: 'message.end', id });
-    } else if (entry.role === 'thought') {
-      ui.apply({ type: 'reasoning.start', id });
-      ui.apply({ type: 'reasoning.delta', id, content: { type: 'text', text: entry.text } });
-      ui.apply({ type: 'reasoning.end', id });
-    } else {
-      // Tool and approval rows arrive as flat text.
-      ui.apply({ type: 'tool.start', id, name: entry.text });
-      ui.apply({ type: 'tool.end', id, status: 'complete' });
-    }
-  }
-  // `chat.reset` also clears the phase and the notices, so restate both.
-  showWidgetAttached(ui, agentName);
-  ui.notice(`Reattached after navigation — ${entries.length} message(s) restored from your agent.`);
-}
-
-function sendFromWidget(text: string): boolean {
-  const ui = overlayInstance;
-  const ref = widgetRef;
-  if (!ui || !ref || widgetPromptId) return false;
-  const promptId = mintId('p_');
-  widgetPromptId = promptId;
-  ui.apply({ type: 'run.start' });
-  request<string>((rid) => ({ t: 'prompt', rid, ref, promptId, text })).then(
-    (full) => {
-      // `done` normally settles the run first. This fallback is for a worker
-      // that returned a result after losing its event subscription.
-      if (widgetPromptId !== promptId) return;
-      if (full && !widgetTextMessages.has(promptId)) {
-        widgetTextMessages.add(promptId);
-        ui.apply({ type: 'message.start', id: promptId, role: 'assistant' });
-        ui.apply({ type: 'message.delta', id: promptId, content: { type: 'text', text: full } });
-        ui.apply({ type: 'message.end', id: promptId });
-      }
-      ui.apply({ type: 'run.end' });
-      widgetPromptId = undefined;
-    },
-    (err: Error) => {
-      if (widgetPromptId !== promptId) return;
-      ui.apply({ type: 'run.error', error: err.message });
-      ui.notice(err.message);
-      widgetPromptId = undefined;
-    },
-  );
-  return true;
-}
-
-function onWidgetEvent(event: string, payload: unknown): void {
-  if (event === 'closed') {
-    const reason = isRecord(payload) ? String(payload['reason'] ?? 'closed') : 'closed';
-    onWidgetClosed(reason);
-    return;
-  }
-  if (!isRecord(payload)) return;
-  const promptId = typeof payload['promptId'] === 'string' ? payload['promptId'] : undefined;
-
-  // `plan` and `reattached` describe the ATTACHMENT, not the conversation, so
-  // they are recorded before the overlay is consulted: a reclaim binds at
-  // document_start, long before any iframe exists, and losing a plan or the
-  // current fingerprint words to that gap is not acceptable. They also
-  // deliberately do not set `widgetLiveSinceBind` — neither is something the
-  // agent said, so neither may suppress the history replay.
-  if (event === 'plan' || event === 'reattached') {
-    if (!widgetRef) {
-      // The user hit Detach (or this document never bound) and the worker's
-      // `closed` is still in flight. Nothing here belongs to a live attachment,
-      // so render none of it — showing fingerprint words for a session that is
-      // going away is worse than showing nothing.
-      log.info('ignored attachment state for a widget that is not attached', { data: { event } });
-      return;
-    }
-    if (event === 'plan') onWidgetPlan(promptId, payload['steps']);
-    else onWidgetReattached(payload['verify']);
-    return;
-  }
-
-  const ui = overlayInstance;
-  if (!ui) return;
-  widgetLiveSinceBind = true;
-  if (event === 'delta' && promptId) {
-    if (!widgetTextMessages.has(promptId)) {
-      widgetTextMessages.add(promptId);
-      ui.apply({ type: 'message.start', id: promptId, role: 'assistant' });
-    }
-    ui.apply({ type: 'message.delta', id: promptId, content: { type: 'text', text: String(payload['text'] ?? '') } });
-  } else if (event === 'thought' && promptId) {
-    const id = `${promptId}:reasoning`;
-    if (!widgetReasoningMessages.has(id)) {
-      widgetReasoningMessages.add(id);
-      ui.apply({ type: 'reasoning.start', id });
-    }
-    ui.apply({ type: 'reasoning.delta', id, content: { type: 'text', text: String(payload['text'] ?? '') } });
-  } else if (event === 'tool') {
-    const id = `tool-${widgetToolSeq++}`;
-    const ok = payload['ok'] === true;
-    ui.apply({
-      type: 'tool.start',
-      id,
-      name: String(payload['name'] ?? 'Tool call'),
-      input: displayJson(payload['arguments'] ?? {}),
-    });
-    ui.apply({
-      type: 'tool.end',
-      id,
-      status: ok ? 'complete' : 'error',
-      output: ok && payload['result'] !== undefined
-        ? [{ type: 'text', text: displayJson(payload['result']) }]
-        : undefined,
-      error: ok ? undefined : String(payload['error'] ?? 'Tool call failed'),
-    });
-  } else if (event === 'done' && promptId) {
-    if (widgetTextMessages.delete(promptId)) ui.apply({ type: 'message.end', id: promptId });
-    const reasoningId = `${promptId}:reasoning`;
-    if (widgetReasoningMessages.delete(reasoningId)) ui.apply({ type: 'reasoning.end', id: reasoningId });
-    const failed = payload['stopReason'] === 'error';
-    ui.apply(failed
-      ? { type: 'run.error', error: String(payload['error'] ?? 'Agent run failed') }
-      : { type: 'run.end' });
-    if (widgetPromptId === promptId) {
-      widgetPromptId = undefined;
-      // The turn is over, so its checklist stops being what the agent intends.
-      // Leaving it up would advertise finished work as current, and the next
-      // turn may produce no plan at all to replace it. (The site panel keeps a
-      // finished plan on screen; that is a bug there, not a difference worth
-      // reproducing — see the report accompanying this change.)
-      if (widgetPlan.length > 0) {
-        widgetPlan = [];
-        ui.plan([]);
-      }
-    }
-  }
-}
-
-/**
- * A plan snapshot for the turn this document believes is running.
- *
- * Replaces the checklist outright — never appended to the transcript, because
- * a plan is revised as the agent discovers work and every revision replayed as
- * a message would read as repetition rather than as progress.
- */
-function onWidgetPlan(promptId: string | undefined, steps: unknown): void {
-  if (!promptId || promptId !== widgetPromptId) {
-    // The turn ended (`done` cleared `widgetPromptId`) or this plan belongs to
-    // one this document never picked up. Rendering it would put a checklist of
-    // intentions above a composer that is idle, so it is dropped — and said out
-    // loud, because a plan for an unknown turn means this document and the
-    // worker disagree about what is running.
-    log.warn('dropped a plan for a turn this document is not running', {
-      data: { promptId: promptId ?? 'missing', running: widgetPromptId ?? 'none' },
-    });
-    return;
-  }
-  const next = sanitizePlanSteps(steps);
-  if (!next) {
-    // The snapshot passed the wire schema before the wallet ever saw it, so
-    // this can only be our own plumbing corrupting it. Keep the last good plan
-    // rather than replace it with a fabricated one, and report it.
-    log.error('dropped a plan snapshot that failed validation inside the extension', {
-      data: { promptId },
-    });
-    return;
-  }
-  widgetPlan = next;
-  overlayInstance?.plan(next);
-}
-
-/**
- * The socket dropped and the wallet put this attachment back on a fresh one.
- *
- * The fingerprint words CHANGE here: ADR-003 mints a new ephemeral keypair per
- * attachment, so anyone comparing them against their daemon's consent screen is
- * now comparing against stale ones. They are therefore persistent state, not a
- * notice that scrolls away.
- */
-function onWidgetReattached(words: unknown): void {
-  widgetVerify = typeof words === 'string' ? words : '';
-  // The turn that was in flight lost its answer, so its plan describes nothing.
-  widgetPlan = [];
-  const lost = widgetPromptId;
-  widgetPromptId = undefined;
-
-  const ui = overlayInstance;
-  if (!ui) {
-    // No panel yet — a reclaim binds this session at document_start. The state
-    // set above is what `showWidgetAttached` puts on screen when one appears,
-    // so nothing is lost; it is only late.
-    log.info('reattached on fresh sealing keys before this document had a panel', {
-      data: { origin: location.origin, lostTurn: Boolean(lost) },
-    });
-    return;
-  }
-  ui.verify(widgetVerify);
-  ui.plan([]);
-  if (!lost) {
-    ui.notice('Reconnected — your agent is back, on new sealing keys.');
-    return;
-  }
-  // Settle the run here rather than waiting for the worker's rejection of that
-  // prompt: `widgetPromptId` has already moved on, so `sendFromWidget`'s error
-  // handler will ignore that reply and the user is told once, not twice. Told,
-  // though — the answer really is gone, and only the agent's own store has what
-  // it did while nobody was listening.
-  ui.apply({ type: 'run.end' });
-  ui.notice('Reconnected on new sealing keys. The turn in flight lost its answer — ask again, or check your agent’s own history.');
-}
-
-/**
- * Close reasons are stable protocol codes, so most render as-is. The one that
- * needs words is `seal_violation` (ADR-019): a sealed frame failed strict
- * validation, and because the AEAD counters advance in lockstep the session
- * cannot skip a frame and survive — the wallet tore it down. Re-attaching is
- * safe and mints fresh keys; the user should know that, not guess it.
- */
-function detachNotice(reason: string): string {
-  return reason === 'seal_violation'
-    ? 'Detached: encrypted traffic in this session failed verification, so it was shut down for safety. Attach again to start a fresh session.'
-    : `Detached: ${reason}`;
-}
-
-function onWidgetClosed(reason: string): void {
-  widgetRef = undefined;
-  widgetPromptId = undefined;
-  widgetAttaching = false;
-  widgetTextMessages.clear();
-  widgetReasoningMessages.clear();
-  // Nothing here describes a live attachment any more. `reset` below clears the
-  // panel's copy; these are the source it would otherwise be restated from.
-  widgetPlan = [];
-  widgetVerify = '';
-  const ui = overlayInstance;
-  ui?.reset();
-  ui?.notice(detachNotice(reason));
-}
+const widget = new WidgetSurface({
+  host: overlayHost,
+  page: {
+    /** What the widget asks for, on a fresh attach and on a reclaim alike. The
+     *  `source` is how the worker knows whether this grant can outlive the
+     *  document that declared it. */
+    connectRequest: (tools: ToolDefinition[], source: WidgetToolSource): PageConnectRequest => ({
+      name: document.title || location.hostname,
+      route: location.pathname,
+      context: { url: location.href, title: document.title, source },
+      tools,
+      alwaysAsk: [],
+    }),
+    webmcpTools: () => webmcpTools,
+    genericTools: genericPageTools,
+    ready: documentReady,
+    origin: () => location.origin,
+  },
+  tell,
+  request,
+  // The routing table stays here, beside the ownership check that reads it. The
+  // widget says which tools its own grant covers; it never says who owns a
+  // session, and it never removes a record — a record dies when the worker says
+  // the session closed.
+  bindSession: (ref, routes) => {
+    records.set(ref, { ref, owner: 'widget', routes });
+  },
+});
 
 // --- boot ------------------------------------------------------------------
 
@@ -1126,7 +716,7 @@ if (window.top === window) {
     // Before anything is rendered, because a tool call the agent issued just
     // before the navigation is already parked in the worker waiting for a
     // document to bind. Failures inside are logged and surfaced there.
-    void reclaimWidget();
+    void widget.reclaim();
     const start = () => overlay().show();
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, { once: true });
     else start();

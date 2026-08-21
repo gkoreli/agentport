@@ -10,6 +10,8 @@ import {
   MAX_FORM_OPTIONS,
   MAX_PLAN_STEPS,
   MAX_PLAN_STEP_CHARS,
+  createLogger,
+  type LogEntry,
 } from '@agentport/protocol';
 
 import {
@@ -18,9 +20,11 @@ import {
   sanitizeFormFields,
   sanitizePlanSteps,
   type AnswerField,
+  type ContentToWorker,
   type PageOutbound,
 } from './src/bridge.js';
 import { leftBehindByNavigation, mayReclaim, reclaimKeyFor } from './src/lifecycle.js';
+import { WidgetSurface, type OverlayBridge, type OverlayHost, type WidgetPage } from './src/widget.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -816,3 +820,422 @@ console.log('extension elicitation round-trip check passed');
 }
 
 console.log('page harness check passed');
+
+// --- the fallback surface's state machine -----------------------------------
+//
+// WHAT THIS COVERS AND WHY IT COULD NOT BEFORE. Until `widget.ts`, all of this
+// was eleven module-scope variables in the content script maintained by
+// convention across ten functions, and every hazard below — a plan arriving for
+// a turn this document is not running, a `reattached` landing before any panel
+// exists, a history replay racing live output, a late frame for an attachment
+// that has already gone — was a cross-check between two of them. Reaching any of
+// it needed a real browser AND a paired agent AND a relay, which is to say
+// nothing reached it: `scripts/extension-ui-smoke.ts` proves the panel renders
+// in extension origin and is unreachable from the page, and cannot drive a
+// single one of these transitions.
+//
+// `WidgetSurface` takes its dependencies, so a recording bridge and a
+// hand-driven wallet are enough. Two deliberate choices about what is asserted:
+// the panel is observed through the COMMANDS it receives, in order, because
+// order is the property in three of the four hazards; and a log is matched on
+// its LEVEL and its structured `data`, never on its prose, so a copy edit
+// cannot quietly turn one of these into a check that no longer looks (rule 4).
+
+interface Drawn {
+  call: string;
+  arg?: unknown;
+}
+
+interface PendingRequest {
+  message: ContentToWorker;
+  answer(value: unknown): void;
+  fail(message: string): void;
+}
+
+/** A `WidgetSurface` with every browser-shaped dependency replaced by something
+ *  this file can drive and read back. */
+function widgetFixture(options: { webmcp?: { name: string }[] } = {}) {
+  const drawn: Drawn[] = [];
+  const told: ContentToWorker[] = [];
+  const logs: LogEntry[] = [];
+  const bound: { ref: string; tools: string[] }[] = [];
+  const pending: PendingRequest[] = [];
+  const state = { opened: 0, panel: undefined as OverlayBridge | undefined };
+  let letDocumentLoad = (): void => {};
+  const ready = new Promise<void>((resolve) => {
+    letDocumentLoad = () => resolve();
+  });
+
+  const bridge: OverlayBridge = {
+    show: () => drawn.push({ call: 'show' }),
+    setState: (phase, agentName) =>
+      drawn.push(agentName === undefined ? { call: 'setState', arg: phase } : { call: 'setState', arg: `${phase}:${agentName}` }),
+    addUserMessage: (content) => drawn.push({ call: 'addUserMessage', arg: content }),
+    // `arg` is omitted rather than set to undefined when an update has no id:
+    // `deepEqual` counts an own key holding undefined, and an expectation
+    // littered with `arg: undefined` is one nobody reads.
+    apply: (update) =>
+      drawn.push('id' in update ? { call: `apply:${update.type}`, arg: update.id } : { call: `apply:${update.type}` }),
+    notice: (text) => drawn.push({ call: 'notice', arg: text }),
+    plan: (steps) => drawn.push({ call: 'plan', arg: steps.map((step) => step.text) }),
+    verify: (words) => drawn.push({ call: 'verify', arg: words }),
+    reset: () => drawn.push({ call: 'reset' }),
+  };
+
+  const host: OverlayHost = {
+    open: () => {
+      if (!state.panel) {
+        state.opened += 1;
+        state.panel = bridge;
+      }
+      return state.panel;
+    },
+    panel: () => state.panel,
+  };
+
+  const page: WidgetPage = {
+    connectRequest: (tools, source) => ({
+      name: 'Shop',
+      route: '/cart',
+      context: { url: 'https://shop.example/cart', title: 'Shop', source },
+      tools,
+      alwaysAsk: [],
+    }),
+    webmcpTools: () => (options.webmcp ?? []).map((tool) => ({ ...tool, description: tool.name, inputSchema: { type: 'object' } })),
+    genericTools: () => [
+      {
+        name: 'page.readText',
+        description: 'Read the visible text of this page',
+        inputSchema: { type: 'object' },
+        handler: () => ({ text: 'copy a person can read' }),
+      },
+    ],
+    ready: () => ready,
+    origin: () => 'https://shop.example',
+  };
+
+  const widget = new WidgetSurface({
+    host,
+    page,
+    tell: (message) => told.push(message),
+    request<T>(build: (rid: string) => ContentToWorker): Promise<T> {
+      return new Promise<T>((resolve, reject) => {
+        pending.push({
+          message: build('q_check'),
+          answer: (value) => resolve(value as T),
+          fail: (message) => reject(new Error(message)),
+        });
+      });
+    },
+    bindSession: (ref, routes) => bound.push({ ref, tools: [...routes.keys()] }),
+    // Pinned to `debug` rather than left to the ambient level: an assertion that
+    // stops seeing its log because AGENTPORT_LOG happened to be set is an
+    // assertion that reports green when it cannot look.
+    log: createLogger('check.widget', { level: 'debug', sink: (entry) => logs.push(entry) }),
+  });
+
+  return {
+    widget,
+    told,
+    bound,
+    pending,
+    /** Panels BUILT, not panels shown: a frame arriving before the document is
+     *  ready must not conjure an iframe as a side effect of being handled. */
+    get opened() {
+      return state.opened;
+    },
+    /** Everything drawn since the last call, so an assertion names one
+     *  transition instead of the whole history. */
+    since: () => drawn.splice(0),
+    logsSince: () => logs.splice(0).map((entry) => ({ level: entry.level, data: entry.data })),
+    /** DOMContentLoaded. */
+    letDocumentLoad: () => letDocumentLoad(),
+    /** The page removed our host element, or the frame reloaded under the port. */
+    tearDownPanel: () => {
+      state.panel = undefined;
+    },
+  };
+}
+
+type WidgetFixture = ReturnType<typeof widgetFixture>;
+
+function nextRequest<T extends ContentToWorker['t']>(
+  fixture: WidgetFixture,
+  t: T,
+  label: string,
+): PendingRequest & { message: Extract<ContentToWorker, { t: T }> } {
+  const request = fixture.pending.shift();
+  assert.ok(request, `${label}: the widget asked the wallet for nothing`);
+  assert.equal(request.message.t, t, `${label}: the widget asked the wallet for the wrong thing`);
+  return request as PendingRequest & { message: Extract<ContentToWorker, { t: T }> };
+}
+
+const planStep = (text: string) => ({ text, status: 'pending' as const });
+
+/** Attach, answer the consent round-trip, and hand back a live widget. */
+async function attachedFixture(ref: string, verify = 'six little words go right here'): Promise<WidgetFixture> {
+  const fixture = widgetFixture();
+  void fixture.widget.attach();
+  nextRequest(fixture, 'connect', 'attach').answer({ ref, info: { agentName: 'VPS Agent', verify } });
+  await settle();
+  fixture.since();
+  fixture.logsSince();
+  return fixture;
+}
+
+// 0. The attach round-trip itself, so the fixtures below stand on something
+//    that was checked rather than assumed.
+{
+  const fixture = widgetFixture();
+  void fixture.widget.attach();
+  assert.equal(fixture.opened, 1, 'pressing Attach did not build a panel');
+  assert.deepEqual(fixture.since(), [{ call: 'setState', arg: 'attaching' }]);
+
+  const connect = nextRequest(fixture, 'connect', 'attach');
+  assert.equal(connect.message.from, 'widget');
+  assert.deepEqual(connect.message.request.tools.map((tool) => tool.name), ['page.readText']);
+  assert.equal(
+    connect.message.request.context?.['source'],
+    'page-dom',
+    'the grant did not say whose tools these are, so the consent window cannot either',
+  );
+  connect.answer({ ref: 's_attached', info: { agentName: 'VPS Agent', verify: 'six little words go right here' } });
+  await settle();
+
+  assert.deepEqual(fixture.bound, [{ ref: 's_attached', tools: ['page.readText'] }], 'the agent got tools nobody could answer');
+  const shown = fixture.since();
+  assert.deepEqual(shown.map((entry) => entry.call), ['setState', 'verify', 'plan', 'notice']);
+  assert.deepEqual(shown[0], { call: 'setState', arg: 'attached:VPS Agent' });
+  assert.deepEqual(shown[1], { call: 'verify', arg: 'six little words go right here' });
+  assert.deepEqual(shown[2], { call: 'plan', arg: [] }, 'a fresh attachment showed a checklist from somewhere');
+}
+
+// 1. A plan for a turn this document is not running is DROPPED, and said out
+//    loud. A plan is a claim about what the agent intends now; rendering one
+//    above an idle composer, or one belonging to a turn this document never
+//    picked up, states an intention the agent did not have.
+{
+  const fixture = await attachedFixture('s_plan');
+  assert.equal(fixture.widget.send('summarise this page'), true, 'the composer refused a live attachment');
+  const promptId = nextRequest(fixture, 'prompt', 'send').message.promptId;
+  fixture.since();
+
+  // The control: the turn that IS running renders, and logs nothing.
+  fixture.widget.event('plan', { promptId, steps: [planStep('Read the draft')] });
+  assert.deepEqual(fixture.since(), [{ call: 'plan', arg: ['Read the draft'] }]);
+  assert.deepEqual(fixture.logsSince(), [], 'the plan this document is running was treated as an anomaly');
+
+  // A turn this document never picked up.
+  fixture.widget.event('plan', { promptId: `${promptId}x`, steps: [planStep('Empty the cart')] });
+  assert.deepEqual(fixture.since(), [], 'a plan for another turn was rendered');
+  assert.deepEqual(fixture.logsSince(), [{ level: 'warn', data: { promptId: `${promptId}x`, running: promptId } }]);
+
+  // No turn on it at all.
+  fixture.widget.event('plan', { steps: [planStep('Empty the cart')] });
+  assert.deepEqual(fixture.since(), [], 'a plan belonging to no turn was rendered');
+  assert.deepEqual(fixture.logsSince(), [{ level: 'warn', data: { promptId: 'missing', running: promptId } }]);
+
+  // The turn finishes: its checklist stops being current and is cleared, so a
+  // plan arriving afterwards is a plan for a turn nothing is running.
+  fixture.widget.event('done', { promptId });
+  assert.deepEqual(fixture.since(), [{ call: 'apply:run.end' }, { call: 'plan', arg: [] }]);
+  fixture.widget.event('plan', { promptId, steps: [planStep('Read the draft')] });
+  assert.deepEqual(fixture.since(), [], 'a finished turn kept its checklist on screen');
+  assert.deepEqual(fixture.logsSince(), [{ level: 'warn', data: { promptId, running: 'none' } }]);
+}
+
+// 2. A `reattached` that lands before this document has a panel.
+//
+//    Two different states wear the same face and behave differently, which is
+//    exactly why this was worth extracting: nothing bound at all (drop it), and
+//    an attachment bound at document_start with nowhere yet to draw (record it,
+//    draw it when a panel appears).
+{
+  const orphan = widgetFixture();
+  orphan.widget.event('reattached', { verify: 'words for nobody' });
+  assert.deepEqual(orphan.since(), [], 'a frame for no attachment drew somewhere');
+  assert.equal(orphan.opened, 0, 'handling a frame for no attachment built a panel');
+  assert.deepEqual(orphan.logsSince(), [{ level: 'info', data: { event: 'reattached' } }]);
+
+  const fixture = widgetFixture();
+  void fixture.widget.reclaim();
+  nextRequest(fixture, 'resume', 'reclaim').answer({
+    ref: 's_reclaimed',
+    info: { agentName: 'VPS Agent', verify: 'stale words nobody may compare' },
+    activePrompts: ['p_000000000000000000000001'],
+    plan: [planStep('Read the draft')],
+  });
+  await settle();
+  // Bound before the DOM, because a tool call the agent issued just before the
+  // navigation is parked in the wallet waiting for a document to answer it.
+  assert.deepEqual(fixture.bound, [{ ref: 's_reclaimed', tools: ['page.readText'] }], 'a parked tool call had nowhere to route');
+  assert.equal(fixture.opened, 0, 'the reclaim built a panel before the document was ready');
+  assert.deepEqual(fixture.since(), []);
+  assert.deepEqual(fixture.logsSince(), []);
+
+  // The socket drops and the wallet puts the attachment on fresh sealing keys —
+  // still with no panel in this document.
+  fixture.widget.event('reattached', { verify: 'fresh words for fresh keys' });
+  assert.deepEqual(fixture.since(), [], 'the widget drew into a panel that does not exist');
+  assert.deepEqual(fixture.logsSince(), [
+    { level: 'info', data: { origin: 'https://shop.example', lostTurn: true } },
+  ]);
+
+  fixture.letDocumentLoad();
+  await settle();
+  // The panel appears and is told the CURRENT attachment, not the snapshot the
+  // reclaim carried: the fingerprint words that are comparable now, no plan
+  // (the turn that had one lost its answer), and no running turn.
+  const shown = fixture.since();
+  assert.equal(fixture.opened, 1, 'the document was ready and no panel appeared');
+  assert.deepEqual(shown.slice(0, 4), [
+    { call: 'show' },
+    { call: 'setState', arg: 'attached:VPS Agent' },
+    { call: 'verify', arg: 'fresh words for fresh keys' },
+    { call: 'plan', arg: [] },
+  ]);
+  assert.ok(
+    !shown.some((entry) => entry.call === 'apply:run.start'),
+    'the composer offered Stop for a turn whose answer was already lost',
+  );
+  nextRequest(fixture, 'history', 'rehydrate').answer([]);
+  await settle();
+}
+
+// 3. A history replay racing live output.
+//
+//    The transcript lives in the agent's own store and is asked for after the
+//    panel appears, so the agent can speak into this panel while that request is
+//    in flight. Replaying then would DELETE words the user is already reading.
+{
+  const reattach = async (): Promise<{ fixture: WidgetFixture; history: PendingRequest }> => {
+    const fixture = widgetFixture();
+    void fixture.widget.reclaim();
+    nextRequest(fixture, 'resume', 'reclaim').answer({
+      ref: 's_history',
+      info: { agentName: 'VPS Agent', verify: 'one two three four five six' },
+    });
+    await settle();
+    fixture.letDocumentLoad();
+    await settle();
+    const history = nextRequest(fixture, 'history', 'rehydrate');
+    fixture.since();
+    fixture.logsSince();
+    return { fixture, history };
+  };
+
+  // Quiet: the replay runs, and the ORDER is the property. `reset` first,
+  // because a replay is the whole transcript; the attachment's own state
+  // restated afterwards, because `reset` cleared the panel's copy of it.
+  {
+    const { fixture, history } = await reattach();
+    history.answer([
+      { role: 'user', text: 'What does this page say?', at: 0 },
+      { role: 'agent', text: 'It sells shoes.', at: 0 },
+    ]);
+    await settle();
+    assert.deepEqual(fixture.since().map((entry) => entry.call), [
+      'reset',
+      'addUserMessage',
+      'apply:message.start',
+      'apply:message.delta',
+      'apply:message.end',
+      'setState',
+      'verify',
+      'plan',
+      'notice',
+    ]);
+  }
+
+  // Racing: the agent spoke to THIS panel first.
+  {
+    const { fixture, history } = await reattach();
+    fixture.widget.event('delta', { promptId: 'p_000000000000000000000002', text: 'the agent is already talking' });
+    assert.deepEqual(fixture.since().map((entry) => entry.call), ['apply:message.start', 'apply:message.delta']);
+
+    history.answer([
+      { role: 'user', text: 'What does this page say?', at: 0 },
+      { role: 'agent', text: 'It sells shoes.', at: 0 },
+    ]);
+    await settle();
+    const after = fixture.since();
+    assert.ok(!after.some((entry) => entry.call === 'reset'), 'a history replay deleted the words the user was reading');
+    // Told, rather than silently short — the rest of the conversation is still
+    // somewhere, and the user is the one who has to know where. The sentence is
+    // deliberately not keyed on; that a notice happened at all is the property.
+    assert.deepEqual(after.map((entry) => entry.call), ['notice']);
+  }
+}
+
+// 4. Close clears the in-flight state, so a late frame cannot resurrect a dead
+//    widget and the next attachment does not inherit its bookkeeping.
+{
+  const fixture = await attachedFixture('s_closing');
+  assert.equal(fixture.widget.send('write the summary'), true);
+  const promptId = nextRequest(fixture, 'prompt', 'send').message.promptId;
+  fixture.widget.event('plan', { promptId, steps: [planStep('Read the draft')] });
+  fixture.widget.event('delta', { promptId, text: 'working on it' });
+  fixture.since();
+  fixture.logsSince();
+
+  fixture.widget.closed('agent_gone');
+  assert.deepEqual(fixture.since(), [{ call: 'reset' }, { call: 'notice', arg: 'Detached: agent_gone' }]);
+  // One close reason is not a code to print: a sealed session that failed
+  // verification was torn down for safety and re-attaching is the fix, which the
+  // user cannot guess from the word. Keyed on the protocol code, not the prose.
+  fixture.widget.closed('seal_violation');
+  assert.notDeepEqual(
+    fixture.since()[1],
+    { call: 'notice', arg: 'Detached: seal_violation' },
+    'a session torn down for failing verification was reported as a bare protocol code',
+  );
+
+  // Late frames for the turn that was in flight. They report the ATTACHMENT is
+  // gone rather than that the turn moved on — two different disagreements, and
+  // the one that fires says which.
+  fixture.widget.event('plan', { promptId, steps: [planStep('Empty the cart')] });
+  fixture.widget.event('reattached', { verify: 'words for a session that ended' });
+  assert.deepEqual(fixture.since(), [], 'a frame for a closed attachment reached the panel');
+  assert.deepEqual(fixture.logsSince(), [
+    { level: 'info', data: { event: 'plan' } },
+    { level: 'info', data: { event: 'reattached' } },
+  ]);
+
+  // The composer cannot drive a dead attachment, and asks the wallet nothing.
+  assert.equal(fixture.widget.send('are you there?'), false, 'a closed widget accepted a prompt');
+  assert.deepEqual(fixture.pending, [], 'a closed widget put a prompt on the wire');
+  assert.deepEqual(fixture.since(), []);
+
+  // And the next attachment starts clean: the dead turn's transcript
+  // bookkeeping went with it, so an id it used opens a fresh message instead of
+  // streaming into one this panel never started.
+  void fixture.widget.attach();
+  nextRequest(fixture, 'connect', 're-attach').answer({ ref: 's_again', info: { agentName: 'VPS Agent' } });
+  await settle();
+  fixture.since();
+  fixture.widget.event('delta', { promptId, text: 'a new turn, an old id' });
+  assert.deepEqual(fixture.since(), [
+    { call: 'apply:message.start', arg: promptId },
+    { call: 'apply:message.delta', arg: promptId },
+  ]);
+}
+
+// 5. The panel dies while the consent window is open. There is nowhere to draw
+//    the attachment, so it is handed straight back rather than left open with
+//    nothing driving it — and nothing is bound to a document that cannot answer.
+{
+  const fixture = widgetFixture();
+  void fixture.widget.attach();
+  const connect = nextRequest(fixture, 'connect', 'attach');
+  fixture.tearDownPanel();
+  connect.answer({ ref: 's_orphan', info: { agentName: 'VPS Agent' } });
+  await settle();
+  assert.deepEqual(fixture.bound, [], 'an attachment was bound into a document with no surface');
+  assert.deepEqual(
+    fixture.told,
+    [{ t: 'close', ref: 's_orphan', reason: 'widget_removed' }],
+    'an attachment outlived the panel that was meant to drive it',
+  );
+}
+
+console.log('widget surface check passed');

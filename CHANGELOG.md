@@ -10,7 +10,25 @@ they moved.
 
 ## Unreleased
 
-### `agentport doctor`, and a preflight before any pairing code
+### The widget's state machine became an object its checks can drive
+
+The extension's fallback surface was eleven module-scope variables in
+`content.ts` maintained by convention across ten functions, and every hazard
+its comments warned about — a plan arriving for a turn this document is not
+running, a `reattached` landing before any panel exists, a history replay
+racing live output, a late frame for a dead attachment — was a cross-check
+between two of them, reachable only through a real browser. `WidgetSurface`
+(`packages/extension/src/widget.ts`) now owns that state with everything
+browser-shaped injected, so `packages/extension/check.ts` drives the
+transitions directly: each hazard has an assertion, and each assertion was
+watched failing by breaking exactly the transition it guards. The mediator
+half of `content.ts` deliberately stays whole — the page validator and the
+maps it checks are one boundary. One variable was deleted rather than moved
+(`widgetSurfaceAlive` restated what the panel's existence already answered),
+and one pre-existing race was found and named at the site rather than fixed
+under a refactor's no-behavior-change claim: the grant is snapshotted before
+the consent await while WebMCP routes are built after it, so a page that
+re-registers during consent can leave a granted tool with no route.
 
 The default runtime — Claude Code over ACP — had an undeclared prerequisite:
 the adapter has to be fetchable, runnable, and logged in, and nothing checked
