@@ -19,6 +19,20 @@ export interface TurnContext {
   surface: SurfaceDescriptor;
   grant: CapabilityGrant;
   tools: ToolDefinition[];
+  /**
+   * The prompt frame's own `context` field, when the page sent one.
+   *
+   * Page-authored DATA, never instructions — the same standing rule as every
+   * tool result. It is validated and bounded on the wire (`Prompt.context`),
+   * sealed in transit, and handed here untouched; a runtime that surfaces it
+   * to its model must frame it as untrusted data. The attachment-scoped
+   * counterpart rides on `surface.context` and needs no second field.
+   *
+   * This field existed on the wire for as long as the frame did and was then
+   * dropped on the daemon floor — a shipped affordance that did nothing,
+   * which is worse than an absent one because the types promised otherwise.
+   */
+  context?: Record<string, unknown>;
   /** Streamed to the user as assistant output. */
   say(text: string): void;
   /** Streamed to the user as status/reasoning, rendered separately. */

@@ -20,6 +20,7 @@
     "webmcp:harvest": "tsx scripts/webmcp-harvest.ts",
     "wire:check": "tsx scripts/wire-check.ts",
     "acp:check": "tsx scripts/acp-permission-check.ts",
+    "runtime:check": "tsx scripts/acp-runtime-check.ts",
     "agui:check": "tsx packages/agui/check.ts",
     "build:extension": "tsx packages/extension/build.ts",
     "check:extension": "npm run check -w @agentport/extension",

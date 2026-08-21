@@ -10,6 +10,23 @@ they moved.
 
 ## Unreleased
 
+### Page context finally reaches the agent
+
+`SurfaceDescriptor.context` and `Prompt.context` were validated, bounded,
+sealed, routed, delivered — and then dropped on the daemon floor, for as
+long as both fields existed. A shipped affordance that did nothing is worse
+than an absent one, because the types promised otherwise. The prompt's
+`context` now rides `TurnContext`, and `AcpRuntime` serializes both
+channels into the turn preamble under the same framing as tool results —
+page-authored data, never instructions — bounded so a site cannot crowd
+the user's own prompt out of the model's window, with truncation announced
+rather than silent. Two checks keep it threaded: `npm run runtime:check`
+drives the real runtime against a scripted echo agent and asserts what the
+AGENT received (absent context renders no line at all; oversized context
+truncates loudly), and e2e §24 sends both channels through a real wallet,
+relay and daemon and asserts what the runtime observed. Both watched
+failing — the e2e sabotage discriminates: the surface channel stays green
+while the dropped prompt channel goes red.
 ### `npm run typecheck` covers the esbuild-bundled projects, ending the forgettable-command class
 
 The consent-window follow-up changed `askApproval`'s signature and updated
@@ -23,6 +40,7 @@ by a sibling stream's clean-worktree gates. The call sites are fixed, and
 `typecheck:bundled` folds all five out-of-reference projects into
 `npm run typecheck`, so the local command now equals what CI's verify job
 already ran.
+||||||| parent of 20e6490 (daemon: thread page context into the agent's turn)
 
 ### The daemon's transport and wire-bounding move out of the session aggregate
 

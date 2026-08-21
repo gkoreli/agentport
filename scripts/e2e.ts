@@ -3507,6 +3507,69 @@ console.log('\n23. an approval nobody answers declines (ADR-023/ADR-024)');
   await r23.close();
 }
 
+// --- 24. page context crosses the wire into the runtime ---------------------
+// `SurfaceDescriptor.context` and `Prompt.context` were validated, sealed,
+// delivered — and dropped by the daemon, for as long as both fields existed.
+// This section is why that cannot silently happen again: a real wallet sends
+// both channels over a real socket, and the assertion is what the RUNTIME
+// observed, not what anything intended.
+console.log('\n24. page context reaches the runtime turn');
+{
+  const r24 = new Relay({ port: 0, sink: () => {} });
+  await r24.listening();
+  const url24 = `ws://127.0.0.1:${r24.port}`;
+  const user24 = generateKeyPair();
+  const agent24 = generateKeyPair();
+  const cert24 = signCert(user24.secretKey, {
+    user: user24.publicKey,
+    agent: agent24.publicKey,
+    name: 'Context Agent',
+    runtime: 'context-probe',
+    issuedAt: Date.now(),
+  });
+
+  const observed = new Deferred<{ surface: unknown; prompt: unknown }>();
+  class ContextProbeRuntime implements AgentRuntime {
+    readonly name = 'context-probe';
+    async prompt(_text: string, ctx: TurnContext): Promise<void> {
+      observed.resolve({ surface: ctx.surface.context, prompt: ctx.context });
+      ctx.say('seen');
+    }
+  }
+
+  const daemon24 = new AgentDaemon({
+    relayUrl: url24,
+    identity: { ...agent24, name: 'Context Agent', runtime: 'context-probe', cert: cert24 },
+    createRuntime: () => new ContextProbeRuntime(),
+  });
+  await daemon24.start();
+
+  const wallet24 = new AgentWallet({ relayUrl: url24, userSecretKey: user24.secretKey, socketFactory });
+  await wallet24.connect();
+  const session24 = await wallet24.openSession({
+    agent: agent24.publicKey,
+    surface: { name: 'Context Surface', origin: 'https://context.test', context: { theme: 'dark' } },
+    tools: [],
+  });
+  await session24.prompt('what do you see?', { ticket: 'T-42' });
+  const seen = await observed.promise;
+  check(
+    'the surface context reached the runtime turn',
+    JSON.stringify(seen.surface) === '{"theme":"dark"}',
+    seen.surface,
+  );
+  check(
+    'the prompt context reached the runtime turn',
+    JSON.stringify(seen.prompt) === '{"ticket":"T-42"}',
+    seen.prompt,
+  );
+
+  session24.close();
+  wallet24.close();
+  await daemon24.stop();
+  await r24.close();
+}
+
 // --- teardown ---------------------------------------------------------------
 
 session.close();

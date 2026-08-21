@@ -1340,6 +1340,7 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
       surface: session.surface,
       grant: session.grant,
       tools: session.tools,
+      ...(frame.context !== undefined ? { context: frame.context } : {}),
       signal: controller.signal,
       ask: (question, signal) => this.#ask(session, question, signal),
       say: (text) => {
