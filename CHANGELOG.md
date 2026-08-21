@@ -10,6 +10,21 @@ they moved.
 
 ## Unreleased
 
+### ADR-026: the agent gets a different name at every door — proposed, and gating the store
+
+Every site learns the agent's stable root key today (the relay-stamped
+`agent` on session.opened; the hosted tier's page-held delegation), which is
+a cross-origin supercookie: two sites comparing notes learn they met the
+same person. ADR-026 proposes per-origin Ed25519 identities derived by HKDF
+from the root seed — pages see a pairwise key authenticated through the EPK
+proof transcript that already signs the agent's name into itself; the relay
+and owner-key clients keep seeing root; delegations narrow their replay
+scope per-origin for free. One open problem is recorded honestly (how the
+connect tier names an agent it must not learn), scoped to protocol v8, with
+the hard gate stated: no Chrome Web Store submission before pairwise
+identity ships, because the identifier a stranger's site first sees is the
+one it keeps forever.
+
 ### A live grant can be reconciled — narrowing freely, widening only with fresh authority
 
 The capability grant froze at attach time: a WebMCP `toolchange` had no

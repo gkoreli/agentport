@@ -1160,3 +1160,31 @@ a hole this exposed rather than fixing it: page-answered `runtime_own_tool`
 approvals are wrong for the same reason, the wallet-origin redirect that
 looked like the fix cannot work (a popup needs user activation an
 agent-initiated approval does not have), and the answer is the same refusal.
+
+---
+
+## ADR-026: Pairwise agent identity — proposed (2026-08-21)
+
+Full record: [`ADR-026-pairwise-agent-identity.md`](ADR-026-pairwise-agent-identity.md).
+
+Every site a user attaches to learns the agent's stable root public key —
+from the relay-stamped `agent` on `session.opened` and, in the hosted tier,
+from the delegation the page holds. Two origins comparing notes learn they
+met the same agent, and therefore the same person: a supercookie ADR-009
+already named as blocking, with a clock on it — after a store listing, sites
+persist whatever identifier they first see, and it can never change again.
+
+The proposal: page-facing surfaces learn a per-origin Ed25519 identity
+derived by HKDF from the root seed and the origin; the relay and every
+owner-key client keep seeing root. The page loses nothing verifiable — its
+anchor was always TOFU plus the fingerprint words, and the EPK proof
+transcript already names the agent inside what gets signed, so the pairwise
+key is authenticated by the proof rather than asserted beside it.
+Delegations name the pairwise key, which narrows replay scope per-origin for
+free; the relay's structural agent clause moves wholly to the daemon, which
+was always the authoritative judge. One genuinely open problem is recorded
+rather than waved at: the connect tier's page must be able to NAME the agent
+without learning root, and the candidate answer (socket-lifetime pairwise
+aliases at the relay) must be prototyped against reconnect ordering before
+any of this merges. Protocol v8, lockstep, and a hard gate: no store
+submission before it ships.
