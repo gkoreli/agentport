@@ -34,6 +34,20 @@ interface Registration {
   mcp: McpServer;
   transport: StreamableHTTPServerTransport;
   ready: Promise<void>;
+  /** The agent's MCP client completed `initialize` against this endpoint. */
+  initialized: boolean;
+  /** ...and asked what tools exist — the moment the lent toolset became real. */
+  listed: boolean;
+  /** What the client said it was, for the log line that joins the two sides. */
+  client?: string;
+}
+
+/** What the agent's MCP client has actually done with a registration. */
+export interface BridgeHealth {
+  registered: boolean;
+  initialized: boolean;
+  listed: boolean;
+  client?: string;
 }
 
 /**
@@ -45,6 +59,29 @@ interface Registration {
  *
  * Reference implementation:
  * https://github.com/modelcontextprotocol/typescript-sdk/tree/v1.x/src/server
+ *
+ * WHICH MCP THIS SPEAKS, VERIFIED RATHER THAN ASSUMED (2026-08-20). The
+ * consumer of this server is the MCP client inside the ACP agent — for the
+ * default runtime, the client bundled in `@anthropic-ai/claude-agent-sdk`,
+ * whose bundle carries the protocol dialects `2025-06-18` and `2025-11-25`
+ * and nothing newer. This server runs `@modelcontextprotocol/sdk` 1.30.0 —
+ * npm's `latest` — whose newest dialect is `2025-11-25` with negotiation back
+ * to 2024-10-07. The 2026-07-28 MCP revision (initialize removed,
+ * `server/discover`, `resultType`, MRTR replacing server-initiated
+ * elicitation) exists in NO published SDK on either side of this connection,
+ * so "cut the bridge over" is not currently an action: both ends already
+ * speak the newest dialect that ships. MRTR is unreachable for the same
+ * reason, and this bridge declares no elicitation capability anyway — the
+ * ask/approval round-trip is ACP-level, judged by `AttachmentAuthority`.
+ *
+ * THE FAILURE THAT MUST BE LOUD instead: when the ecosystem does move, the
+ * first symptom of a dialect mismatch is an agent whose MCP client
+ * initializes and then never lists tools — a lent toolset that silently does
+ * not exist, indistinguishable from a site that lent nothing. `health()`
+ * exists so the runtime can SAY that (see `AcpRuntime`), and the cutover
+ * plan is a dependency bump gated on the bundled client actually moving,
+ * announced by that same health signal going red in `runtime:check`'s happy
+ * path if the two SDKs ever stop overlapping.
  */
 export class McpBridge {
   #server: HttpServer | undefined;
@@ -111,6 +148,20 @@ export class McpBridge {
       mcp,
       transport,
       ready: Promise.resolve(),
+      initialized: false,
+      listed: false,
+    };
+    // The SDK's own initialization hook, not a transport sniff: it fires after
+    // version negotiation succeeded, which is exactly the boundary a dialect
+    // mismatch fails at.
+    mcp.oninitialized = () => {
+      registration.initialized = true;
+      const version = mcp.getClientVersion();
+      if (version) registration.client = `${version.name} ${version.version}`;
+      this.#log.info('MCP client initialized against the lent toolset', {
+        sessionId,
+        data: { client: registration.client },
+      });
     };
     this.#installHandlers(sessionId, registration);
     registration.ready = mcp.connect(transport);
@@ -149,47 +200,83 @@ export class McpBridge {
     await registration.transport.handleRequest(req, res);
   }
 
+  /**
+   * What the agent's MCP client has done with a session's lent tools.
+   *
+   * `listed: false` after a completed turn means the lent toolset does not
+   * exist from the agent's point of view — the invisible-diminishment failure
+   * this codebase keeps re-learning, and the first symptom of a protocol
+   * dialect mismatch when the MCP ecosystem moves again. The caller that can
+   * say so to the user is the runtime; this only answers.
+   */
+  health(sessionId: string): BridgeHealth {
+    const registration = this.#sessions.get(sessionId);
+    if (!registration) return { registered: false, initialized: false, listed: false };
+    return {
+      registered: true,
+      initialized: registration.initialized,
+      listed: registration.listed,
+      ...(registration.client === undefined ? {} : { client: registration.client }),
+    };
+  }
+
   #installHandlers(sessionId: string, registration: Registration): void {
-    registration.mcp.setRequestHandler(ListToolsRequestSchema, async (): Promise<{ tools: Tool[] }> => ({
+    registration.mcp.setRequestHandler(ListToolsRequestSchema, async (): Promise<{ tools: Tool[] }> => {
+      registration.listed = true;
+      return this.#listTools(registration);
+    });
+    registration.mcp.setRequestHandler(CallToolRequestSchema, (request, extra) =>
+      this.#callTool(sessionId, registration, request.params, extra.signal),
+    );
+  }
+
+  #listTools(registration: Registration): { tools: Tool[] } {
+    return {
       tools: registration.tools.map((tool) => ({
         name: mcpToolName(tool.name),
         description: tool.description,
         inputSchema: tool.inputSchema as Tool['inputSchema'],
       })),
-    }));
-    registration.mcp.setRequestHandler(CallToolRequestSchema, async (request, extra): Promise<CallToolResult> => {
-      const original = registration.names.get(request.params.name);
-      if (!original) {
-        return { content: [{ type: 'text', text: `unknown tool ${request.params.name}` }], isError: true };
-      }
-      const startedAt = Date.now();
-      this.#log.info('MCP tool call started', { sessionId, data: { tool: original } });
-      try {
-        const result = await registration.invoke(
-          original,
-          (request.params.arguments ?? {}) as Record<string, unknown>,
-          extra.signal,
-        );
-        this.#log.info('MCP tool call completed', {
-          sessionId,
-          data: { tool: original, durationMs: Date.now() - startedAt },
-        });
-        return {
-          content: [{ type: 'text', text: JSON.stringify(result ?? null) }],
-          structuredContent: result && typeof result === 'object' && !Array.isArray(result)
-            ? result as Record<string, unknown>
-            : undefined,
-          isError: false,
-        };
-      } catch (err) {
-        const error = toErr(err);
-        this.#log.warn(extra.signal.aborted ? 'MCP tool call cancelled' : 'MCP tool call failed', {
-          sessionId,
-          err,
-          data: { tool: original, durationMs: Date.now() - startedAt },
-        });
-        return { content: [{ type: 'text', text: error.message }], isError: true };
-      }
-    });
+    };
+  }
+
+  async #callTool(
+    sessionId: string,
+    registration: Registration,
+    params: { name: string; arguments?: unknown },
+    signal: AbortSignal,
+  ): Promise<CallToolResult> {
+    const original = registration.names.get(params.name);
+    if (!original) {
+      return { content: [{ type: 'text', text: `unknown tool ${params.name}` }], isError: true };
+    }
+    const startedAt = Date.now();
+    this.#log.info('MCP tool call started', { sessionId, data: { tool: original } });
+    try {
+      const result = await registration.invoke(
+        original,
+        (params.arguments ?? {}) as Record<string, unknown>,
+        signal,
+      );
+      this.#log.info('MCP tool call completed', {
+        sessionId,
+        data: { tool: original, durationMs: Date.now() - startedAt },
+      });
+      return {
+        content: [{ type: 'text', text: JSON.stringify(result ?? null) }],
+        structuredContent: result && typeof result === 'object' && !Array.isArray(result)
+          ? result as Record<string, unknown>
+          : undefined,
+        isError: false,
+      };
+    } catch (err) {
+      const error = toErr(err);
+      this.#log.warn(signal.aborted ? 'MCP tool call cancelled' : 'MCP tool call failed', {
+        sessionId,
+        err,
+        data: { tool: original, durationMs: Date.now() - startedAt },
+      });
+      return { content: [{ type: 'text', text: error.message }], isError: true };
+    }
   }
 }

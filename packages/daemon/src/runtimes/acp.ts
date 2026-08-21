@@ -214,6 +214,10 @@ export class AcpRuntime implements AgentRuntime {
   #replay: HistoryEntry[] | undefined;
   /** Kept so a replay can re-declare the same MCP servers. */
   #mcpServers: McpServer[] = [];
+  /** How many tools the surface lent, for the never-listed warning. */
+  #lentToolCount = 0;
+  /** The never-listed warning is stated once per session, not per turn. */
+  #warnedUnlisted = false;
 
   constructor(options: AcpRuntimeOptions) {
     this.#options = options;
@@ -323,6 +327,8 @@ export class AcpRuntime implements AgentRuntime {
 
     // Register the surface's tools and hand the agent their endpoint.
     await this.#options.bridge.start();
+    this.#lentToolCount = context.tools.length;
+    this.#warnedUnlisted = false;
     this.#bridgeSessionId = `s_${Math.random().toString(36).slice(2, 12)}`;
     const { url, token } = this.#options.bridge.register(
       this.#bridgeSessionId,
@@ -392,6 +398,7 @@ export class AcpRuntime implements AgentRuntime {
         { sessionId, prompt: [{ type: 'text', text: `${preamble}\n\n${text}` }] },
         { cancellationSignal: ctx.signal },
       );
+      this.#reportUnlistedTools(ctx);
       this.#log.info('ACP prompt completed', {
         data: { acpSessionId: sessionId, durationMs: Date.now() - startedAt },
       });
@@ -473,6 +480,35 @@ export class AcpRuntime implements AgentRuntime {
   }
 
   // -------------------------------------------------------------------------
+
+  /**
+   * A turn finished and the lent tools were never listed: say so, in the
+   * conversation, once.
+   *
+   * A toolset the agent's MCP client never asked about is invisible to the
+   * agent — indistinguishable from a site that lent nothing, which is the
+   * invisible-diminishment failure this project keeps re-learning. It is also
+   * the first symptom of an MCP dialect mismatch when the ecosystem moves
+   * (see `McpBridge`'s header for the verified state). Checked after the turn
+   * rather than after `session/new`, because a client may legitimately
+   * connect lazily; a client that has not listed by the end of a completed
+   * turn was not going to.
+   */
+  #reportUnlistedTools(ctx: TurnContext): void {
+    if (this.#warnedUnlisted || this.#lentToolCount === 0 || !this.#bridgeSessionId) return;
+    const health = this.#options.bridge.health(this.#bridgeSessionId);
+    if (health.listed) return;
+    this.#warnedUnlisted = true;
+    // Logged AND surfaced in the conversation — log-only is not surfacing.
+    this.#log.error('the lent tools were never listed by the agent MCP client', {
+      data: { tools: this.#lentToolCount, initialized: health.initialized, client: health.client },
+    });
+    ctx.think(
+      `⚠ The site lent ${this.#lentToolCount} tool(s), but the agent's MCP client never listed them — ` +
+        'they were invisible to the agent this turn. That points at the agent failing to reach the ' +
+        'AgentPort MCP endpoint (a startup or protocol problem), not at the site withholding them.',
+    );
+  }
 
   #sessionUpdate(params: SessionNotification): void {
     const update = params.update;

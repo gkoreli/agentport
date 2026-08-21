@@ -10,6 +10,27 @@ they moved.
 
 ## Unreleased
 
+### A lent toolset that never becomes real is now said out loud
+
+The MCP dialect question was answered by verification, not migration: the
+bridge's server SDK (1.30.0, npm latest) tops out at dialect 2025-11-25,
+the MCP client bundled in the default runtime speaks 2025-06-18/2025-11-25,
+and the 2026-07-28 MCP revision exists in no published SDK on either side —
+so there is nothing to cut over to yet, MRTR included, and the finding is
+recorded in the bridge's header with the cutover plan. What ships instead
+is the loud failure that plan depends on: the bridge now tracks per
+registration whether the agent's MCP client initialized and whether it ever
+LISTED the lent tools (the SDK's own post-negotiation hook, not a transport
+sniff), and a completed turn whose lent toolset was never listed is
+surfaced in the conversation — once per session — and logged as an error
+with the client identity for joining the two sides' logs. That closes the
+invisible-diminishment shape a future dialect mismatch would take: an agent
+that silently cannot see the site's tools is indistinguishable from a site
+that lent nothing, and now it is distinguishable. `runtime:check` proves
+the happy path with a real MCP SDK client over HTTP (which doubles as the
+compatibility canary between the two SDKs) and the loud path with an agent
+that never dials, each watched failing.
+
 ### History capability honesty for agents beyond claude-agent-acp
 
 ACP 1.3 moved resume/list/delete/close under `sessionCapabilities` (where
