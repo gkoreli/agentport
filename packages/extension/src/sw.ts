@@ -1126,7 +1126,7 @@ async function onContentMessage(port: chrome.runtime.Port, message: ContentReque
       }
       // The page minted the prompt id; run the turn under it so every event
       // the page sees already carries the id it knows.
-      const request = entry.session.startPrompt(message.text, message.context, message.promptId);
+      const request = entry.session.startPrompt(message.text, message.context, undefined, message.promptId);
       // A document that reclaims this session mid-turn asks for these: without
       // them it renders an idle composer while the agent is still speaking.
       entry.activePrompts.add(request.id);

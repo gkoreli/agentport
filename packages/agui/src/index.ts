@@ -19,6 +19,7 @@ import {
   type ToolCallStartEvent,
 } from '@ag-ui/core';
 import type { AgentSessionHandle, SessionEvents } from '@agentport/client';
+import type { PromptImage } from '@agentport/protocol';
 
 /**
  * The event vocabulary comes from the spec's own package, not from a local
@@ -128,7 +129,8 @@ export type AguiEvent =
 
 export interface AguiAdapter {
   events: AsyncIterable<AguiEvent>;
-  run(text: string): Promise<string>;
+  /** `blocks` (v7): images attached to this run, forwarded to the session. */
+  run(text: string, blocks?: readonly PromptImage[]): Promise<string>;
   cancel(runId: string): boolean;
 }
 
@@ -225,14 +227,14 @@ class Translator {
     this.#off = Object.values(subscriptions).map((subscribe) => subscribe());
   }
 
-  run(text: string): Promise<string> {
+  run(text: string, blocks?: readonly PromptImage[]): Promise<string> {
     const pending: PendingRun = { runId: this.#id('run', ++this.#nextRun), settled: false };
     this.#pendingRuns.push(pending);
     this.#emit({ type: EventType.RUN_STARTED, threadId: this.#session.id, runId: pending.runId });
 
     let result: Promise<string>;
     try {
-      const request = this.#session.startPrompt(text);
+      const request = this.#session.startPrompt(text, undefined, blocks);
       pending.promptId = request.id;
       result = request.result;
     } catch (error) {

@@ -28,7 +28,16 @@ import { component, computed, each, html, onCleanup, signal, when, type Signal }
 import AgentPortConnect from './connect.js';
 import { aguiStream, type AguiAdapter, type AguiEvent } from '@agentport/agui';
 import type { AgentSessionHandle, ApprovalPrompt, SessionEvents, SiteTool } from '@agentport/client';
-import { toErr, type FormField, type HistoryEntry, type PlanStep } from '@agentport/protocol';
+import {
+  MAX_PROMPT_BLOCKS,
+  MAX_PROMPT_IMAGE_CHARS,
+  PROMPT_IMAGE_MIMES,
+  toErr,
+  type FormField,
+  type HistoryEntry,
+  type PlanStep,
+  type PromptImage,
+} from '@agentport/protocol';
 import { Chat, createChatStore, type ChatController } from '../../src/nisli-ui/ui/chat/index.js';
 import { siteLogger } from './observe.js';
 
@@ -84,6 +93,37 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
   const config = props.config.value;
 
   const chat = createChatStore();
+  /** Images staged for the NEXT prompt (v7 upload blocks), cleared on send. */
+  const staged = signal<{ name: string; block: PromptImage }[]>([]);
+
+  /** FileReader gives a data: URL; the wire wants the bare standard base64. */
+  const stageFiles = (files: FileList | null): void => {
+    if (!files) return;
+    for (const file of Array.from(files)) {
+      if (!(PROMPT_IMAGE_MIMES as readonly string[]).includes(file.type)) {
+        notice.value = `“${file.name}” is ${file.type || 'an unknown type'}; images must be ${PROMPT_IMAGE_MIMES.join(', ')}`;
+        continue;
+      }
+      const reader = new FileReader();
+      reader.onload = () => {
+        const data = String(reader.result).split(',')[1] ?? '';
+        const total = staged.value.reduce((sum, image) => sum + image.block.data.length, 0) + data.length;
+        if (staged.value.length >= MAX_PROMPT_BLOCKS || total > MAX_PROMPT_IMAGE_CHARS) {
+          notice.value = `“${file.name}” does not fit: at most ${MAX_PROMPT_BLOCKS} images and ${Math.round((MAX_PROMPT_IMAGE_CHARS * 3) / 4 / 1024)} KiB per prompt`;
+          return;
+        }
+        staged.value = [
+          ...staged.value,
+          { name: file.name, block: { kind: 'image', mime: file.type as PromptImage['mime'], data } },
+        ];
+      };
+      reader.onerror = () => {
+        log.error('could not read an attachment', { data: { name: file.name } });
+        notice.value = `could not read “${file.name}”`;
+      };
+      reader.readAsDataURL(file);
+    }
+  };
   const status = signal('not connected');
   const online = signal(false);
   const live = signal(false);
@@ -585,10 +625,16 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
 
   const onPrompt = (prompt: string): boolean => {
     if (!session || !adapter || busy.value) return false;
-    chat.addUserMessage(prompt);
+    const attachments = staged.value;
+    chat.addUserMessage(
+      attachments.length > 0
+        ? `${prompt}\n📎 ${attachments.map((image) => image.name).join(', ')}`
+        : prompt,
+    );
     busy.value = true;
+    staged.value = [];
     // The AG-UI adapter owns run lifecycle events, including failures.
-    adapter.run(prompt).catch((err: Error) => {
+    adapter.run(prompt, attachments.length > 0 ? attachments.map((image) => image.block) : undefined).catch((err: Error) => {
       log.error('prompt failed', { sessionId: session?.id, err, data: { surface: config.name } });
     });
     return true;
@@ -784,6 +830,39 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
             </div>
           </section>`;
         },
+      )}
+      ${when(
+        live,
+        () => html`<div data-slot="chat-attach-row">
+          <label data-slot="chat-attach">
+            📎 Attach image
+            <input
+              type="file"
+              accept=${PROMPT_IMAGE_MIMES.join(',')}
+              multiple
+              hidden
+              @change=${(event: Event) => {
+                const input = event.currentTarget as HTMLInputElement;
+                stageFiles(input.files);
+                input.value = '';
+              }}
+            />
+          </label>
+          ${each(
+            staged,
+            (image) => image.name,
+            (image) => html`<span data-slot="chat-attach-chip">
+              ${computed(() => image.value.name)}
+              <button
+                data-slot="chat-attach-remove"
+                aria-label="Remove attachment"
+                @click=${() => (staged.value = staged.value.filter((other) => other.name !== image.value.name))}
+              >
+                ×
+              </button>
+            </span>`,
+          )}
+        </div>`,
       )}
       ${Chat({
         entries: chat.entries,

@@ -10,6 +10,27 @@ they moved.
 
 ## Unreleased
 
+### A prompt can carry images — upload direction only, and bounded as one budget
+
+"Look at this" is the first thing a user tries, and until v7 the entire
+wire was text. `prompt` may now carry up to four image blocks (png, jpeg,
+webp, gif) in standard base64 — one budget across text and blocks, reasoned
+in `limits.ts`, so a sealed frame always fits and an oversized attachment is
+refused at the COMPOSER with a readable reason instead of arriving sealed
+and killing the session. The blocks reach the runtime byte for byte; the
+ACP adapter forwards them only when the agent advertised
+`ContentBlock::Image` at initialize, and otherwise says so in the
+conversation — sending anyway risks a mid-turn protocol error, and dropping
+silently makes the model answer a question about an image it never
+received. The transcript records each attachment as a sized fact, never the
+payload. The panel gains a minimal attach affordance. Deliberately absent,
+recorded at `PromptImage`: no `resource_link` (a page-supplied URL the
+agent fetches is SSRF pointed at the user's machine) and no download
+direction (agent→site file movement is the ADR-021 §6 exfiltration path;
+when built it rides `runtime_own_tool` authority). The extension's page
+boundary admits no blocks yet — recorded at `PageSession`, and the handle
+contract forbids accept-and-drop.
+
 ### The site is no longer told which runtime the user runs
 
 "Which runtime" is the first item on the north star's list of things the

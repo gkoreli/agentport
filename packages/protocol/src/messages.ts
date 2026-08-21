@@ -37,6 +37,7 @@ import {
 } from './schema.js';
 import {
   AEAD_TAG_BYTES,
+  BASE64_PATTERN,
   CODE_PATTERN,
   ERROR_CODE_PATTERN,
   ID_PATTERN,
@@ -58,6 +59,9 @@ import {
   MAX_ORIGIN_CHARS,
   MAX_PLAN_STEPS,
   MAX_PLAN_STEP_CHARS,
+  MAX_PROMPT_BLOCKS,
+  MAX_PROMPT_IMAGE_CHARS,
+  MAX_PROMPT_TEXT_WITH_BLOCKS_CHARS,
   MAX_REASON_CHARS,
   MAX_ROUTE_CHARS,
   MAX_SESSIONS_REPORTED,
@@ -101,7 +105,7 @@ export function wireFingerprint(): string {
  * commit as the version, deliberately by hand — but unlike the version, a
  * stale value here CANNOT pass, because the check recomputes it.
  */
-export const WIRE_FINGERPRINT = '56a474f7493be6e90d3b142d';
+export const WIRE_FINGERPRINT = '185741c0e5d61adcd4fc0b7c';
 
 /**
  * The wire dialect both ends must agree on, checked at `hello` before
@@ -720,13 +724,57 @@ export const History = obj({
 });
 export type History = Infer<typeof History>;
 
-export const Prompt = obj({
-  t: lit('prompt'),
-  s: idField,
-  id: idField,
-  text: str(1, MAX_TEXT_CHARS),
-  context: opt(record),
+/**
+ * One image the user attaches to a prompt (v7). UPLOAD ONLY, and the two
+ * absent shapes are deliberate decisions, not gaps:
+ *
+ * - No `resource_link`. A page-supplied URL the agent fetches is an
+ *   SSRF-shaped affordance pointed at the user's own machine and network;
+ *   if a site wants to hand the agent something it serves, it lends a tool
+ *   that serves it, and the grant bounds that tool.
+ * - No download direction. An agent handing the PAGE a file moves the
+ *   user's own data into a site, which is the exfiltration path ADR-021 §6
+ *   warns about; when it is built it rides `runtime_own_tool` authority,
+ *   never ordinary output.
+ *
+ * A closed mime set because a consent-adjacent surface renders these; the
+ * members are the four formats every engine decodes natively.
+ */
+export const PROMPT_IMAGE_MIMES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'] as const;
+
+export const PromptImage = obj({
+  kind: lit('image'),
+  mime: en(...PROMPT_IMAGE_MIMES),
+  /** Standard base64 with padding — the encoding ACP carries images in. */
+  data: pattern(BASE64_PATTERN, MAX_PROMPT_IMAGE_CHARS),
 });
+export type PromptImage = Infer<typeof PromptImage>;
+
+export const Prompt = refined(
+  obj({
+    t: lit('prompt'),
+    s: idField,
+    id: idField,
+    text: str(1, MAX_TEXT_CHARS),
+    context: opt(record),
+    /** Attached images. `text` stays required: a picture is not a prompt. */
+    blocks: opt(arr(PromptImage, MAX_PROMPT_BLOCKS)),
+  }),
+  (prompt) => {
+    if (!prompt.blocks) return null;
+    // One budget across text and every block, so the sealed frame always
+    // fits: see the three constants' shared rationale in limits.ts.
+    let total = 0;
+    for (const block of prompt.blocks) {
+      if (block.data.length % 4 !== 0) return 'bad_format';
+      total += block.data.length;
+    }
+    if (total > MAX_PROMPT_IMAGE_CHARS) return 'too_long';
+
+    if (prompt.text.length > MAX_PROMPT_TEXT_WITH_BLOCKS_CHARS) return 'too_long';
+    return null;
+  },
+);
 export type Prompt = Infer<typeof Prompt>;
 
 export const PromptCancel = obj({

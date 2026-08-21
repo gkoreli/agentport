@@ -3583,6 +3583,85 @@ console.log('\n24. page context reaches the runtime turn');
   session24.close();
   wallet24.close();
   await daemon24.stop();
+// 24. Prompt content blocks (v7): the upload direction, end to end. An image
+// the user attaches must arrive at the RUNTIME as the bytes they attached,
+// the transcript must record the fact of it (never the payload), and an
+// attachment that cannot go on the wire must be refused at the composer —
+// because a sealed frame the daemon rejects is session-fatal, not call-fatal.
+{
+  const r24 = new Relay({ port: 0, sink: () => {} });
+  await r24.listening();
+  const url24 = `ws://127.0.0.1:${r24.port}`;
+
+  const seenBlocks: { mime: string; chars: number }[] = [];
+  class CapturingRuntime implements AgentRuntime {
+    readonly name = 'capture';
+    async prompt(_text: string, ctx: TurnContext): Promise<void> {
+      for (const block of ctx.blocks ?? []) seenBlocks.push({ mime: block.mime, chars: block.data.length });
+      ctx.say(`saw ${ctx.blocks?.length ?? 0} image(s)`);
+    }
+  }
+  const visionAgent = generateKeyPair();
+  const visionDaemon = new AgentDaemon({
+    relayUrl: url24,
+    identity: {
+      publicKey: visionAgent.publicKey,
+      secretKey: visionAgent.secretKey,
+      name: 'Vision Agent',
+      runtime: 'demo-writer',
+    },
+    createRuntime: () => new CapturingRuntime(),
+    onConnectOffer: async () => true,
+    sink: () => {},
+  });
+  await visionDaemon.start();
+  const visionWallet = new AgentWallet({ relayUrl: url24, userSecretKey: generateKeyPair().secretKey, socketFactory });
+  await visionWallet.connect();
+  const visionOffer = await visionWallet.beginConnect({
+    surface: { name: 'Gallery', origin: 'https://gallery.test' },
+    tools: [],
+    decide: () => true,
+  });
+  visionDaemon.claimConnect(visionOffer.code);
+  const visionSession = await visionOffer.accepted;
+
+  // A tiny real PNG header's worth of base64 — the content is irrelevant, the
+  // delivery is the property.
+  const pngData = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAA=';
+  await visionSession.prompt('What is this?', undefined, [{ kind: 'image', mime: 'image/png', data: pngData }]);
+  check(
+    'an attached image reaches the runtime byte for byte',
+    seenBlocks.length === 1 && seenBlocks[0]!.mime === 'image/png' && seenBlocks[0]!.chars === pngData.length,
+    seenBlocks,
+  );
+  const visionHistory = await visionSession.history();
+  check(
+    'the transcript records the attachment as a fact, sized, never as payload',
+    visionHistory.some((entry) => entry.text.includes('[attached image/png')) &&
+      visionHistory.every((entry) => !entry.text.includes(pngData)),
+    visionHistory.map((entry) => entry.text.slice(0, 40)),
+  );
+
+  // The composer-side refusal: an aggregate the wire would reject is refused
+  // LOCALLY with a readable reason, and the session survives to prompt again.
+  const oversize = await visionSession
+    .prompt('Too much.', undefined, [
+      { kind: 'image', mime: 'image/png', data: 'A'.repeat(200_000) },
+      { kind: 'image', mime: 'image/png', data: 'A'.repeat(200_000) },
+    ])
+    .then(
+      () => 'accepted',
+      (err: Error) => err.message,
+    );
+  check('an over-budget attachment set is refused at the composer', oversize.includes('KiB'), oversize);
+  const after = await visionSession.prompt('Still alive?', undefined, [
+    { kind: 'image', mime: 'image/jpeg', data: pngData },
+  ]);
+  check('and the session survived the refusal', after.includes('saw 1'), after);
+
+  visionSession.close();
+  visionWallet.close();
+  await visionDaemon.stop();
   await r24.close();
 }
 

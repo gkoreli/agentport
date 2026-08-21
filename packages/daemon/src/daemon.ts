@@ -1345,12 +1345,25 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     };
 
     record('user', frame.text);
+    // The transcript is text; an attachment is recorded as the fact of
+    // itself, sized in binary (3/4 of base64), never as the payload — the
+    // bytes live in the runtime's own store like the rest of the turn.
+    if (frame.blocks) {
+      for (const block of frame.blocks) {
+        session.transcript.push({
+          role: 'user',
+          text: `[attached ${block.mime}, ${Math.round((block.data.length * 3) / 4 / 1024)} KiB]`,
+          at: Date.now(),
+        });
+      }
+    }
 
     const ctx: TurnContext = {
       surface: session.surface,
       grant: session.grant,
       tools: session.tools,
       ...(frame.context !== undefined ? { context: frame.context } : {}),
+      ...(frame.blocks ? { blocks: frame.blocks } : {}),
       signal: controller.signal,
       ask: (question, signal) => this.#ask(session, question, signal),
       say: (text) => {

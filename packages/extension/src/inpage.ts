@@ -67,6 +67,11 @@ export interface PageAgentSession extends AgentSessionHandle {
   readonly grant: { tools: ToolDefinition[]; alwaysAsk: string[]; expiresAt: number };
 }
 
+// DEFERRED (v7): prompt image blocks do not cross the extension's page
+// boundary yet. The bridge admits no `blocks` field from page world, so a
+// page cannot reach the silent-drop failure the AgentSessionHandle contract
+// forbids — carrying them here means widening the bridge validator and the
+// worker's startPrompt call in the same change, not widening this class alone.
 class PageSession implements PageAgentSession {
   readonly id: string;
   readonly info: { agentName: string; runtime: string; ownTools: boolean; alias?: string };

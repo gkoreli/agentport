@@ -208,6 +208,8 @@ export class AcpRuntime implements AgentRuntime {
    * than a silent degradation.
    */
   #supportsResume = false;
+  /** Whether the agent advertised ContentBlock::Image at initialize. */
+  #supportsImages = false;
   /** Tool calls the agent has announced, so updates can be labelled. */
   #toolTitles = new Map<string, string>();
   /** Set while `loadSession` is streaming history back at us. */
@@ -324,6 +326,7 @@ export class AcpRuntime implements AgentRuntime {
     // `=== true` would silently un-advertise every conforming agent.
     this.#supportsLoad = init.agentCapabilities?.loadSession === true;
     this.#supportsResume = init.agentCapabilities?.sessionCapabilities?.resume != null;
+    this.#supportsImages = init.agentCapabilities?.promptCapabilities?.image === true;
 
     // Register the surface's tools and hand the agent their endpoint.
     await this.#options.bridge.start();
@@ -390,12 +393,30 @@ export class AcpRuntime implements AgentRuntime {
       ...contextNote('This prompt carries context', ctx.context),
     ].join('\n');
 
+    // ACP's image block is byte-compatible with ours (base64 + mime), so an
+    // attachment crosses without re-encoding. An agent that never advertised
+    // ContentBlock::Image is TOLD what it cannot see, in the conversation —
+    // sending the block anyway risks a protocol error mid-turn, and dropping
+    // it silently is the invisible-diminishment failure: the model would
+    // answer a question about an image it never received, and guess.
+    const blocks = ctx.blocks ?? [];
+    const images =
+      this.#supportsImages ?
+        blocks.map((block) => ({ type: 'image' as const, mimeType: block.mime, data: block.data }))
+      : [];
+    if (blocks.length > 0 && !this.#supportsImages) {
+      this.#log.warn('agent does not accept images; telling the user', {
+        data: { acpSessionId: sessionId, dropped: blocks.length },
+      });
+      ctx.say(`(Your ${blocks.length === 1 ? 'image' : `${blocks.length} images`} could not be delivered: this agent does not accept image input.)\n`);
+    }
+
     const startedAt = Date.now();
-    this.#log.info('ACP prompt started', { data: { acpSessionId: sessionId } });
+    this.#log.info('ACP prompt started', { data: { acpSessionId: sessionId, images: images.length } });
     try {
       await connection.request(
         methods.agent.session.prompt,
-        { sessionId, prompt: [{ type: 'text', text: `${preamble}\n\n${text}` }] },
+        { sessionId, prompt: [{ type: 'text', text: `${preamble}\n\n${text}` }, ...images] },
         { cancellationSignal: ctx.signal },
       );
       this.#reportUnlistedTools(ctx);

@@ -114,6 +114,35 @@ export const MAX_TEXT_CHARS = 131_072;
 /** Tool names are namespaced identifiers, e.g. "inkwell.document.replace". */
 export const TOOL_NAME_PATTERN = /^[A-Za-z0-9._-]{1,128}$/;
 
+/**
+ * Standard base64 (RFC 4648, with padding), the encoding ACP itself carries
+ * image payloads in — so a prompt block crosses to the runtime byte-for-byte
+ * with no re-encoding step to get wrong. Length-mod-4 is enforced by the
+ * Prompt refinement, not the pattern: a regex cannot count.
+ */
+export const BASE64_PATTERN = /^[A-Za-z0-9+/]+={0,2}$/;
+
+/**
+ * Image blocks on one prompt (v7, upload direction only).
+ *
+ * The numbers are one budget, reasoned together, because all three live
+ * inside MAX_SEALED_PLAINTEXT_BYTES (491,520) with the frame's own framing:
+ *
+ * - MAX_PROMPT_IMAGE_CHARS bounds the AGGREGATE base64 across every block on
+ *   one prompt: 393,216 chars is 288 KiB of binary image, and base64 is
+ *   ASCII so chars are bytes on the wire.
+ * - MAX_PROMPT_TEXT_WITH_BLOCKS_CHARS caps the TEXT of a prompt that carries
+ *   blocks. Text may be CJK (3 UTF-8 bytes per UTF-16 unit), so 16,384 units
+ *   is at most 49 KiB — caption scale, which is what text beside an image is.
+ *   393,216 + 49,152 + framing < 460,000, comfortably under the seal bound;
+ *   a text-only prompt keeps the full MAX_TEXT_CHARS it always had.
+ * - MAX_PROMPT_BLOCKS caps the count: four is what a composer can honestly
+ *   preview as attachments; more is a gallery, and a gallery is a tool's job.
+ */
+export const MAX_PROMPT_BLOCKS = 4;
+export const MAX_PROMPT_IMAGE_CHARS = 393_216;
+export const MAX_PROMPT_TEXT_WITH_BLOCKS_CHARS = 16_384;
+
 /** Tools per capability grant; matches the extension and hosted wallet caps. */
 export const MAX_TOOLS_PER_GRANT = 64;
 

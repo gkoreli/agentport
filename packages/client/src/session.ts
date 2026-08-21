@@ -1,7 +1,12 @@
 import {
+  BASE64_PATTERN,
   Deferred,
   Emitter,
   MAX_ERROR_CHARS,
+  MAX_PROMPT_BLOCKS,
+  MAX_PROMPT_IMAGE_CHARS,
+  MAX_PROMPT_TEXT_WITH_BLOCKS_CHARS,
+  PROMPT_IMAGE_MIMES,
   MAX_JSON_DEPTH,
   MAX_JSON_LEAF_CHARS,
   MAX_JSON_NODES,
@@ -23,6 +28,7 @@ import {
   type HistoryEntry,
   type Logger,
   type PlanStep,
+  type PromptImage,
   type SessionFrame,
   type SurfaceDescriptor,
   type ToolDefinition,
@@ -54,6 +60,33 @@ function toWireJson(value: unknown): unknown {
 /** Clamp a page-supplied operational string to its wire bound, visibly. */
 function clip(value: string, max: number): string {
   return value.length > max ? `${value.slice(0, max - 1)}…` : value;
+}
+
+/**
+ * Why this prompt's attachments cannot go on the wire, in words a composer
+ * can show — or undefined when they can. The same rules the schema enforces
+ * (`messages.ts#PromptImage` and the Prompt refinement), asked BEFORE sealing
+ * because a sealed frame the daemon rejects is session-fatal, not call-fatal.
+ */
+function describeBlockProblem(text: string, blocks: readonly PromptImage[]): string | undefined {
+  if (blocks.length > MAX_PROMPT_BLOCKS) return `at most ${MAX_PROMPT_BLOCKS} images per prompt`;
+  let total = 0;
+  for (const block of blocks) {
+    if (!(PROMPT_IMAGE_MIMES as readonly string[]).includes(block.mime)) {
+      return `unsupported image type ${block.mime}; use ${PROMPT_IMAGE_MIMES.join(', ')}`;
+    }
+    if (!BASE64_PATTERN.test(block.data) || block.data.length % 4 !== 0) {
+      return 'image data must be standard base64';
+    }
+    total += block.data.length;
+  }
+  if (total > MAX_PROMPT_IMAGE_CHARS) {
+    return `images total ${Math.round((total * 3) / 4 / 1024)} KiB; the limit is ${Math.round((MAX_PROMPT_IMAGE_CHARS * 3) / 4 / 1024)} KiB per prompt`;
+  }
+  if (text.length > MAX_PROMPT_TEXT_WITH_BLOCKS_CHARS) {
+    return `a prompt carrying images is limited to ${MAX_PROMPT_TEXT_WITH_BLOCKS_CHARS} characters of text`;
+  }
+  return undefined;
 }
 
 /** A site tool: the definition the agent sees plus the code that runs it. */
@@ -144,8 +177,17 @@ export interface AgentSessionHandle {
   readonly grant: CapabilityGrant;
   readonly info: SessionInfo;
   readonly closed: boolean;
-  prompt(text: string, context?: Record<string, unknown>): Promise<string>;
-  startPrompt(text: string, context?: Record<string, unknown>): PromptRequest;
+  /**
+   * `blocks` (v7): images attached to this prompt, upload direction only.
+   * CONTRACT for implementers: forward them or REJECT the call when any are
+   * passed — never accept-and-drop, because an attachment the agent never
+   * saw makes it answer a question about an image it never received. (The
+   * extension's page proxy currently declares the shorter signature and its
+   * bridge admits no blocks from page world, so no path reaches it; carrying
+   * blocks across that boundary is deferred, recorded at `PageSession`.)
+   */
+  prompt(text: string, context?: Record<string, unknown>, blocks?: readonly PromptImage[]): Promise<string>;
+  startPrompt(text: string, context?: Record<string, unknown>, blocks?: readonly PromptImage[]): PromptRequest;
   history(): Promise<HistoryEntry[]>;
   cancel(promptId: string): void;
   answer(askId: string, values?: Record<string, string>): void;
@@ -207,16 +249,25 @@ export class AgentSession extends Emitter<SessionEvents> implements AgentSession
   }
 
   /** Send a prompt; resolves with the full assistant text for that turn. */
-  prompt(text: string, context?: Record<string, unknown>): Promise<string> {
-    return this.startPrompt(text, context).result;
+  prompt(text: string, context?: Record<string, unknown>, blocks?: readonly PromptImage[]): Promise<string> {
+    return this.startPrompt(text, context, blocks).result;
   }
 
   /**
    * Start a prompt while exposing its cancellation identity immediately.
    * Renderers need this before the first token arrives; waiting for a delta
    * makes a visible Stop control lie during slow and tool-only turns.
+   *
+   * `promptId` trails `blocks` because it is the class-only extension (the
+   * extension's worker supplies its own correlation ids); the handle's
+   * signature ends at `blocks`.
    */
-  startPrompt(text: string, context?: Record<string, unknown>, promptId?: string): PromptRequest {
+  startPrompt(
+    text: string,
+    context?: Record<string, unknown>,
+    blocks?: readonly PromptImage[],
+    promptId?: string,
+  ): PromptRequest {
     // Ids are client-minted correlation handles with no security meaning, so
     // a bridged caller (the extension's page proxy) may supply its own and
     // see it echoed on every event.
@@ -244,9 +295,24 @@ export class AgentSession extends Emitter<SessionEvents> implements AgentSession
         return { id, result: Promise.reject(new Error(`prompt context is not valid wire JSON (${code})`)) };
       }
     }
+    // Attachments are rejected here with a reason a composer can render,
+    // BEFORE sealing — the daemon treats an invalid sealed frame as
+    // session-fatal, so the page-side clamp is what keeps one oversized
+    // image from killing the whole attachment (same rule as tool results).
+    if (blocks && blocks.length > 0) {
+      const problem = describeBlockProblem(text, blocks);
+      if (problem) return { id, result: Promise.reject(new Error(problem)) };
+    }
     const deferred = new Deferred<string>();
     this.#transcripts.set(id, { text: '', deferred });
-    this.#send({ t: 'prompt', s: this.id, id, text, ...(wireContext ? { context: wireContext } : {}) });
+    this.#send({
+      t: 'prompt',
+      s: this.id,
+      id,
+      text,
+      ...(wireContext ? { context: wireContext } : {}),
+      ...(blocks && blocks.length > 0 ? { blocks: [...blocks] } : {}),
+    });
     return { id, result: deferred.promise };
   }
 

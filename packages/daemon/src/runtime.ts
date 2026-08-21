@@ -3,6 +3,7 @@ import type {
   FormField,
   HistoryEntry,
   PlanStep,
+  PromptImage,
   SurfaceDescriptor,
   ToolDefinition,
 } from '@agentport/protocol';
@@ -33,6 +34,13 @@ export interface TurnContext {
    * which is worse than an absent one because the types promised otherwise.
    */
   context?: Record<string, unknown>;
+  /**
+   * Images the user attached to this prompt (v7, upload direction only).
+   * Already schema-bounded on the wire; a runtime that cannot forward them
+   * must SAY so in the conversation rather than dropping them silently — an
+   * attachment the agent never saw is the invisible-diminishment failure.
+   */
+  blocks?: readonly PromptImage[];
   /** Streamed to the user as assistant output. */
   say(text: string): void;
   /** Streamed to the user as status/reasoning, rendered separately. */

@@ -67,8 +67,8 @@ const collecting = (async () => {
 const successfulRun = adapter.run('save this');
 const firstPrompt = lastPromptId();
 assert.match(firstPrompt, /^p_[0-9a-f]{24}$/);
-assert.throws(() => session.startPrompt('duplicate', undefined, firstPrompt), /already active/);
-assert.throws(() => session.startPrompt('malformed', undefined, 'page-chosen-id'), /invalid prompt id/);
+assert.throws(() => session.startPrompt('duplicate', undefined, undefined, firstPrompt), /already active/);
+assert.throws(() => session.startPrompt('malformed', undefined, undefined, 'page-chosen-id'), /invalid prompt id/);
 await Promise.resolve();
 const firstRun = streamEvents.find((event): event is Extract<AguiEvent, { type: 'RUN_STARTED' }> => event.type === 'RUN_STARTED');
 assert.ok(firstRun);
