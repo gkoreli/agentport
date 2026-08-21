@@ -81,6 +81,16 @@ npm run deploy
 wallet, deploys both Workers with Wrangler, and commits the root version bump.
 Wrangler must already be authenticated to the intended Cloudflare account.
 
+**The next release is a coordinated v7 cutover.** `main` speaks `agentport/7`
+(denial vocabulary enum, redacted runtime, prompt content blocks, live grant
+updates) while the deployed relay still speaks `agentport/6` — so until that
+release, `scripts/remote-check.ts` and any other probe of the DEPLOYED relay
+is EXPECTED to be refused at `hello` with a version mismatch. That refusal is
+the version gate doing its job, not a regression; no local gate depends on
+the deployed protocol version. Ship relay, site bundle, hosted wallet,
+extension build, and CLI together, per the order below — there is no v6
+fallback anywhere in the tree.
+
 For a wire-changing release, use this order:
 
 1. Commit the implementation and CLI version bump locally, but do not push.

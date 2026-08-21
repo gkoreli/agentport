@@ -14,14 +14,14 @@
  * So the reasons are a registry both producers emit FROM, and the terminality
  * question is answered once, here, beside them.
  *
- * WHAT THIS DELIBERATELY IS NOT: the wire schema is untouched.
- * `SessionDenied.reason` stays `display`, not an enum over this union.
- * Narrowing it would refuse a peer that sends a reason this build has not
- * heard of — a lockstep protocol change, and therefore a PROTOCOL_VERSION
- * bump, deferred to v7. Until then `isTerminalResumeDenial` takes a `string`
- * on purpose: an unrecognised reason is transient, which is the fail-safe
- * answer (retry a live session) rather than the fail-silent one (discard a
- * record that could still resume).
+ * Since v7 the wire schema enforces this registry too: `SessionDenied.reason`
+ * is an enum over exactly this union, so a producer inventing a reason is a
+ * malformed frame at the sender's own decoder, not a string a consumer
+ * guesses about. `isTerminalResumeDenial` still takes a `string` on purpose —
+ * its callers read the field from a frame that may predate this build inside
+ * one deploy window, and an unrecognised reason stays transient, which is the
+ * fail-safe answer (retry a live session) rather than the fail-silent one
+ * (discard a record that could still resume).
  */
 
 /**

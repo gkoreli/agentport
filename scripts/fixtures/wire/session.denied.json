@@ -7,16 +7,25 @@
       "frame": {
         "t": "session.denied",
         "s": "sess_0123456789abcdef01234567",
-        "reason": "user declined"
+        "reason": "revoked"
       }
     },
     {
-      "name": "maximal valid: reason at 256-char limit",
+      "name": "maximal valid: the longest registry reason",
       "expect": "ok",
       "frame": {
         "t": "session.denied",
         "s": "sess_0123456789abcdef01234567",
-        "reason": "rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr"
+        "reason": "authorization_expired"
+      }
+    },
+    {
+      "name": "every relay-emitted reason decodes",
+      "expect": "ok",
+      "frame": {
+        "t": "session.denied",
+        "s": "sess_0123456789abcdef01234567",
+        "reason": "agent_offline"
       }
     },
     {
@@ -33,13 +42,13 @@
       "frame": {
         "t": "session.denied",
         "s": "sess_0123456789abcdef01234567",
-        "reason": "user declined",
+        "reason": "revoked",
         "code": "denied"
       }
     },
     {
       "name": "reason is a number",
-      "expect": "wrong_type",
+      "expect": "bad_format",
       "frame": {
         "t": "session.denied",
         "s": "sess_0123456789abcdef01234567",
@@ -47,12 +56,30 @@
       }
     },
     {
-      "name": "reason one char over 256 limit",
-      "expect": "too_long",
+      "name": "free text is no longer a reason (v7)",
+      "expect": "bad_format",
       "frame": {
         "t": "session.denied",
         "s": "sess_0123456789abcdef01234567",
-        "reason": "rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr"
+        "reason": "user declined"
+      }
+    },
+    {
+      "name": "the vocabulary is case-sensitive",
+      "expect": "bad_format",
+      "frame": {
+        "t": "session.denied",
+        "s": "sess_0123456789abcdef01234567",
+        "reason": "REVOKED"
+      }
+    },
+    {
+      "name": "a registry-shaped reason that is not a member",
+      "expect": "bad_format",
+      "frame": {
+        "t": "session.denied",
+        "s": "sess_0123456789abcdef01234567",
+        "reason": "totally_plausible_reason"
       }
     },
     {
@@ -63,7 +90,7 @@
     {
       "name": "raw: __proto__ key smuggle",
       "expect": "unexpected_key",
-      "raw": "{\"__proto__\":{\"polluted\":true},\"reason\":\"user declined\",\"s\":\"sess_0123456789abcdef01234567\",\"t\":\"session.denied\"}"
+      "raw": "{\"__proto__\":{\"polluted\":true},\"reason\":\"revoked\",\"s\":\"sess_0123456789abcdef01234567\",\"t\":\"session.denied\"}"
     }
   ]
 }

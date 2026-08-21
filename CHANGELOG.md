@@ -10,6 +10,22 @@ they moved.
 
 ## Unreleased
 
+### Protocol v7 begins: session denials are a closed vocabulary on the wire
+
+`SessionDenied.reason` narrows from free display text to an enum over
+`SESSION_DENIAL_REASONS` — the registry both producers already emitted from
+and both resume consumers already judged terminality from. The deferral
+comment on the field said exactly this change was v7's to make, and the
+reason it needed a version bump is the reason the bump makes it safe: a peer
+whose build knows a reason this one does not is now refused legibly at the
+handshake instead of guessed about after it. A reason outside the registry is
+a malformed frame at the sender's own decoder. `isTerminalResumeDenial`
+deliberately still takes a string, so a record from the far side of a deploy
+window stays transient rather than silently discarded. `PROTOCOL_VERSION` is
+`agentport/7` from this commit; the deployed relay stays v6 until the
+coordinated release, and `docs/RELEASING.md` records that every probe of the
+deployed relay is expected to be refused at `hello` until then.
+
 ### Revocation gets a surface: the popup lists what holds your agent, with the button that takes it back
 
 ADR-014's open problem 3 — revocation existed and was unreachable, CLI-only,

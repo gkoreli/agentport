@@ -69,6 +69,7 @@ import {
   TOOL_NAME_PATTERN,
 } from './limits.js';
 import { canonicalJson, toHex } from './crypto.js';
+import { SESSION_DENIAL_REASONS, type SessionDenialReason } from './denials.js';
 import { sha256 } from '@noble/hashes/sha256';
 
 /**
@@ -100,7 +101,7 @@ export function wireFingerprint(): string {
  * commit as the version, deliberately by hand — but unlike the version, a
  * stale value here CANNOT pass, because the check recomputes it.
  */
-export const WIRE_FINGERPRINT = 'e26265ee0c54cf583ca452bc';
+export const WIRE_FINGERPRINT = '76ebfa0c2f9f815c2095b8a5';
 
 /**
  * The wire dialect both ends must agree on, checked at `hello` before
@@ -132,13 +133,23 @@ export const WIRE_FINGERPRINT = 'e26265ee0c54cf583ca452bc';
  * Versioning the semantic break makes the hosted relay refuse that unsafe
  * mixed deployment instead of reporting compatibility.
  *
+ * v7, one coordinated batch: `session.denied.reason` narrows from `display`
+ * to the closed `SESSION_DENIAL_REASONS` vocabulary; `runtime` on
+ * `session.opened`/`session.resumed` becomes optional and is omitted toward
+ * every surface that is not the user's own key (the site must not learn the
+ * runtime — it was the one item on the north star's "learns nothing" list
+ * that shipped false); `prompt` may carry bounded image content blocks; and
+ * the `grant.update`/`grant.updated` pair lets a live attachment's grant be
+ * reconciled — narrowing freely, widening only under a fresh user-signed
+ * delegation covering the new grant.
+ *
  * This is no longer hand-maintained on its own: `WIRE_FINGERPRINT` above is
  * recomputed from the schemas on every `wire:check` run, so a wire change that
  * forgot this constant is a red build. It caught the v4 change on the first
  * run after it was written — which is the only evidence worth having that a
  * guard works.
  */
-export const PROTOCOL_VERSION = 'agentport/6';
+export const PROTOCOL_VERSION = 'agentport/7';
 
 export type Hex = string;
 
@@ -644,13 +655,15 @@ export const SessionDenied = obj({
   t: lit('session.denied'),
   s: idField,
   /**
-   * Deliberately `display` and not an enum over `SESSION_DENIAL_REASONS`
-   * (`denials.ts`). Both producers emit from that registry and the resume
-   * consumers judge terminality from it, but narrowing the SCHEMA would refuse
-   * a peer whose build knows a reason this one does not — a lockstep wire
-   * change, and so a PROTOCOL_VERSION bump, deferred to v7.
+   * The closed vocabulary from `denials.ts`, enforced by the SCHEMA since v7.
+   * Both producers already emitted from the registry and both resume
+   * consumers judged terminality from it; the deferral note that used to sit
+   * here was about refusing a peer whose build knows a reason this one does
+   * not — which is exactly what a lockstep version bump makes legible instead
+   * of confusing, so the narrowing rode v7. A reason outside the registry is
+   * now a malformed frame, not a transient retry.
    */
-  reason,
+  reason: en(...(Object.values(SESSION_DENIAL_REASONS) as [SessionDenialReason, ...SessionDenialReason[]])),
 });
 export type SessionDenied = Infer<typeof SessionDenied>;
 
