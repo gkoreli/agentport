@@ -105,7 +105,9 @@ export function wireFingerprint(): string {
  * commit as the version, deliberately by hand — but unlike the version, a
  * stale value here CANNOT pass, because the check recomputes it.
  */
-export const WIRE_FINGERPRINT = 'e291eeb4c8635ae5313f0551';
+// Moved with `agent_busy` joining the denial vocabulary — a v7-batch change
+// landed before the v7 cutover ever deployed, so it rides the same release.
+export const WIRE_FINGERPRINT = '5cc73dbf2ca7fdf4c7afd74a';
 
 /**
  * The wire dialect both ends must agree on, checked at `hello` before

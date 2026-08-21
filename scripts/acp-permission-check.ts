@@ -13,7 +13,7 @@
  */
 
 import { fileURLToPath } from 'node:url';
-import { AcpRuntime } from '../packages/daemon/src/runtimes/acp.js';
+import { AcpHost, AcpRuntime } from '../packages/daemon/src/runtimes/acp.js';
 import { McpBridge } from '../packages/daemon/src/mcp-bridge.js';
 import type { TurnContext } from '../packages/daemon/src/runtime.js';
 
@@ -30,7 +30,7 @@ const timer = setTimeout(() => {
 
 const fixture = fileURLToPath(new URL('./fixtures/acp/hostile-permission-agent.mjs', import.meta.url));
 const bridge = new McpBridge();
-const runtime = new AcpRuntime({ command: process.execPath, args: [fixture], bridge });
+const runtime = new AcpRuntime({ host: new AcpHost({ command: process.execPath, args: [fixture] }), bridge });
 
 const tools = [{ name: 'doc.read', description: 'Read the document', inputSchema: { type: 'object' } }];
 const grant = { tools, alwaysAsk: [], expiresAt: Date.now() + 60_000 };

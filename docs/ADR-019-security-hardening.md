@@ -405,11 +405,11 @@ Against the section's acceptance list:
   all consume `@agentport/protocol`. The extension holds no wire parser of its
   own; its ingress is `AgentWallet`.
 
-Evidence: `npm run wire:check` — 547 fixture cases across all 47 frame types
+Evidence: `npm run wire:check` — 548 fixture cases across all 47 frame types
 (valid, boundary-accepted, missing/unknown/wrong-type/oversize/deep, and raw
 hostile seeds including non-canonical and `__proto__` smuggles), a coverage
 gate over `FRAME_SCHEMAS`, programmatic bounds, and sealed-path checks on real
-crypto. `npm run e2e` — 220 checks over real sockets. `npm run integration`
+crypto. `npm run e2e` — 224 checks over real sockets. `npm run integration`
 against a local relay — full ACP-shaped stack. `npm run ui:smoke` — 49 checks.
 `npm run typecheck` plus the four out-of-references projects and
 `npm run check:extension`.

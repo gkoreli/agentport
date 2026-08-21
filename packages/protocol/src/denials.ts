@@ -32,6 +32,12 @@
  * the rest, plus its own `not_your_agent` and `grant_expired`.
  */
 export const SESSION_DENIAL_REASONS = {
+  /** Daemon: the per-daemon session cap is reached. TRANSIENT — capacity,
+   *  not authority: a retry after some other attachment closes succeeds, so
+   *  a resume record refused with this must live to try again. Added while
+   *  v7 was still unreleased, so the vocabulary extension rides the same
+   *  coordinated cutover instead of costing a second one. */
+  agent_busy: 'agent_busy',
   /** Relay: nothing is connected under that agent key right now. */
   agent_offline: 'agent_offline',
   /** Daemon: another live socket already holds this session. TRANSIENT — the

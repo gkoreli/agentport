@@ -233,6 +233,23 @@ const ASK_TIMEOUT_MS = 5 * 60 * 1000;
 const APPROVAL_TIMEOUT_MS = 5 * 60 * 1000;
 
 /**
+ * How many sessions this daemon holds at once — attached AND detached,
+ * because the bounded resource is the runtime behind each session, and a
+ * detached session keeps its runtime alive for the whole detach grace.
+ *
+ * Eight, because the daemon's default runtime is a model process per...
+ * no longer per session (the ACP child is shared), but every session still
+ * holds a live conversation the model must context-switch between, plus a
+ * bridge registration, a sealed channel, and an in-memory transcript. A
+ * laptop daemon with eight concurrent attachments is a user with eight tabs
+ * lending the same agent — past that, the honest answer to a ninth site is
+ * "busy, try again", not an unbounded queue of processes until the OOM
+ * killer picks one. Overridable per embedder; the cap is a floor under
+ * memory exhaustion, not a scheduling policy.
+ */
+const MAX_SESSIONS_DEFAULT = 8;
+
+/**
  * How often the daemon sweeps its own state: stale connect offers, detached
  * sessions past the grace, and revocation tombstones.
  *
@@ -335,6 +352,11 @@ export interface DaemonOptions {
    * cannot be observed by a suite that has to wait for one.
    */
   approvalTimeoutMs?: number;
+  /**
+   * Most sessions this daemon will hold at once, attached or detached.
+   * Defaults to `MAX_SESSIONS_DEFAULT`; the reasoning lives there.
+   */
+  maxSessions?: number;
   sink?: LogSink;
 }
 
@@ -1101,6 +1123,23 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
   }
 
   async #onSessionOpen(frame: Extract<Frame, { t: 'session.open' }>): Promise<void> {
+    // Capacity before anything else: a map-size compare is the cheapest
+    // clause here, discloses nothing an observer of presence does not already
+    // know, and refusing early spends no crypto on a session that cannot be
+    // admitted. Detached sessions COUNT — each still holds its runtime for
+    // the whole detach grace, and the cap bounds that resource, not sockets.
+    // The resume path needs no twin of this clause: a resume addresses a
+    // session already in this map, so admission there can never raise the
+    // count — it re-attaches what the cap already charged for.
+    if (this.#sessions.size >= (this.#options.maxSessions ?? MAX_SESSIONS_DEFAULT)) {
+      this.#log.warn('refusing a session over the concurrency cap', {
+        sessionId: frame.s,
+        data: { held: this.#sessions.size, origin: frame.surface.origin },
+      });
+      this.#send({ t: 'session.denied', s: frame.s, reason: SESSION_DENIAL_REASONS.agent_busy });
+      return;
+    }
+
     // Local policy lives here. A real daemon would consult a per-origin
     // allowlist; v0 accepts any session the relay authorised, but still
     // refuses grants it cannot honour.
@@ -1284,6 +1323,20 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
         grant: session.grant,
         tools: session.tools,
         policy: session.policy,
+        // The runtime's channel for an out-of-band death (a shared agent
+        // process exiting under this attachment). Close honestly: the client
+        // is told, everything waiting settles, and the session cannot sit
+        // attached to a brain that no longer exists.
+        fatal: (reason) => {
+          const live = this.#sessions.get(frame.s);
+          if (!live) return;
+          void this.#closeSession(live, reason).catch((err: unknown) => {
+            this.#log.error('closing a session after a runtime fatality failed', {
+              sessionId: frame.s,
+              err,
+            });
+          });
+        },
       });
     } catch (err) {
       this.#sessions.delete(frame.s);

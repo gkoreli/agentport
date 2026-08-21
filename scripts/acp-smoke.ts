@@ -11,7 +11,7 @@ import { WebSocket as NodeWebSocket } from 'ws';
 import { Relay } from '../packages/relay/src/relay.js';
 import { AgentDaemon } from '../packages/daemon/src/daemon.js';
 import { McpBridge } from '../packages/daemon/src/mcp-bridge.js';
-import { AcpRuntime } from '../packages/daemon/src/runtimes/acp.js';
+import { AcpHost, AcpRuntime } from '../packages/daemon/src/runtimes/acp.js';
 import { AgentWallet, type SiteTool } from '../packages/client/src/index.js';
 import { Deferred, generateKeyPair } from '../packages/protocol/src/index.js';
 
@@ -48,6 +48,13 @@ const relayUrl = `ws://127.0.0.1:${relay.port}`;
 const user = generateKeyPair();
 const agentKeys = generateKeyPair();
 const bridge = new McpBridge();
+const acpHost = new AcpHost({
+  command: process.env.AGENTPORT_ACP_COMMAND ?? 'npx',
+  args: (process.env.AGENTPORT_ACP_ARGS ?? '-y @agentclientprotocol/claude-agent-acp')
+    .split(' ')
+    .filter(Boolean),
+  cwd: process.env.AGENTPORT_AGENT_CWD ?? process.cwd(),
+});
 const pairingCode = new Deferred<string>();
 
 const daemon = new AgentDaemon({
@@ -59,15 +66,7 @@ const daemon = new AgentDaemon({
     runtime: 'claude-code',
     location: 'ggsCloud',
   },
-  createRuntime: () =>
-    new AcpRuntime({
-      command: process.env.AGENTPORT_ACP_COMMAND ?? 'npx',
-      args: (process.env.AGENTPORT_ACP_ARGS ?? '-y @agentclientprotocol/claude-agent-acp')
-        .split(' ')
-        .filter(Boolean),
-      cwd: process.env.AGENTPORT_AGENT_CWD ?? process.cwd(),
-      bridge,
-    }),
+  createRuntime: () => new AcpRuntime({ host: acpHost, bridge }),
   onPairingCode: (code) => pairingCode.resolve(code),
 });
 

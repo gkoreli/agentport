@@ -29,6 +29,15 @@
       }
     },
     {
+      "name": "the capacity refusal decodes (transient by design)",
+      "expect": "ok",
+      "frame": {
+        "t": "session.denied",
+        "s": "sess_0123456789abcdef01234567",
+        "reason": "agent_busy"
+      }
+    },
+    {
       "name": "missing required reason",
       "expect": "missing_key",
       "frame": {

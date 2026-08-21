@@ -46,7 +46,7 @@ import {
 import { createLogger, type LogSink } from '@agentport/protocol';
 import { DEFAULT_ACP_COMMAND, resolveAcpCommand, type AcpCommand } from './acp-command.js';
 import { registerRuntime } from './runtime.js';
-import { AcpRuntime, terminateProcessTree } from './runtimes/acp.js';
+import { AcpHost, AcpRuntime, terminateProcessTree } from './runtimes/acp.js';
 import type { McpBridge } from './mcp-bridge.js';
 
 /**
@@ -117,13 +117,17 @@ export function resolveAcpSpawn(env: Record<string, string | undefined>): AcpSpa
   };
 }
 
-/** Register every ACP-backed runtime name against one resolved command pair. */
+/**
+ * Register every ACP-backed runtime name against one resolved command pair —
+ * and ONE shared agent process. The host is created here, once per daemon,
+ * so every attachment the factory mints is a session inside the same child
+ * rather than a child of its own ("one agent everywhere", bounded by the
+ * daemon's session cap instead of by the OOM killer).
+ */
 export function registerAcpRuntimes(target: AcpSpawnTarget, bridge: McpBridge): void {
+  const host = new AcpHost({ command: target.command, args: target.args, cwd: target.cwd });
   for (const name of ACP_RUNTIME_NAMES) {
-    registerRuntime(
-      name,
-      () => new AcpRuntime({ command: target.command, args: target.args, cwd: target.cwd, bridge }),
-    );
+    registerRuntime(name, () => new AcpRuntime({ host, bridge }));
   }
 }
 

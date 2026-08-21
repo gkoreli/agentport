@@ -176,6 +176,15 @@ export interface AgentRuntime {
        * would mean a real policy object three weeks later.
        */
       policy: AttachmentPolicy;
+      /**
+       * The daemon's channel for "this session just died OUTSIDE any turn" —
+       * a shared agent process exiting under a live attachment is the case
+       * that created it. A runtime with nothing that can die out-of-band
+       * never calls it; a runtime that does MUST, because a session whose
+       * every future prompt would fail is otherwise indistinguishable from a
+       * healthy idle one until a user types into it.
+       */
+      fatal?: (reason: string) => void;
     },
   ): Promise<void> | void;
   closeSession?(): Promise<void> | void;

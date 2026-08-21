@@ -80,13 +80,293 @@ export async function terminateProcessTree(child: ChildProcessWithoutNullStreams
  *   AgentPort grant           -> ACP mcpServers[] at session/new
  */
 
-export interface AcpRuntimeOptions {
+export interface AcpHostOptions {
   /** Executable implementing an ACP agent over stdio. */
   command: string;
   args?: string[];
-  /** Working directory handed to the agent as the session cwd. */
+  /** Working directory the agent runs in, and each session's cwd. */
   cwd?: string;
   env?: Record<string, string>;
+  sink?: LogSink;
+}
+
+/** What the agent advertised at initialize — one answer per process. */
+export interface AcpCapabilities {
+  supportsLoad: boolean;
+  supportsResume: boolean;
+  supportsImages: boolean;
+}
+
+interface HostReady {
+  /** The agent-facing request interface of the one shared connection. */
+  connection: ClientContext;
+  capabilities: AcpCapabilities;
+}
+
+/**
+ * ONE agent process, many attachments.
+ *
+ * The daemon used to spawn a fresh ACP child per session, so two tabs were
+ * two model processes with nothing shared — the exact opposite of "one agent
+ * everywhere", and unbounded until the session cap existed. ACP's own shape
+ * is one connection carrying many sessions, so the host owns the child, the
+ * connection, and the initialize answer, and each AgentPort attachment is an
+ * ACP `session/new` inside it.
+ *
+ * WHAT SHARING DOES AND DOES NOT MEAN. The process and its memory pressure
+ * are shared; the conversations are not — each attachment is its own ACP
+ * session with its own history, its own MCP bridge registration, its own
+ * bearer token. Two attachments sharing a child still cannot reach each
+ * other's lent tools, because the bridge minted each a distinct token and
+ * URL; `runtime:check` asserts that refusal directly.
+ *
+ * INBOUND ROUTING is the host's whole job after spawn: every session/update,
+ * permission request and elicitation arrives on the one connection carrying a
+ * sessionId, and is dispatched to the runtime adopted under that id. An id
+ * nobody adopted is answered with the channel's safe refusal (drop / cancel /
+ * decline) and logged — never silently, never to the wrong session.
+ *
+ * ELICITATION CAPABILITY moved from per-session initialize to here, because
+ * initialize happens once per process now. Declaring it is affordance, not
+ * authority: the per-attachment gate is enforced where the question arrives
+ * (`AcpRuntime.handleElicitation` declines when this session's policy says
+ * no), and the daemon's routing — the actual security boundary, ADR-024 —
+ * never depended on the agent's affordance in the first place.
+ *
+ * LIFECYCLE: lazy spawn on first acquire; the child dies when the last
+ * attachment releases (zero attachments is zero model processes, the same
+ * resource profile as before); an UNEXPECTED death fails every adopted
+ * runtime loudly — each live turn rejects when the connection closes, each
+ * session is told through its `fatal` channel and closed — and the next
+ * attachment respawns from clean state. Never a silent zombie.
+ */
+export class AcpHost {
+  readonly #options: AcpHostOptions;
+  readonly #log: Logger;
+  #child: ChildProcessWithoutNullStreams | undefined;
+  #acpConnection: ClientConnection | undefined;
+  #capabilities: AcpCapabilities | undefined;
+  #starting: Promise<HostReady> | undefined;
+  /** Set while #terminate runs, so the exit handler knows it was deliberate. */
+  #stopping = false;
+  #adopted = new Map<string, AcpRuntime>();
+
+  constructor(options: AcpHostOptions) {
+    this.#options = options;
+    this.#log = createLogger('daemon.runtime.acp.host', { sink: options.sink });
+  }
+
+  get cwd(): string {
+    return this.#options.cwd ?? process.cwd();
+  }
+
+  /** The live child's pid, for checks that must observe the process itself. */
+  get pid(): number | undefined {
+    return this.#child?.pid;
+  }
+
+  /**
+   * Ensure the agent process is running and initialized. Single-flight: two
+   * attachments arriving together get the same spawn, not a race of two.
+   */
+  acquire(): Promise<HostReady> {
+    if (this.#acpConnection && this.#capabilities) {
+      return Promise.resolve({ connection: this.#acpConnection.agent, capabilities: this.#capabilities });
+    }
+    this.#starting ??= this.#start().catch((err: unknown) => {
+      // A failed spawn must not poison every later attachment: clear the
+      // single-flight so the next acquire tries again, and let this one fail.
+      this.#starting = undefined;
+      throw err;
+    });
+    return this.#starting;
+  }
+
+  /** Route this ACP session's inbound traffic to its runtime from now on. */
+  adopt(sessionId: string, runtime: AcpRuntime): void {
+    this.#adopted.set(sessionId, runtime);
+  }
+
+  /**
+   * The attachment is gone. When it was the last one, the child goes too:
+   * zero attachments must hold zero model processes, which is the resource
+   * profile the per-session spawn had and the session cap budgets for.
+   */
+  async release(runtime: AcpRuntime): Promise<void> {
+    for (const [sessionId, adopted] of this.#adopted) {
+      if (adopted === runtime) this.#adopted.delete(sessionId);
+    }
+    if (this.#adopted.size === 0 && this.#child) await this.#terminate('last attachment closed');
+  }
+
+  async #start(): Promise<HostReady> {
+    const child = spawn(this.#options.command, this.#options.args ?? [], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      detached: process.platform !== 'win32',
+      env: { ...process.env, ...this.#options.env },
+      cwd: this.cwd,
+    });
+    this.#child = child;
+    this.#stopping = false;
+    child.stderr.on('data', (chunk: Buffer) => {
+      this.#log.warn('agent wrote to stderr', { data: { output: chunk.toString().trimEnd() } });
+    });
+    child.once('error', (err) =>
+      this.#log.error('agent process failed', { err, data: { command: this.#options.command } }),
+    );
+    child.once('exit', (code, signal) => {
+      if (this.#child !== child || this.#stopping) return;
+      this.#died(`agent process died (${signal ?? `exit ${code}`})`);
+    });
+
+    const stream = ndJsonStream(
+      Writable.toWeb(child.stdin) as WritableStream<Uint8Array>,
+      Readable.toWeb(child.stdout) as ReadableStream<Uint8Array>,
+    );
+
+    // Use ACP's current request-context API. Unlike the deprecated
+    // ClientSideConnection adapter, it preserves the AbortSignal attached to
+    // requestPermission, which claude-agent-acp forwards from each tool call.
+    // Every handler routes by the sessionId the frame carries; the safe
+    // answer for an id nobody adopted is the channel's own refusal, logged.
+    const acpConnection = client({ name: 'agentport' })
+      .onNotification(methods.client.session.update, (request) => {
+        const runtime = this.#adopted.get(request.params.sessionId);
+        if (!runtime) {
+          this.#log.warn('dropping a session update for an unadopted session', {
+            data: { acpSessionId: request.params.sessionId, update: request.params.update.sessionUpdate },
+          });
+          return;
+        }
+        runtime.handleUpdate(request.params);
+      })
+      .onRequest(methods.client.elicitation.create, async (request) => {
+        // Inside a request handler the only acceptable outcome is an answer,
+        // so an internal failure declines rather than throwing — declining is
+        // honest: the user did not answer (see handleElicitation).
+        try {
+          const sessionId = (request.params as { sessionId?: string }).sessionId;
+          const runtime = sessionId === undefined ? undefined : this.#adopted.get(sessionId);
+          if (!runtime) {
+            this.#log.warn('declining an elicitation with no adopted session', {
+              data: { acpSessionId: sessionId ?? 'absent' },
+            });
+            return { action: 'decline' as const };
+          }
+          return await runtime.handleElicitation(request.params, request.signal);
+        } catch (err) {
+          this.#log.error('elicitation failed internally; declining', { err });
+          return { action: 'decline' as const };
+        }
+      })
+      .onRequest(methods.client.session.requestPermission, async (request) => {
+        // A throw here never reaches the agent — it just never answers, and
+        // our error becomes the peer's hang. The only acceptable outcome is
+        // an answer, so an internal failure becomes a DENIAL with a logged
+        // reason: the user was never asked.
+        try {
+          const runtime = this.#adopted.get(request.params.sessionId);
+          if (!runtime) {
+            this.#log.warn('cancelling a permission request with no adopted session', {
+              data: { acpSessionId: request.params.sessionId },
+            });
+            return { outcome: { outcome: 'cancelled' as const } };
+          }
+          return await runtime.handlePermission(request.params, request.signal);
+        } catch (err) {
+          this.#log.error('permission request failed internally; denying', { err });
+          return { outcome: { outcome: 'cancelled' as const } };
+        }
+      })
+      .connect(stream);
+    this.#acpConnection = acpConnection;
+
+    const init = await acpConnection.agent.request(methods.agent.initialize, {
+      protocolVersion: PROTOCOL_VERSION,
+      clientInfo: { name: 'agentport', version: '0.0.1' },
+      // We expose no filesystem and no terminal. The only capabilities the
+      // agent gains from us are each session's lent tools, over MCP.
+      //
+      // Elicitation is a PROCESS-level declaration now (one initialize), so
+      // it is always declared and the per-attachment policy is enforced when
+      // a question actually arrives — handleElicitation declines for a
+      // session whose tier has no unforgeable answer surface. The daemon's
+      // routing never granted such a tier an answer path anyway (ADR-024);
+      // what is lost against the per-session declaration is only the
+      // affordance-shaping: an agent may now ASK on a no-ask session and be
+      // declined, where before it had no ask tool at all.
+      //
+      // The marker MUST be `{}`, not `true`: the SDK parses this field with
+      // defaultOnError, so a wrong value is silently replaced with undefined
+      // and reads as unsupported, with no error anywhere.
+      clientCapabilities: {
+        fs: { readTextFile: false, writeTextFile: false },
+        terminal: false,
+        elicitation: { form: {} },
+      },
+    });
+    // SDK 1.3.0 keeps `loadSession` as a top-level boolean; the 1.3 session
+    // unification moved resume/list/delete/close under `sessionCapabilities`
+    // and left load where it was. For every member there, `{}` advertises
+    // support and omitted/null both decline — so the read is `!= null`, and
+    // `=== true` would silently un-advertise every conforming agent.
+    const capabilities: AcpCapabilities = {
+      supportsLoad: init.agentCapabilities?.loadSession === true,
+      supportsResume: init.agentCapabilities?.sessionCapabilities?.resume != null,
+      supportsImages: init.agentCapabilities?.promptCapabilities?.image === true,
+    };
+    this.#capabilities = capabilities;
+    this.#log.info('agent process ready', {
+      data: { command: this.#options.command, pid: child.pid, ...capabilities },
+    });
+    return { connection: acpConnection.agent, capabilities };
+  }
+
+  /** Deliberate teardown: the exit handler must not read it as a death. */
+  async #terminate(reason: string): Promise<void> {
+    const child = this.#child;
+    this.#stopping = true;
+    try {
+      this.#acpConnection?.close(new Error(`AgentPort agent host stopping: ${reason}`));
+    } catch (err) {
+      this.#log.debug('closing the agent connection failed during teardown', { err });
+    }
+    this.#child = undefined;
+    this.#acpConnection = undefined;
+    this.#capabilities = undefined;
+    this.#starting = undefined;
+    if (child) await terminateProcessTree(child);
+    this.#log.info('agent process stopped', { data: { reason } });
+  }
+
+  /**
+   * The child died underneath live attachments. Fail every one of them
+   * LOUDLY — the in-flight requests reject when the connection closes, and
+   * each adopted runtime carries the fact to its session — then reset, so the
+   * next attachment respawns instead of inheriting a zombie.
+   */
+  #died(reason: string): void {
+    this.#log.error('agent process died with attachments live', {
+      data: { reason, attachments: this.#adopted.size },
+    });
+    try {
+      this.#acpConnection?.close(new Error(reason));
+    } catch (err) {
+      this.#log.debug('closing the dead agent connection failed', { err });
+    }
+    const orphaned = [...this.#adopted.values()];
+    this.#adopted.clear();
+    this.#child = undefined;
+    this.#acpConnection = undefined;
+    this.#capabilities = undefined;
+    this.#starting = undefined;
+    for (const runtime of orphaned) runtime.hostDied(reason);
+  }
+}
+
+export interface AcpRuntimeOptions {
+  /** The shared agent process this attachment's session lives in. */
+  host: AcpHost;
   bridge: McpBridge;
   sink?: LogSink;
 }
@@ -187,29 +467,25 @@ function readOptions(source: unknown): string[] | undefined {
 }
 
 export class AcpRuntime implements AgentRuntime {
-  readonly name: string;
+  readonly name = 'acp';
 
   #options: AcpRuntimeOptions;
-  #child: ChildProcessWithoutNullStreams | undefined;
+  /** The shared connection's request interface, held while the session lives. */
   #connection: ClientContext | undefined;
-  #acpConnection: ClientConnection | undefined;
+  /** What the shared process advertised at its one initialize. */
+  #capabilities: AcpCapabilities | undefined;
   #sessionId: string | undefined;
   #bridgeSessionId: string | undefined;
   /** Set for the duration of a turn so MCP callbacks can reach the surface. */
   #turn: TurnContext | undefined;
   #log: Logger;
-  /** Whether the agent keeps its own session store we can replay from. */
-  #supportsLoad = false;
-  /**
-   * Whether the agent advertises ACP 1.3's `sessionCapabilities.resume` —
-   * continuing a session WITHOUT replaying its messages. Not a substitute for
-   * `loadSession`: by design it cannot answer `history.request`, and reading
-   * it exists so the fallback for resume-only agents is a stated fact rather
-   * than a silent degradation.
-   */
-  #supportsResume = false;
-  /** Whether the agent advertised ContentBlock::Image at initialize. */
-  #supportsImages = false;
+  /** This attachment's policy — the per-session elicitation gate reads it,
+   *  because the capability declaration is per-process now (see AcpHost). */
+  #policy: AttachmentPolicy | undefined;
+  /** The daemon's channel for "this session died outside any turn". */
+  #fatal: ((reason: string) => void) | undefined;
+  /** Set when the shared agent process died under this session. */
+  #dead: string | undefined;
   /** Tool calls the agent has announced, so updates can be labelled. */
   #toolTitles = new Map<string, string>();
   /** Set while `loadSession` is streaming history back at us. */
@@ -223,7 +499,6 @@ export class AcpRuntime implements AgentRuntime {
 
   constructor(options: AcpRuntimeOptions) {
     this.#options = options;
-    this.name = `acp:${options.command}`;
     this.#log = createLogger('daemon.runtime.acp', { sink: options.sink });
   }
 
@@ -233,100 +508,23 @@ export class AcpRuntime implements AgentRuntime {
     tools: { name: string; description: string; inputSchema: Record<string, unknown> }[];
     /** Decided by the daemon; the runtime never classifies its own session. */
     policy: AttachmentPolicy;
+    /**
+     * The daemon's channel for a fatality outside any turn: the shared
+     * process died, so this session must close rather than sit attached to
+     * nothing. Optional because demo runtimes have no process to die.
+     */
+    fatal?: (reason: string) => void;
   }): Promise<void> {
-    const child = spawn(this.#options.command, this.#options.args ?? [], {
-      stdio: ['pipe', 'pipe', 'pipe'],
-      detached: process.platform !== 'win32',
-      env: { ...process.env, ...this.#options.env },
-      cwd: this.#options.cwd ?? process.cwd(),
-    });
-    this.#child = child;
-    child.stderr.on('data', (chunk: Buffer) => {
-      this.#log.warn('agent wrote to stderr', { data: { output: chunk.toString().trimEnd() } });
-    });
-    child.once('error', (err) => this.#log.error('agent process failed', { err, data: { command: this.#options.command } }));
-
-    const stream = ndJsonStream(
-      Writable.toWeb(child.stdin) as WritableStream<Uint8Array>,
-      Readable.toWeb(child.stdout) as ReadableStream<Uint8Array>,
-    );
-
-    // Use ACP's current request-context API. Unlike the deprecated
-    // ClientSideConnection adapter, it preserves the AbortSignal attached to
-    // requestPermission, which claude-agent-acp forwards from each tool call.
-    // See its regression test:
-    // https://github.com/agentclientprotocol/claude-agent-acp/blob/main/src/tests/acp-agent.test.ts
-    const acpConnection = client({ name: 'agentport' })
-      .onNotification(methods.client.session.update, (request) => this.#sessionUpdate(request.params))
-      .onRequest(methods.client.elicitation.create, async (request) => {
-        // Same posture as the permission handler below: inside a request
-        // handler the only acceptable outcome is an answer, so an internal
-        // failure declines rather than throwing. Declining is honest here —
-        // it means the user did not answer, and the agent proceeds knowing
-        // that, which is what an unanswered question must decay into.
-        try {
-          return await this.#elicit(request.params, request.signal);
-        } catch (err) {
-          this.#log.error('elicitation failed internally; declining', { err });
-          return { action: 'decline' as const };
-        }
-      })
-      .onRequest(methods.client.session.requestPermission, async (request) => {
-        // A throw here never reaches the agent — it just never answers, and
-        // the agent waits for a permission response that will never come
-        // until the turn aborts. Our error becomes the peer's hang, which is
-        // the same disease as a handler set nobody registered, one level up.
-        //
-        // Inside a request handler the only acceptable outcome is an answer,
-        // so an internal failure becomes a DENIAL with a logged reason.
-        // Denying is the honest answer: the user was never asked.
-        try {
-          return await this.#requestPermission(request.params, request.signal);
-        } catch (err) {
-          this.#log.error('permission request failed internally; denying', { err });
-          return { outcome: { outcome: 'cancelled' } };
-        }
-      })
-      .connect(stream);
-    this.#acpConnection = acpConnection;
-    const connection = acpConnection.agent;
+    // One shared process for every attachment; the host spawns it lazily and
+    // reaps it when the last attachment releases. What stays PER SESSION is
+    // everything with authority in it: the bridge registration (its own
+    // bearer token and URL), the ACP session, and the policy gate.
+    const { connection, capabilities } = await this.#options.host.acquire();
     this.#connection = connection;
-
-    const init = await connection.request(methods.agent.initialize, {
-      protocolVersion: PROTOCOL_VERSION,
-      clientInfo: { name: 'agentport', version: '0.0.1' },
-      // We expose no filesystem and no terminal. The only capabilities this
-      // agent gains from us are the site's tools, over MCP, below.
-      //
-      // Elicitation is declared PER ATTACHMENT, from the policy the daemon
-      // decided — it knows which tier answers this session's questions and
-      // the runtime does not (ADR-024 R2). Declaring it is what makes the
-      // agent's AskUserQuestion available at all: claude-agent-acp puts that
-      // tool on its own disallowed list when form elicitation is absent. So
-      // on a tier with no unforgeable answer surface the refusal costs no
-      // code here and cannot hang — the agent simply has no way to ask.
-      //
-      // The marker MUST be `{}`, not `true`: the SDK parses this field with
-      // defaultOnError, so a wrong value is silently replaced with undefined
-      // and reads as unsupported, with no error anywhere.
-      clientCapabilities: {
-        fs: { readTextFile: false, writeTextFile: false },
-        terminal: false,
-        // `=== true`, not truthiness, and tolerant of the field being
-        // absent entirely: required by the type so every real caller has to
-        // decide, and fail-closed at runtime so a caller that did not cannot
-        // accidentally be granted it. Absent ownership is refusal here too.
-        ...(context.policy?.mayAsk === true ? { elicitation: { form: {} } } : {}),
-      },
-    });
-    // SDK 1.3.0 keeps `loadSession` as a top-level boolean; the 1.3 session
-    // unification moved resume/list/delete/close under `sessionCapabilities`
-    // and left load where it was. For every member there, `{}` advertises
-    // support and omitted/null both decline — so the read is `!= null`, and
-    // `=== true` would silently un-advertise every conforming agent.
-    this.#supportsLoad = init.agentCapabilities?.loadSession === true;
-    this.#supportsResume = init.agentCapabilities?.sessionCapabilities?.resume != null;
-    this.#supportsImages = init.agentCapabilities?.promptCapabilities?.image === true;
+    this.#capabilities = capabilities;
+    this.#policy = context.policy;
+    this.#fatal = context.fatal;
+    this.#dead = undefined;
 
     // Register the surface's tools and hand the agent their endpoint.
     await this.#options.bridge.start();
@@ -353,21 +551,39 @@ export class AcpRuntime implements AgentRuntime {
     ];
 
     // A new AgentPort attachment is a new authority boundary and therefore a
-    // new ACP session. Origin and surface labels are display metadata, not
-    // identity: two tabs can legitimately share both. Explicit AgentPort
-    // resume keeps this AcpRuntime instance and its session id; no inference
-    // or process-global registry participates in that path.
+    // new ACP session — inside the SHARED process. Origin and surface labels
+    // are display metadata, not identity: two tabs can legitimately share
+    // both. Explicit AgentPort resume keeps this AcpRuntime instance and its
+    // session id; no inference or process-global registry participates.
     const session = await connection.request(methods.agent.session.new, {
-      cwd: this.#options.cwd ?? process.cwd(),
+      cwd: this.#options.host.cwd,
       mcpServers: this.#mcpServers,
     });
     this.#sessionId = session.sessionId;
+    // Adopt AFTER session/new answered: the id does not exist to route to
+    // before that, and the host logs-and-drops anything for an unadopted id.
+    this.#options.host.adopt(session.sessionId, this);
     this.#log.info('ACP session ready', {
       data: { acpSessionId: session.sessionId, surface: context.surface.name, toolCount: context.tools.length },
     });
   }
 
+  /**
+   * The shared process died under this live session (called by the host).
+   * The in-flight turn, if any, is already rejecting — the connection closed
+   * with an error — so what remains is the session with no turn running:
+   * carry the fact to the daemon, which closes it honestly instead of
+   * leaving an attachment whose every future prompt would fail.
+   */
+  hostDied(reason: string): void {
+    this.#dead = reason;
+    this.#connection = undefined;
+    this.#sessionId = undefined;
+    this.#fatal?.(reason);
+  }
+
   async prompt(text: string, ctx: TurnContext): Promise<void> {
+    if (this.#dead) throw new Error(`the agent process died: ${this.#dead}`);
     const connection = this.#connection;
     const sessionId = this.#sessionId;
     if (!connection || !sessionId) throw new Error('ACP session was never opened');
@@ -400,11 +616,12 @@ export class AcpRuntime implements AgentRuntime {
     // it silently is the invisible-diminishment failure: the model would
     // answer a question about an image it never received, and guess.
     const blocks = ctx.blocks ?? [];
+    const supportsImages = this.#capabilities?.supportsImages === true;
     const images =
-      this.#supportsImages ?
+      supportsImages ?
         blocks.map((block) => ({ type: 'image' as const, mimeType: block.mime, data: block.data }))
       : [];
-    if (blocks.length > 0 && !this.#supportsImages) {
+    if (blocks.length > 0 && !supportsImages) {
       this.#log.warn('agent does not accept images; telling the user', {
         data: { acpSessionId: sessionId, dropped: blocks.length },
       });
@@ -444,14 +661,14 @@ export class AcpRuntime implements AgentRuntime {
     const connection = this.#connection;
     const sessionId = this.#sessionId;
     if (!connection || !sessionId) return null;
-    if (!this.#supportsLoad) {
+    if (this.#capabilities?.supportsLoad !== true) {
       // `session/resume` continues WITHOUT replaying messages — by design it
       // cannot answer a history request, so a resume-only agent falls back to
       // the daemon's observed transcript. Saying so is what makes the
       // provenance claim true for agents beyond claude-agent-acp: the
       // fallback is a property of the agent's advertised capabilities, not a
       // silent failure of ours.
-      if (this.#supportsResume) {
+      if (this.#capabilities?.supportsResume === true) {
         this.#log.info('agent resumes without replay; history falls back to the observed transcript', {
           data: { acpSessionId: sessionId },
         });
@@ -464,7 +681,7 @@ export class AcpRuntime implements AgentRuntime {
     try {
       await connection.request(methods.agent.session.load, {
         sessionId,
-        cwd: this.#options.cwd ?? process.cwd(),
+        cwd: this.#options.host.cwd,
         mcpServers: this.#mcpServers,
       });
       return collected;
@@ -492,24 +709,24 @@ export class AcpRuntime implements AgentRuntime {
   }
 
   async closeSession(): Promise<void> {
-    const child = this.#child;
-    this.#child = undefined;
     // Withdrawing the bridge is the one step that MUST happen: it is a live
     // loopback endpoint holding a bearer token for the session's tools, and
-    // ADR-019 Gate C requires it to be gone on close. It used to sit after a
-    // connection close that can throw, which would have left the registration
-    // — and its token — routable for the rest of the process's life.
+    // ADR-019 Gate C requires it to be gone on close. The shared process is
+    // NOT ours to kill — the host reaps it when the last attachment releases,
+    // and after an unexpected death release() is a no-op on an empty map, so
+    // this stays safe to call on a session the host already orphaned.
     try {
-      this.#acpConnection?.close(new Error('AgentPort session closed'));
-    } finally {
       if (this.#bridgeSessionId) await this.#options.bridge.unregister(this.#bridgeSessionId);
+    } finally {
+      await this.#options.host.release(this);
     }
-    if (child) await terminateProcessTree(child);
     this.#bridgeSessionId = undefined;
-    this.#acpConnection = undefined;
     this.#connection = undefined;
+    this.#capabilities = undefined;
     this.#sessionId = undefined;
     this.#turn = undefined;
+    this.#policy = undefined;
+    this.#fatal = undefined;
   }
 
   // -------------------------------------------------------------------------
@@ -543,7 +760,8 @@ export class AcpRuntime implements AgentRuntime {
     );
   }
 
-  #sessionUpdate(params: SessionNotification): void {
+  /** Inbound session/update for THIS session, routed here by the host. */
+  handleUpdate(params: SessionNotification): void {
     const update = params.update;
 
     // During a replay there is no live turn; collect instead of stream.
@@ -621,10 +839,20 @@ export class AcpRuntime implements AgentRuntime {
    * destroying a turn is a worse answer to silence than proceeding without
    * one.
    */
-  async #elicit(
+  async handleElicitation(
     params: { mode?: string; message?: string; requestedSchema?: unknown },
     signal: AbortSignal,
   ): Promise<{ action: 'accept'; content: Record<string, string> } | { action: 'decline' }> {
+    // The per-session gate that replaced the per-session capability
+    // declaration (see AcpHost): elicitation is declared once per process,
+    // so a session whose tier has no unforgeable answer surface refuses HERE
+    // — same decay as an unanswered question, stated in the log. The daemon's
+    // routing never had an answer path for such a tier anyway; this keeps the
+    // agent-facing behaviour honest instead of hanging its request.
+    if (this.#policy?.mayAsk !== true) {
+      this.#log.warn('declining an elicitation on a session whose policy forbids asks');
+      return { action: 'decline' };
+    }
     const turn = this.#turn;
     if (!turn || signal.aborted) return { action: 'decline' };
 
@@ -653,7 +881,8 @@ export class AcpRuntime implements AgentRuntime {
     return { action: 'accept', content: answers };
   }
 
-  async #requestPermission(
+  /** Inbound session/request_permission for THIS session, routed by the host. */
+  async handlePermission(
     params: RequestPermissionRequest,
     signal: AbortSignal,
   ): Promise<RequestPermissionResponse> {
@@ -752,17 +981,3 @@ export class AcpRuntime implements AgentRuntime {
   }
 }
 
-/** Claude Code over ACP, via the official Claude Agent SDK adapter. */
-export function claudeCodeRuntime(bridge: McpBridge, sink?: LogSink): AcpRuntime {
-  return new AcpRuntime({
-    command: process.execPath,
-    args: [
-      process.env.AGENTPORT_ACP_ENTRY ??
-        new URL('../../../../node_modules/@agentclientprotocol/claude-agent-acp/dist/index.js', import.meta.url)
-          .pathname,
-    ],
-    cwd: process.env.AGENTPORT_AGENT_CWD ?? process.cwd(),
-    bridge,
-    sink,
-  });
-}

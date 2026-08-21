@@ -19,7 +19,7 @@
 import { WebSocket as NodeWebSocket } from 'ws';
 import { AgentDaemon } from '../packages/daemon/src/daemon.js';
 import { McpBridge } from '../packages/daemon/src/mcp-bridge.js';
-import { AcpRuntime } from '../packages/daemon/src/runtimes/acp.js';
+import { AcpHost, AcpRuntime } from '../packages/daemon/src/runtimes/acp.js';
 import { RUNTIMES, type AgentRuntime } from '../packages/daemon/src/runtime.js';
 import { AgentWallet, type SiteTool } from '../packages/client/src/index.js';
 import { generateKeyPair } from '../packages/protocol/src/index.js';
@@ -71,17 +71,20 @@ const bridge = new McpBridge();
 const keys = generateKeyPair();
 const approvals: string[] = [];
 
-const createRuntime = (): AgentRuntime => {
-  const known = RUNTIMES[runtimeName];
-  if (known) return known();
-  return new AcpRuntime({
+let sharedHost: AcpHost | undefined;
+const acpHost = (): AcpHost =>
+  (sharedHost ??= new AcpHost({
     command: process.env.AGENTPORT_ACP_COMMAND ?? 'npx',
     args: (process.env.AGENTPORT_ACP_ARGS ?? '-y @agentclientprotocol/claude-agent-acp')
       .split(' ')
       .filter(Boolean),
     cwd: process.env.AGENTPORT_AGENT_CWD ?? process.cwd(),
-    bridge,
-  });
+  }));
+
+const createRuntime = (): AgentRuntime => {
+  const known = RUNTIMES[runtimeName];
+  if (known) return known();
+  return new AcpRuntime({ host: acpHost(), bridge });
 };
 
 const daemon = new AgentDaemon({

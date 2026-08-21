@@ -22,7 +22,7 @@
 import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { AcpRuntime } from '../packages/daemon/src/runtimes/acp.js';
+import { AcpHost, AcpRuntime } from '../packages/daemon/src/runtimes/acp.js';
 import { McpBridge } from '../packages/daemon/src/mcp-bridge.js';
 import { describeAcpProbe, probeAcpRuntime } from '../packages/daemon/src/acp-preflight.js';
 import type { TurnContext } from '../packages/daemon/src/runtime.js';
@@ -37,7 +37,7 @@ const check = (label: string, ok: boolean, detail?: unknown): void => {
 const timer = setTimeout(() => {
   console.log('\nTIMED OUT — the scripted agent never finished');
   process.exit(1);
-}, 30_000);
+}, 60_000);
 
 const fixture = fileURLToPath(new URL('./fixtures/acp/prompt-echo-agent.mjs', import.meta.url));
 
@@ -51,7 +51,7 @@ async function promptSeenByAgent(options: {
   text: string;
 }): Promise<{ seen: string; thoughts: string[] }> {
   const bridge = new McpBridge();
-  const runtime = new AcpRuntime({ command: process.execPath, args: [fixture], bridge });
+  const runtime = new AcpRuntime({ host: new AcpHost({ command: process.execPath, args: [fixture] }), bridge });
   const surface = {
     name: 'Echo Check',
     origin: 'https://example.test',
@@ -133,8 +133,7 @@ async function historyOf(caps: string): Promise<{ replayed: string | null; logs:
   const logs: LogEntry[] = [];
   const bridge = new McpBridge();
   const runtime = new AcpRuntime({
-    command: process.execPath,
-    args: [fixture, caps],
+    host: new AcpHost({ command: process.execPath, args: [fixture, caps] }),
     bridge,
     sink: (entry) => logs.push(entry),
   });
@@ -230,8 +229,7 @@ console.log('\n4. a lent toolset that never becomes real is said out loud');
   const logs: LogEntry[] = [];
   const bridge = new McpBridge({ sink: () => {} });
   const runtime = new AcpRuntime({
-    command: process.execPath,
-    args: [fixture],
+    host: new AcpHost({ command: process.execPath, args: [fixture] }),
     bridge,
     sink: (entry) => logs.push(entry),
   });
@@ -274,7 +272,7 @@ console.log('\n4. a lent toolset that never becomes real is said out loud');
 {
   // Zero lent tools: nothing was diminished, so nothing is announced.
   const bridge = new McpBridge({ sink: () => {} });
-  const runtime = new AcpRuntime({ command: process.execPath, args: [fixture], bridge, sink: () => {} });
+  const runtime = new AcpRuntime({ host: new AcpHost({ command: process.execPath, args: [fixture] }), bridge, sink: () => {} });
   const none: TurnContext['tools'] = [];
   const emptyGrant = { tools: none, alwaysAsk: [], expiresAt: Date.now() + 60_000 };
   await runtime.openSession({
@@ -298,6 +296,179 @@ console.log('\n4. a lent toolset that never becomes real is said out loud');
   });
   check('a session that lent nothing warns about nothing', thoughts.length === 0, thoughts);
   await runtime.closeSession();
+  await bridge.stop();
+}
+
+console.log('\n5. one agent process, many attachments — and the walls between them');
+// The shared-process host is the production shape now: registerAcpRuntimes
+// builds ONE AcpHost per daemon. What must hold: two attachments share one
+// child; their conversations never cross; a cancel reaches exactly its own
+// session; the bridge's bearer walls survive the sharing; a dead child fails
+// every attachment loudly and the next one respawns; the last release reaps.
+{
+  const { mkdtempSync, readFileSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const spawnLog = join(mkdtempSync(join(tmpdir(), 'agentport-echo-')), 'spawns.log');
+  const spawnedPids = (): string[] =>
+    readFileSync(spawnLog, 'utf8').split('\n').filter((line) => line && !line.startsWith('cancel'));
+  const cancelLines = (): string[] =>
+    readFileSync(spawnLog, 'utf8').split('\n').filter((line) => line.startsWith('cancel'));
+
+  const host = new AcpHost({
+    command: process.execPath,
+    args: [fixture],
+    env: { AGENTPORT_ECHO_SPAWN_LOG: spawnLog },
+  });
+  const bridge = new McpBridge({ sink: () => {} });
+  const fatals: string[] = [];
+  const openOn = async (
+    label: string,
+    options: { mayAsk?: boolean } = {},
+  ): Promise<{ runtime: AcpRuntime; said: string[]; logs: LogEntry[]; prompt: (text: string, signal?: AbortSignal) => Promise<string> }> => {
+    const logs: LogEntry[] = [];
+    const runtime = new AcpRuntime({ host, bridge, sink: (entry) => logs.push(entry) });
+    await runtime.openSession({
+      surface: { name: label, origin: 'https://shared.test' },
+      grant,
+      tools,
+      policy: { mayAsk: options.mayAsk ?? false, mayUseOwnTools: false },
+      fatal: (reason) => fatals.push(`${label}: ${reason}`),
+    });
+    const said: string[] = [];
+    const prompt = async (text: string, signal?: AbortSignal): Promise<string> => {
+      await runtime.prompt(text, {
+        surface: { name: label, origin: 'https://shared.test' },
+        grant,
+        tools,
+        say: (chunk) => said.push(chunk),
+        think: () => {},
+        plan: () => {},
+        // The consent surface a mayAsk session would reach: answers one field.
+        ask: () => Promise.resolve({ draft: 'the second one' }),
+        callTool: () => Promise.resolve({}),
+        requestApproval: () => Promise.resolve(false),
+        signal: signal ?? new AbortController().signal,
+      });
+      return said.join('');
+    };
+    return { runtime, said, logs, prompt };
+  };
+
+  const a = await openOn('Tab A');
+  const b = await openOn('Tab B');
+  check('two attachments spawned ONE agent process', spawnedPids().length === 1, spawnedPids());
+  check('and the host can name it', typeof host.pid === 'number', host.pid);
+
+  await a.prompt('alpha secret');
+  await b.prompt('beta secret');
+  check('each conversation carries only its own words', a.said.join('').includes('alpha secret') && !a.said.join('').includes('beta'), a.said.join('').slice(-80));
+  check('in both directions', b.said.join('').includes('beta secret') && !b.said.join('').includes('alpha'), b.said.join('').slice(-80));
+
+  // The elicitation gate that replaced the per-session capability
+  // declaration (initialize is per-process now): a session whose policy
+  // forbids asks DECLINES at the runtime, with the refusal in the log — the
+  // log line is what separates the gate from the ask-surface's own decline.
+  {
+    const asker = await openOn('Tab Ask', { mayAsk: true });
+    await asker.prompt('[ask] which draft?');
+    check('a mayAsk session answers the agent question', asker.said.join('').includes('ask:accept'), asker.said.join('').slice(-40));
+    await asker.runtime.closeSession();
+    const denied = await a.prompt('[ask] and you?');
+    check('a no-ask session declines the same question', denied.includes('ask:decline'), denied.slice(-40));
+    check(
+      'and the decline names the policy, not the surface',
+      a.logs.some((entry) => entry.level === 'warn' && entry.message.includes('policy forbids asks')),
+      a.logs.filter((entry) => entry.level === 'warn').map((entry) => entry.message).slice(-3),
+    );
+  }
+
+  // Cancellation isolation: hold A's turn, cancel it, and read from the
+  // fixture's own record WHICH session the cancel reached — a misrouted
+  // cancel is invisible from the answers when the other side was never held.
+  const holdController = new AbortController();
+  const heldTurn = a.prompt('[hold] park this', holdController.signal).catch((err: Error) => `rejected: ${err.message}`);
+  await new Promise<void>((resolve) => setTimeout(resolve, 150));
+  await b.prompt('still responsive');
+  check('a held session does not block its neighbour', b.said.join('').includes('still responsive'), b.said.join('').slice(-60));
+  holdController.abort();
+  await Promise.race([heldTurn, new Promise<void>((resolve) => setTimeout(resolve, 3_000))]);
+  check('the cancel reached exactly the held session', cancelLines().length === 1 && (cancelLines()[0] ?? '').includes('sess-echo-1'), cancelLines());
+
+  // The bearer walls the sharing depends on: session A's endpoint refuses
+  // session B's token. Proven at the bridge itself with a real MCP client —
+  // this is the property that makes one process per N attachments safe.
+  {
+    const walls = new McpBridge({ sink: () => {} });
+    await walls.start();
+    const regA = walls.register('s_wall_a', tools, async () => ({}));
+    const regB = walls.register('s_wall_b', tools, async () => ({}));
+    const cross = new Client({ name: 'runtime-check-cross', version: '1' });
+    const refused = await cross
+      .connect(
+        new StreamableHTTPClientTransport(new URL(regA.url), {
+          requestInit: { headers: { Authorization: `Bearer ${regB.token}` } },
+        }),
+      )
+      .then(() => 'connected', (err: Error) => err.message);
+    // The transport surfaces the 401's BODY ('bad token'), not the status
+    // code — asserting '401' here was the check being wrong, not the wall.
+    check(
+      'one session token is refused at another session endpoint',
+      refused !== 'connected' && refused.includes('bad token'),
+      refused,
+    );
+    await walls.stop();
+  }
+
+  // Child death: every live attachment is told, loudly, and the next
+  // attachment respawns from clean state instead of inheriting a zombie.
+  const deadPid = host.pid;
+  if (typeof deadPid === 'number') process.kill(deadPid, 'SIGKILL');
+  const fatalDeadline = Date.now() + 4_000;
+  while (fatals.length < 2 && Date.now() < fatalDeadline) {
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+  }
+  check('both attachments learned their agent died', fatals.length === 2 && fatals.every((entry) => entry.includes('died')), fatals);
+  const afterDeath = await a.runtime
+    .prompt('anyone home?', {
+      surface: { name: 'Tab A', origin: 'https://shared.test' },
+      grant,
+      tools,
+      say: () => {},
+      think: () => {},
+      plan: () => {},
+      ask: () => Promise.resolve(undefined),
+      callTool: () => Promise.resolve({}),
+      requestApproval: () => Promise.resolve(false),
+      signal: new AbortController().signal,
+    })
+    .then(() => 'answered', (err: Error) => err.message);
+  check('a dead session refuses its next prompt with the cause', afterDeath.includes('died'), afterDeath);
+
+  const c = await openOn('Tab C');
+  await c.prompt('fresh start');
+  check('the next attachment respawned the agent', spawnedPids().length === 2, spawnedPids());
+  check('and it works', c.said.join('').includes('fresh start'), c.said.join('').slice(-40));
+
+  // Last release reaps the child: zero attachments must hold zero model
+  // processes — the resource profile the session cap budgets for.
+  const lastPid = host.pid;
+  await a.runtime.closeSession();
+  await b.runtime.closeSession();
+  await c.runtime.closeSession();
+  let reaped = false;
+  const reapDeadline = Date.now() + 4_000;
+  while (!reaped && Date.now() < reapDeadline) {
+    try {
+      if (typeof lastPid === 'number') process.kill(lastPid, 0);
+      else reaped = true;
+      await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    } catch {
+      reaped = true;
+    }
+  }
+  check('the last release reaped the agent process', reaped, lastPid);
   await bridge.stop();
 }
 

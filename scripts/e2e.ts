@@ -14,9 +14,9 @@ import { Relay } from '../packages/relay/src/relay.js';
 import { AgentDaemon } from '../packages/daemon/src/daemon.js';
 import { memoryRevocations } from '../packages/daemon/src/revocations.js';
 import { createTerminalAsk } from '../packages/daemon/src/terminal-ask.js';
-import type { AskQuestion } from '../packages/daemon/src/runtime.js';
+import { EchoRuntime, type AskQuestion } from '../packages/daemon/src/runtime.js';
 import { McpBridge } from '../packages/daemon/src/mcp-bridge.js';
-import { AcpRuntime } from '../packages/daemon/src/runtimes/acp.js';
+import { AcpHost, AcpRuntime } from '../packages/daemon/src/runtimes/acp.js';
 import {
   DemoWriterRuntime,
   attachmentPolicy,
@@ -219,12 +219,12 @@ console.log('\n0c. ACP attachment identity');
   const bridge = new McpBridge({ sink: () => {} });
   const entries: LogEntry[] = [];
   const fixture = new URL('./fixtures/acp-session-agent.ts', import.meta.url).pathname;
-  const makeRuntime = () => new AcpRuntime({
-    command: process.execPath,
-    args: ['--import', 'tsx', fixture],
-    bridge,
-    sink: (entry) => entries.push(entry),
-  });
+  // ONE host: both attachments are sessions inside the same agent process,
+  // which is the production shape since the shared-process change — the
+  // identity property below (distinct ACP sessions, no implicit resume) now
+  // holds WITHIN one process rather than across two.
+  const host = new AcpHost({ command: process.execPath, args: ['--import', 'tsx', fixture] });
+  const makeRuntime = () => new AcpRuntime({ host, bridge, sink: (entry) => entries.push(entry) });
   const context = {
     surface: { name: 'Same Label', origin: 'https://same.test' },
     grant: { tools: [] },
@@ -3780,6 +3780,60 @@ console.log('\n24. page context reaches the runtime turn');
   connectSession25.close();
   connectWallet25.close();
   await connectDaemon25.stop();
+}
+
+// 27. The concurrency cap: a daemon holds a bounded number of sessions, and
+// the bound is the RUNTIME resource, so detached sessions count too. The
+// refusal is `agent_busy` — transient by design, because capacity returns the
+// moment any attachment closes, and a resume record refused with it must live
+// to retry (the terminality classification is asserted in wire-check §9).
+console.log('\n27. the session cap refuses honestly and recovers');
+{
+  const r27 = new Relay({ port: 0, sink: () => {} });
+  await r27.listening();
+  const url27 = `ws://127.0.0.1:${r27.port}`;
+  const user27 = generateKeyPair();
+  const agent27 = generateKeyPair();
+  const cert27 = signCert(user27.secretKey, {
+    user: user27.publicKey,
+    agent: agent27.publicKey,
+    name: 'Capped Agent',
+    runtime: 'echo',
+    issuedAt: Date.now(),
+  });
+  const daemon27 = new AgentDaemon({
+    relayUrl: url27,
+    identity: { ...agent27, name: 'Capped Agent', runtime: 'echo', cert: cert27 },
+    createRuntime: () => new EchoRuntime(),
+    maxSessions: 2,
+  });
+  await daemon27.start();
+  const wallet27 = new AgentWallet({ relayUrl: url27, userSecretKey: user27.secretKey, socketFactory });
+  await wallet27.connect();
+
+  const surfaceAt = (name: string) => ({ name, origin: `https://${name}.test` });
+  const first = await wallet27.openSession({ agent: agent27.publicKey, surface: surfaceAt('one'), tools: [] });
+  const second = await wallet27.openSession({ agent: agent27.publicKey, surface: surfaceAt('two'), tools: [] });
+  const third = await wallet27
+    .openSession({ agent: agent27.publicKey, surface: surfaceAt('three'), tools: [] })
+    .then(() => 'accepted', (err: Error) => err.message);
+  check('the session past the cap is refused', third !== 'accepted', third);
+  check('and the refusal names capacity, nothing else', third.includes('agent_busy'), third);
+  check('the sessions under the cap are untouched', first.closed === false && second.closed === false);
+
+  // Capacity returns the moment an attachment closes — no un-busy verb, no
+  // queue, just the next open succeeding where the last one was refused.
+  second.close();
+  await new Promise<void>((resolve) => setTimeout(resolve, 200));
+  const fourth = await wallet27
+    .openSession({ agent: agent27.publicKey, surface: surfaceAt('four'), tools: [] })
+    .then(() => 'accepted', (err: Error) => err.message);
+  check('closing one admits the next', fourth === 'accepted', fourth);
+
+  first.close();
+  wallet27.close();
+  await daemon27.stop();
+  await r27.close();
 }
 
 // --- teardown ---------------------------------------------------------------

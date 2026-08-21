@@ -10,6 +10,35 @@ they moved.
 
 ## Unreleased
 
+### A daemon holds a bounded number of sessions, and says "busy" honestly
+
+`AgentDaemon` spawned a runtime per session with no bound, so N attachments
+was N model processes until the OOM killer chose one. `maxSessions`
+(default 8, reasoned at the constant) now refuses the session past the cap
+with `agent_busy` — a new registry member, transient by design because
+capacity returns the moment any attachment closes, riding the unreleased v7
+cutover. Detached sessions count: each still holds its runtime for the
+whole detach grace. The resume path needs no twin clause and the comment
+says why. e2e opens cap+1, watches the refusal, closes one, watches the
+next admit.
+
+### One agent process, many attachments
+
+Every attachment used to spawn its own ACP child: two tabs were two Claude
+Code processes with nothing shared. `AcpHost` now owns one child, one
+initialize, and inbound routing by session id; each attachment is an ACP
+`session/new` inside it, with its own conversation, its own bridge
+registration, its own bearer token — `runtime:check` proves session A's
+token is refused at session B's endpoint, a cancel reaches exactly the
+session it aimed at, and a killed child fails every live attachment loudly
+(each session is told through the new `fatal` channel and closed) before
+the next attachment respawns clean. The last release reaps the child, so
+zero attachments hold zero model processes — the profile the cap budgets
+for. Verified against the real adapter: one `claude-agent-acp` process ran
+two isolated concurrent sessions. Sharing means the process, not the
+conversations — each attachment is still its own thread, and nothing
+claims otherwise.
+
 ### Two standards contributions, drafted to be filed
 
 The window the landscape research named is a distribution race, and part of
