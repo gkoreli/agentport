@@ -1,30 +1,41 @@
-import { WebSocket } from 'ws';
+/**
+ * The session aggregate: one attachment's whole life, in one file.
+ *
+ * Its size is deliberate and the split that produced it was too. Two passengers
+ * moved out — `relay-link.ts` (the socket: dial, ping, backoff, redial) and
+ * `bounds.ts` (the pure wire arithmetic) — because neither shared any state
+ * with a session. What is left is ONE thing: open, resume, prompt, tool,
+ * approval, ask, close, over `SessionState`.
+ *
+ * **Do not scatter it because it is long.** Invariant 2 is enforced at four
+ * points that only look alike if you can see them together — prompt admission,
+ * tool dispatch, dispatch again after a human took minutes to decide, and a
+ * tool result arriving late — and every one of them was, at some point, the one
+ * that was missing a clause. `AttachmentAuthority` (`authority.ts`) is the rule
+ * they all ask; this file is the set of places that must remember to ask it. A
+ * size-driven refactor that put "resume" in one module and "tool dispatch" in
+ * another would hide exactly the symmetry that makes a missing checkpoint
+ * visible on one screen.
+ */
+
 import {
   Deferred,
   Emitter,
   MAX_DESCRIPTION_CHARS,
   MAX_ERROR_CHARS,
-  MAX_FRAME_CHARS,
-  MAX_HISTORY_ENTRIES,
   MAX_MISSED_COUNT,
   MAX_PLAN_STEPS,
   MAX_REASON_CHARS,
-  MAX_SEALED_PLAINTEXT_BYTES,
   MAX_SESSIONS_REPORTED,
   MAX_TEXT_CHARS,
-  PROTOCOL_VERSION,
   SEALED_TYPES,
   SESSION_DENIAL_REASONS,
-  TIMESTAMP_MAX,
-  TIMESTAMP_MIN,
   NonceMismatchError,
   WireViolation,
   answerProofBinding,
   authChallengeMessage,
   createLogger,
-  decodeFrame,
   deriveSealChannel,
-  encodeFrame,
   delegationAuthorizes,
   fingerprintWords,
   generateSealKeyPair,
@@ -59,6 +70,8 @@ import {
 } from '@agentport/protocol';
 import type { AgentIdentity } from './identity.js';
 import { AttachmentAuthority, type AuthorityDenied } from './authority.js';
+import { boundHistory, boundString, textChunks } from './bounds.js';
+import { RelayLink } from './relay-link.js';
 import { memoryRevocations, type Revocation, type RevocationStore } from './revocations.js';
 import {
   attachmentPolicy,
@@ -223,39 +236,13 @@ const APPROVAL_TIMEOUT_MS = 5 * 60 * 1000;
  * never again (ADR-022 addendum). The CLI still nudges it far more often, so
  * the shipped path is unchanged; this is the floor underneath every other
  * embedder.
+ *
+ * It is also the `RelayLink` tick cadence, which the link's own ping divides
+ * down to `PING_INTERVAL_MS`. That is why the sweep runs only while a socket
+ * exists: it always did, and moving the timer without moving that property
+ * would have quietly started sweeping through backoff.
  */
 const SWEEP_INTERVAL_MS = 30_000;
-
-/**
- * How often the daemon pings the relay to prove the pipe is still there.
- *
- * Kept separate from the sweep cadence rather than riding on it: the sweep
- * interval is a test seam, and a 200 ms sweep must not become a 200 ms pong
- * deadline, which any momentarily busy event loop would miss and answer by
- * terminating a perfectly healthy socket.
- */
-const PING_INTERVAL_MS = 30_000;
-
-/**
- * How long `start()` waits for the relay to finish the handshake.
- *
- * The wallet has had this since it learned that a reachable-but-silent relay
- * hangs the last rung of the connect ladder; the daemon never got the same
- * treatment, and it is the side a stranger runs from a terminal. Without it a
- * relay that answers with a protocol error — a version mismatch, say — leaves
- * the process sitting forever after printing a perfectly good explanation of
- * why it cannot proceed. Tenet 3: a hang is indistinguishable from slowness,
- * and nobody waits to find out.
- */
-const HANDSHAKE_TIMEOUT_MS = 20_000;
-
-/**
- * Char budget for one history frame's entries. UTF-8 never exceeds 3 bytes
- * per UTF-16 code unit, so a char budget of bytes/3 cannot overflow the
- * sealed-plaintext byte bound however the text encodes; the subtraction
- * covers the frame envelope around the entries array.
- */
-const HISTORY_BUDGET_CHARS = Math.floor(MAX_SEALED_PLAINTEXT_BYTES / 3) - 1024;
 
 export interface DaemonOptions {
   relayUrl: string;
@@ -358,7 +345,12 @@ type DaemonEvents = {
 
 export class AgentDaemon extends Emitter<DaemonEvents> {
   #options: DaemonOptions;
-  #socket: WebSocket | undefined;
+  /**
+   * The socket, at arm's length (`relay-link.ts`). It hands up decoded frames
+   * and a beat; it is told when the handshake landed, because that is a
+   * protocol judgement and the link makes none.
+   */
+  #link: RelayLink;
   #sessions = new Map<string, SessionState>();
   /**
    * Sealing keypairs minted at connect-offer time, keyed by the client epk,
@@ -368,18 +360,13 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
    * lifetime: consent said yes, the session never opened, and the keypair
    * stayed redeemable. That is a standing "yes" for a decision the user made
    * once, minutes or days ago — and unlike a delegation it carries no origin,
-   * so revoking an origin structurally cannot reach it (ADR-022). The
-   * heartbeat expires it on the same schedule the relay expires the connect
-   * code itself.
+   * so revoking an origin structurally cannot reach it (ADR-022). The sweep
+   * expires it on the same schedule the relay expires the connect code itself.
    */
   #offerSeals = new Map<string, { keys: KeyPair; at: number }>();
   #log: Logger;
   #readyDeferred = new Deferred<{ bound: boolean }>();
-  #readyTimer: ReturnType<typeof setTimeout> | undefined;
   #authenticated = false;
-  #stopped = false;
-  #retryMs = 1000;
-  #heartbeat: ReturnType<typeof setInterval> | undefined;
   #revocations: RevocationStore;
 
   constructor(options: DaemonOptions) {
@@ -387,6 +374,29 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     this.#options = options;
     this.#log = createLogger('daemon', { sink: options.sink });
     this.#revocations = options.revocations ?? memoryRevocations();
+    this.#link = new RelayLink({
+      url: options.relayUrl,
+      log: this.#log,
+      handshakeTimeoutMs: options.handshakeTimeoutMs,
+      // The housekeeping cadence is ours; the link's ping divides it down to
+      // its own so a 200 ms test sweep cannot become a 200 ms pong deadline.
+      tickIntervalMs: options.sweepIntervalMs ?? SWEEP_INTERVAL_MS,
+    });
+    this.#link.on('frame', (frame) => {
+      void this.#onFrame(frame).catch((err: unknown) => {
+        this.#log.error('failed to handle relay frame', {
+          err,
+          ...('s' in frame ? { sessionId: frame.s } : {}),
+          data: { frameType: frame.t, relayUrl: options.relayUrl },
+        });
+      });
+    });
+    this.#link.on('tick', () => this.#sweep());
+    this.#link.on('down', () => this.#onLinkDown());
+    // A socket that cannot come up is only the caller's business until the
+    // handshake lands; the Deferred is settle-once, so a later arrival — a
+    // redial that refuses, say — stays what it already was, a logged failure.
+    this.#link.on('failed', (err) => this.#readyDeferred.reject(err));
   }
 
   #now(): number {
@@ -414,149 +424,64 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
   /**
    * Connects, and STAYS connected: a relay redeploy (Durable Objects sever
    * every socket when the Worker updates), an idle eviction, or any network
-   * blip is survived by redialing with backoff. Without this the daemon is a
-   * zombie after the first deploy — running, but reachable by nobody.
+   * blip is survived by redialing with backoff — all of which is the link's
+   * job now. What is settled HERE is what `ready` means, because that is a
+   * frame and the link reads none.
    */
   async start(): Promise<{ bound: boolean }> {
-    // Armed here rather than in `#dial`, because `#dial` also runs for every
-    // later redial and those are the close handler's business, not the
-    // caller's — `start()` has long since settled by then.
-    const handshakeMs = this.#options.handshakeTimeoutMs ?? HANDSHAKE_TIMEOUT_MS;
-    this.#readyTimer = setTimeout(() => {
-      this.#failStart(new Error(`the relay did not finish the handshake within ${handshakeMs}ms`));
-    }, handshakeMs);
-    this.#dial();
+    this.#link.start();
     return this.#readyDeferred.promise;
   }
 
   /**
-   * Settle a pending `start()` as failed, once.
+   * Housekeeping, on the link's beat: stale connect offers, detached sessions
+   * past the grace, and revocation tombstones.
    *
-   * A no-op after the handshake succeeded: the Deferred is settle-once, so a
-   * relay error arriving at a running daemon stays what it already was — a
-   * logged frame, not a reason to tear anything down.
+   * It rides the socket's interval rather than one of its own — which is where
+   * it has always run, and the reason is worth keeping: a sweep timer that
+   * outlived the socket would start sweeping through backoff, which is a
+   * different daemon from the one that shipped.
    */
-  #failStart(err: Error): void {
-    clearTimeout(this.#readyTimer);
-    this.#readyTimer = undefined;
-    this.#readyDeferred.reject(err);
+  #sweep(): void {
+    // An approval the widget never redeemed is a standing "yes" with no origin
+    // behind it, so it expires on the relay's own connect-code schedule.
+    const staleOffer = this.#now() - CONNECT_APPROVAL_TTL_MS;
+    for (const [epk, offer] of this.#offerSeals) {
+      if (offer.at < staleOffer) this.#offerSeals.delete(epk);
+    }
+    // Detached sessions do not wait forever: past the grace, close the
+    // runtime and forget the token.
+    const cutoff = this.#now() - DETACH_GRACE_MS;
+    for (const session of [...this.#sessions.values()]) {
+      if (session.detachedAt !== undefined && session.detachedAt < cutoff) {
+        void this.#closeSession(session, 'client_never_returned', false).catch((err: unknown) => {
+          this.#log.error('failed to expire detached session', { sessionId: session.id, err });
+        });
+      }
+    }
+    // The user may have written a tombstone while this session was live, and
+    // `agentport revoke` never talks to this process — so a live attachment
+    // is judged again HERE, not only when it next resumes (ADR-022 R11). The
+    // CLI's control poll calls the same idempotent method far more often;
+    // this is the floor for every other embedder, which previously had none.
+    void this.enforceRevocations().catch((err: unknown) => {
+      this.#log.error('could not close revoked attachments', { err });
+    });
   }
 
-  #dial(): void {
-    if (this.#stopped) return;
-    // maxPayload caps what a broken or hostile relay can buffer into daemon
-    // memory before decodeFrame's own char bound runs (ws client default is
-    // 100 MiB) — the same ceiling the relay itself enforces.
-    const socket = new WebSocket(this.#options.relayUrl, { maxPayload: MAX_FRAME_CHARS });
-    this.#socket = socket;
-
-    socket.on('open', () => {
-      this.#send({ t: 'hello', v: PROTOCOL_VERSION, role: 'agent' });
-    });
-    socket.on('message', (data, isBinary) => {
-      // Text frames only — mirrors both relay hosts; binary has no meaning
-      // in this protocol and stringifying it would invent one.
-      if (isBinary) {
-        this.#log.warn('dropped binary relay message', { data: { relayUrl: this.#options.relayUrl } });
-        return;
-      }
-      let frame: Frame;
-      try {
-        frame = decodeFrame(data.toString());
-      } catch (err) {
-        // The relay already validates at origination, so this firing means a
-        // broken or hostile relay — drop the frame as defense in depth. Only
-        // the violation's stable code and schema path may be logged; the
-        // frame's own bytes never appear anywhere (ADR-019 §1).
-        if (err instanceof WireViolation) {
-          this.#log.warn('dropped invalid relay frame', {
-            data: { code: err.code, path: err.path, relayUrl: this.#options.relayUrl },
-          });
-        } else {
-          this.#log.warn('dropped undecodable frame', { err, data: { relayUrl: this.#options.relayUrl } });
-        }
-        return;
-      }
-      void this.#onFrame(frame).catch((err: unknown) => {
-        this.#log.error('failed to handle relay frame', {
-          err,
-          ...('s' in frame ? { sessionId: frame.s } : {}),
-          data: { frameType: frame.t, relayUrl: this.#options.relayUrl },
-        });
-      });
-    });
-
-    // Half-open sockets (NAT timeouts, silent relay death) look connected
-    // forever without this. ws answers our ping with a pong; no pong within
-    // the next beat means the pipe is gone.
-    let alive = true;
-    socket.on('pong', () => (alive = true));
-    clearInterval(this.#heartbeat);
-    const sweepMs = this.#options.sweepIntervalMs ?? SWEEP_INTERVAL_MS;
-    // The ping keeps its own cadence ON TOP of the sweep, so shortening the
-    // sweep for a test cannot shorten the pong deadline with it.
-    const sweepsPerPing = Math.max(1, Math.round(PING_INTERVAL_MS / sweepMs));
-    let sweepsSincePing = 0;
-    this.#heartbeat = setInterval(() => {
-      // Detached sessions do not wait forever: past the grace, close the
-      // runtime and forget the token.
-      const staleOffer = this.#now() - CONNECT_APPROVAL_TTL_MS;
-      for (const [epk, offer] of this.#offerSeals) {
-        if (offer.at < staleOffer) this.#offerSeals.delete(epk);
-      }
-      const cutoff = this.#now() - DETACH_GRACE_MS;
-      for (const session of [...this.#sessions.values()]) {
-        if (session.detachedAt !== undefined && session.detachedAt < cutoff) {
-          void this.#closeSession(session, 'client_never_returned', false).catch((err: unknown) => {
-            this.#log.error('failed to expire detached session', { sessionId: session.id, err });
-          });
-        }
-      }
-      // The user may have written a tombstone while this session was live, and
-      // `agentport revoke` never talks to this process — so a live attachment
-      // is judged again HERE, not only when it next resumes (ADR-022 R11). The
-      // CLI's control poll calls the same idempotent method far more often;
-      // this is the floor for every other embedder, which previously had none.
-      void this.enforceRevocations().catch((err: unknown) => {
-        this.#log.error('could not close revoked attachments', { err });
-      });
-      if (socket.readyState !== WebSocket.OPEN) return;
-      if (++sweepsSincePing < sweepsPerPing) return;
-      sweepsSincePing = 0;
-      if (!alive) {
-        this.#log.warn('heartbeat lost; terminating socket to force a redial');
-        socket.terminate();
-        return;
-      }
-      alive = false;
-      socket.ping();
-    }, sweepMs);
-
-    socket.on('close', () => {
-      this.#authenticated = false;
-      clearInterval(this.#heartbeat);
-      // The relay is stateless: losing it detaches every session but kills
-      // none. Clients come back with their tokens through whatever relay
-      // socket exists next, and this daemon is the one that remembers them.
-      const now = this.#now();
-      for (const session of this.#sessions.values()) {
-        if (session.detachedAt === undefined) session.detachedAt = now;
-      }
-      this.emit('closed', undefined);
-      if (this.#stopped) return;
-      const delay = this.#retryMs;
-      this.#retryMs = Math.min(this.#retryMs * 2, 30_000);
-      this.#log.warn('relay connection lost; scheduling redial', {
-        data: { delayMs: delay, relayUrl: this.#options.relayUrl },
-      });
-      setTimeout(() => this.#dial(), delay);
-    });
-    socket.on('error', (err) => {
-      this.#log.error('relay websocket failed', { err, data: { relayUrl: this.#options.relayUrl } });
-      // Before the first ready this is fatal to the caller; afterwards the
-      // close handler owns recovery.
-      this.#readyDeferred.reject(err);
-    });
+  /**
+   * The socket went away. The relay is stateless: losing it detaches every
+   * session but kills none. Clients come back with their tokens through
+   * whatever relay socket exists next, and this daemon is the one that
+   * remembers them.
+   */
+  #onLinkDown(): void {
+    this.#authenticated = false;
+    const now = this.#now();
+    for (const session of this.#sessions.values()) {
+      if (session.detachedAt === undefined) session.detachedAt = now;
+    }
+    this.emit('closed', undefined);
   }
 
   /** Claim a connect code the user pasted here from a website's widget. */
@@ -655,20 +580,26 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     this.emit('unbound', undefined);
     // Re-identify without the cert. The socket close triggers the ordinary
     // redial path, which presents whatever identity we now hold.
-    this.#socket?.close();
+    this.#link.close();
   }
 
   async stop(): Promise<void> {
-    this.#stopped = true;
-    clearInterval(this.#heartbeat);
-    clearTimeout(this.#readyTimer);
-    this.#readyTimer = undefined;
+    // Stop redialing FIRST, so a close landing mid-teardown does not schedule a
+    // fresh dial — and only then close the socket, because every session still
+    // has a `session.close` to send over it.
+    this.#link.stop();
     for (const session of this.#sessions.values()) await this.#closeSession(session, 'daemon_stopping');
-    this.#socket?.close();
+    this.#link.close();
   }
 
+  /**
+   * The daemon's one outbound door. A pass-through to the link today, kept
+   * because `#sendSession` is built on it: sealed-or-clear is decided in one
+   * place, above the socket, and twenty call sites do not each have to know
+   * which layer they are talking to.
+   */
   #send(frame: Frame): void {
-    if (this.#socket?.readyState === WebSocket.OPEN) this.#socket.send(encodeFrame(frame));
+    this.#link.send(frame);
   }
 
   /**
@@ -714,10 +645,10 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
       }
 
       case 'ready': {
-        this.#retryMs = 1000;
         this.#authenticated = true;
-        clearTimeout(this.#readyTimer);
-        this.#readyTimer = undefined;
+        // The link cannot know this: it forwards frames and reads none. Telling
+        // it disarms the handshake deadline and forgets the backoff.
+        this.#link.handshakeSucceeded();
         const bound = Boolean(frame.bound);
         this.emit('ready', { bound });
         this.#readyDeferred.resolve({ bound });
@@ -990,7 +921,9 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
         // printed to a process which then waited forever. The message is
         // already good; it only needed to reach the exit.
         if (!this.#authenticated) {
-          this.#failStart(new Error(`the relay refused this daemon: ${frame.code}${frame.message ? ` — ${frame.message}` : ''}`));
+          this.#link.fail(
+            new Error(`the relay refused this daemon: ${frame.code}${frame.message ? ` — ${frame.message}` : ''}`),
+          );
         }
         return;
 
@@ -1917,23 +1850,26 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
   }
 
   /**
-   * Truncates an operational string (error detail, close reason) to its wire
-   * bound. Only lengths are logged: runtime error messages can embed tool
-   * output, which is hostile data, not log material.
+   * `boundString` plus the log line it deliberately cannot write. Only lengths
+   * are logged: runtime error messages can embed tool output, which is hostile
+   * data, not log material — and the field name comes from us, never from the
+   * string.
    */
   #bounded(value: string, max: number, field: string, sessionId?: string): string {
-    if (value.length <= max) return value;
-    this.#log.warn('outbound string truncated to wire bound', {
-      ...(sessionId ? { sessionId } : {}),
-      data: { field, max, length: value.length },
-    });
-    return `${value.slice(0, max - 1)}…`;
+    const bounded = boundString(value, max);
+    if (bounded.truncated) {
+      this.#log.warn('outbound string truncated to wire bound', {
+        ...(sessionId ? { sessionId } : {}),
+        data: { field, max, length: value.length },
+      });
+    }
+    return bounded.value;
   }
 
   /**
-   * Conversation content is never truncated silently: a runtime chunk larger
-   * than the wire's text bound is split across frames instead. Empty text
-   * still emits one frame, matching the pre-bounding behavior.
+   * Conversation content is never truncated silently: `textChunks` splits an
+   * oversized runtime chunk across frames instead, and this is the half that
+   * knows where a frame goes.
    */
   #streamText(session: SessionState, t: 'delta' | 'thought', promptId: string, text: string): void {
     if (text.length > MAX_TEXT_CHARS) {
@@ -1942,57 +1878,22 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
         data: { type: t, length: text.length, frames: Math.ceil(text.length / MAX_TEXT_CHARS) },
       });
     }
-    let offset = 0;
-    do {
-      let end = Math.min(offset + MAX_TEXT_CHARS, text.length);
-      // Never cut between a surrogate pair: the halves are not well-formed
-      // Unicode, and the wire schema rejects them. Back off one unit when the
-      // boundary lands inside a pair (a chunk of exactly one high surrogate
-      // cannot happen, since MAX_TEXT_CHARS is far larger than 1).
-      const code = text.charCodeAt(end - 1);
-      if (end < text.length && code >= 0xd800 && code <= 0xdbff) end--;
-      this.#sendSession(session, { t, s: session.id, promptId, text: text.slice(offset, end) });
-      offset = end;
-    } while (offset < text.length);
+    for (const chunk of textChunks(text)) {
+      this.#sendSession(session, { t, s: session.id, promptId, text: chunk });
+    }
   }
 
   /**
-   * History is a replay, not the source of truth — the runtime's own store
-   * keeps the full text — so the wire copy is bounded: newest entries kept up
-   * to the schema's entry cap and a conservative sealed-plaintext budget,
-   * oversized lines truncated. Timestamps outside the protocol domain become
-   * 0 — the schema's explicit "unknown" (ACP replay has no timestamps) — and
-   * are never fabricated from our own clock.
+   * `boundHistory` plus the log line it deliberately cannot write: what was cut
+   * is the session's business, and counts are the only safe rendering of it.
    */
   #boundedHistory(sessionId: string, source: HistoryEntry[]): { entries: HistoryEntry[]; truncated: boolean } {
-    let truncated = 0;
-    let unstamped = 0;
-    const bounded = source.map((entry): HistoryEntry => {
-      const cut = entry.text.length > MAX_TEXT_CHARS;
-      if (cut) truncated++;
-      const inDomain = entry.at >= TIMESTAMP_MIN && entry.at <= TIMESTAMP_MAX;
-      if (!inDomain && entry.at !== 0) unstamped++;
-      return {
-        role: entry.role,
-        text: cut ? `${entry.text.slice(0, MAX_TEXT_CHARS - 1)}…` : entry.text,
-        at: inDomain ? entry.at : 0,
-      };
-    });
-    let used = 0;
-    let keep = 0;
-    for (let i = bounded.length - 1; i >= 0 && keep < MAX_HISTORY_ENTRIES; i--) {
-      used += JSON.stringify(bounded[i]!).length + 1;
-      if (used > HISTORY_BUDGET_CHARS) break;
-      keep++;
+    const bounded = boundHistory(source);
+    const { dropped, truncatedTexts, unknownTimestamps } = bounded.counts;
+    if (truncatedTexts > 0 || unknownTimestamps > 0 || dropped > 0) {
+      this.#log.warn('history replay bounded for the wire', { sessionId, data: bounded.counts });
     }
-    const dropped = bounded.length - keep;
-    if (truncated > 0 || unstamped > 0 || dropped > 0) {
-      this.#log.warn('history replay bounded for the wire', {
-        sessionId,
-        data: { entries: bounded.length, dropped, truncatedTexts: truncated, unknownTimestamps: unstamped },
-      });
-    }
-    return { entries: bounded.slice(bounded.length - keep), truncated: truncated > 0 || dropped > 0 };
+    return { entries: bounded.entries, truncated: bounded.truncated };
   }
 
   #cancelInFlight(session: SessionState, reason: string): void {

@@ -24,6 +24,12 @@ import { basename, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 import { ResumeError } from '../packages/client/src/wallet.js';
+import {
+  HISTORY_BUDGET_CHARS,
+  boundHistory,
+  boundString,
+  textChunks,
+} from '../packages/daemon/src/bounds.js';
 import { encrypt } from '../packages/protocol/src/channel.js';
 import {
   DELEGATION_DENIALS,
@@ -38,9 +44,13 @@ import {
   MAX_CIPHERTEXT_BYTES,
   MAX_DELEGATION_CLOCK_SKEW_MS,
   MAX_DELEGATION_LIFETIME_MS,
+  MAX_ERROR_CHARS,
   MAX_FRAME_CHARS,
+  MAX_HISTORY_ENTRIES,
   MAX_SEALED_PLAINTEXT_BYTES,
   MAX_TEXT_CHARS,
+  TIMESTAMP_MAX,
+  TIMESTAMP_MIN,
 } from '../packages/protocol/src/limits.js';
 import {
   AGENT_SEALABLE,
@@ -51,6 +61,7 @@ import {
   wireFingerprint,
   type CapabilityGrant,
   type Frame,
+  type HistoryEntry,
   type SessionDelegation,
   type SessionFrame,
 } from '../packages/protocol/src/messages.js';
@@ -825,6 +836,255 @@ console.log('\n9. session denial reasons');
     new ResumeError(SESSION_DENIAL_REASONS.revoked).terminal &&
       !new ResumeError(SESSION_DENIAL_REASONS.already_attached).terminal,
   );
+}
+
+// --- 10. the daemon's outbound bounds ------------------------------------------
+//
+// Not a decode question either, and the same reason sections 7–9 are here: these
+// are the functions that make a frame LEGAL before it is sealed, and each is
+// arithmetic over `limits.ts` with a real edge — a cut that must not land
+// between the halves of a surrogate pair, a timestamp domain narrower than the
+// schema's, a char budget standing in for a byte bound.
+//
+// They were unreachable. Until they moved to `packages/daemon/src/bounds.ts`
+// the only way to execute one was to stand up a daemon, a relay and a socket
+// and hope the runtime emitted something awkward, so all three edges were
+// carried by review alone. Each case below therefore ends at the WIRE — the
+// bounded value decodes or seals, the unbounded one does not — because "the
+// slice is the right length" is a restatement of the code, while "the frame the
+// daemon would have sent is refused" is the property the function exists for.
+
+console.log('\n10. outbound bounds (daemon → wire)');
+{
+  const sid = 'sess-bounds-10';
+
+  /** A lone surrogate anywhere: what `str()` rejects as bad_format. */
+  const hasLoneSurrogate = (value: string): boolean => {
+    for (let i = 0; i < value.length; i++) {
+      const unit = value.charCodeAt(i);
+      if (unit >= 0xdc00 && unit <= 0xdfff) return true;
+      if (unit >= 0xd800 && unit <= 0xdbff) {
+        const next = i + 1 < value.length ? value.charCodeAt(i + 1) : 0;
+        if (next < 0xdc00 || next > 0xdfff) return true;
+        i++;
+      }
+    }
+    return false;
+  };
+
+  const decodes = (label: string, frame: Record<string, unknown>): void => {
+    try {
+      decodeFrame(canonicalJson(frame));
+      check(label, true);
+    } catch (err) {
+      check(label, false, describeError(err));
+    }
+  };
+
+  // --- an operational string at its bound, and one past it ---
+  {
+    const exact = 'e'.repeat(MAX_ERROR_CHARS);
+    const atLimit = boundString(exact, MAX_ERROR_CHARS);
+    check(
+      'a string of exactly its bound passes through untouched',
+      atLimit.value === exact && !atLimit.truncated,
+    );
+    const over = boundString(`${exact}x`, MAX_ERROR_CHARS);
+    check(
+      'one char past the bound truncates to exactly the bound',
+      over.truncated && over.value.length === MAX_ERROR_CHARS,
+      over.value.length,
+    );
+    check(
+      'and the cut is visible in the value, not only in a log line',
+      over.value.endsWith('…') && over.value.startsWith('e'.repeat(MAX_ERROR_CHARS - 1)),
+    );
+    // The wire is what this is for: `done.error` is where the daemon puts a
+    // runtime failure, and an untruncated one is a frame it could not send.
+    expectViolation(
+      'the unbounded string is refused on the frame it was headed for',
+      canonicalJson({ t: 'done', s: sid, promptId: 'p-bounds', stopReason: 'error', error: `${exact}x` }),
+      'too_long',
+    );
+    decodes('the bounded string is legal on that same frame', {
+      t: 'done',
+      s: sid,
+      promptId: 'p-bounds',
+      stopReason: 'error',
+      error: over.value,
+    });
+  }
+
+  // --- a surrogate pair straddling the chunk boundary ---
+  {
+    const tail = 'and the rest of the sentence';
+    const straddling = `${'a'.repeat(MAX_TEXT_CHARS - 1)}😀${tail}`;
+    // Guards the guard: if the pair does not sit ON the naive cut, everything
+    // below passes without ever exercising the backoff.
+    const atCut = straddling.charCodeAt(MAX_TEXT_CHARS - 1);
+    check(
+      'the fixture really does put a surrogate pair on the chunk boundary',
+      atCut >= 0xd800 && atCut <= 0xdbff && straddling.length > MAX_TEXT_CHARS,
+    );
+
+    const chunks = [...textChunks(straddling)];
+    check('an oversized chunk is split, not truncated', chunks.join('') === straddling);
+    check('every piece is within the wire text bound', chunks.every((c) => c.length <= MAX_TEXT_CHARS));
+    check('no piece carries a lone surrogate', !chunks.some(hasLoneSurrogate));
+    check('the pair travels whole, in the piece after the cut', chunks[1]?.startsWith('😀') === true);
+    // The property, not the mechanics: a torn pair is `bad_format` at the peer.
+    let allLegal = true;
+    let firstFailure: unknown;
+    for (const [i, chunk] of chunks.entries()) {
+      try {
+        decodeFrame(canonicalJson({ t: 'delta', s: sid, promptId: 'p-bounds', text: chunk }));
+      } catch (err) {
+        allLegal = false;
+        firstFailure ??= `chunk ${i}: ${describeError(err)}`;
+      }
+    }
+    check('every piece is a legal delta on the wire', allLegal, firstFailure);
+    check('empty text still yields exactly one (empty) frame', isDeepStrictEqual([...textChunks('')], ['']));
+  }
+
+  // --- a history that runs out of budget before it runs out of entries ---
+  {
+    // Sized FROM the budget so the fixture cannot drift out of the interesting
+    // range when a limit moves: two of these fit, three do not.
+    const per = Math.floor(HISTORY_BUDGET_CHARS / 2) - 200;
+    check('the fixture entries are sized inside the per-entry text bound', per > 0 && per <= MAX_TEXT_CHARS, per);
+    // Three-byte characters, because the budget is a CHAR stand-in for a byte
+    // bound: with ASCII the unbounded frame would seal fine and the check below
+    // would prove nothing about why this budget exists.
+    const line = (mark: string) => mark.repeat(per);
+    const source: HistoryEntry[] = [
+      { role: 'user', text: line('東'), at: 1_800_000_000_000 },
+      { role: 'agent', text: line('京'), at: 1_800_000_000_001 },
+      { role: 'agent', text: line('都'), at: 1_800_000_000_002 },
+    ];
+    check('the ENTRY cap is not what binds here — the budget is', source.length < MAX_HISTORY_ENTRIES);
+
+    const bounded = boundHistory(source);
+    check('the oldest entry is the one dropped', bounded.counts.dropped === 1, bounded.counts);
+    check(
+      'and the NEWEST survivors are kept, in order',
+      bounded.entries.length === 2 &&
+        bounded.entries[0]?.text.startsWith('京') === true &&
+        bounded.entries[1]?.text.startsWith('都') === true,
+      bounded.entries.map((entry) => entry.text.slice(0, 1)),
+    );
+    check('what is kept fits the budget', JSON.stringify(bounded.entries).length <= HISTORY_BUDGET_CHARS);
+    check('the client is told the transcript is partial', bounded.truncated);
+    check('nothing was cut mid-entry to achieve that', bounded.counts.truncatedTexts === 0);
+
+    // The bound this budget stands in for. Fresh channel: the counters advance,
+    // so this must not be entangled with section 4's.
+    const clientKeys = generateSealKeyPair();
+    const agentKeys = generateSealKeyPair();
+    const agentSend = deriveSealChannel(agentKeys.secretKey, clientKeys.publicKey, sid, 'agent').send;
+    try {
+      seal(agentSend, { t: 'history', s: sid, entries: source });
+      check('the unbounded history is a frame the daemon could not have sealed', false, 'sealed');
+    } catch (err) {
+      check(
+        'the unbounded history is a frame the daemon could not have sealed',
+        err instanceof WireViolation && err.code === 'oversize',
+        describeError(err),
+      );
+    }
+    try {
+      seal(agentSend, { t: 'history', s: sid, entries: bounded.entries, truncated: true });
+      check('the bounded history seals', true);
+    } catch (err) {
+      check('the bounded history seals', false, describeError(err));
+    }
+  }
+
+  // --- and the measurement runs from the newest end, not just the slice ---
+  //
+  // A second fixture, because the first could not see this. With equal-sized
+  // entries, walking the budget from the OLDEST end reaches the same count, and
+  // the slice then takes the same newest entries — so a reversed loop passed
+  // every check above. The two are only distinguishable when the newest entries
+  // are the heavy ones: then a count measured from the wrong end is a set that
+  // does not fit, and the frame the daemon sends is over its budget while every
+  // assertion about ordering still holds.
+  {
+    const at = 1_800_000_000_000;
+    const entryChars = (entry: HistoryEntry) => JSON.stringify(entry).length + 1;
+    const heavy: HistoryEntry = { role: 'agent', text: 'H'.repeat(MAX_TEXT_CHARS - 1000), at: at + 2 };
+    const older: HistoryEntry = { role: 'user', text: 'o'.repeat(Math.floor(HISTORY_BUDGET_CHARS / 4)), at };
+    const source: HistoryEntry[] = [{ ...older }, { ...older, at: at + 1 }, heavy];
+    check(
+      'the fixture is asymmetric enough for the measuring direction to matter',
+      entryChars(heavy) <= HISTORY_BUDGET_CHARS &&
+        entryChars(older) * 2 <= HISTORY_BUDGET_CHARS &&
+        entryChars(older) + entryChars(heavy) > HISTORY_BUDGET_CHARS,
+      { heavy: entryChars(heavy), older: entryChars(older), budget: HISTORY_BUDGET_CHARS },
+    );
+
+    const bounded = boundHistory(source);
+    check(
+      'only the newest entry fits, so both older ones go',
+      bounded.counts.dropped === 2 &&
+        bounded.entries.length === 1 &&
+        bounded.entries[0]?.text.startsWith('H') === true,
+      bounded.counts,
+    );
+    check(
+      'and the surviving set is under budget, which a wrong-ended count would not be',
+      JSON.stringify(bounded.entries).length <= HISTORY_BUDGET_CHARS,
+      JSON.stringify(bounded.entries).length,
+    );
+  }
+
+  // --- timestamps outside the protocol's domain ---
+  {
+    const real = 1_800_000_000_000;
+    const source: HistoryEntry[] = [
+      { role: 'user', text: 'before this protocol existed', at: TIMESTAMP_MIN - 1 },
+      { role: 'agent', text: 'after 2100', at: TIMESTAMP_MAX + 1 },
+      { role: 'agent', text: 'a replay that carried no clock', at: 0 },
+      { role: 'tool', text: 'an honest timestamp', at: real },
+    ];
+    const bounded = boundHistory(source);
+    check('a timestamp below the domain becomes the schema\'s unknown, 0', bounded.entries[0]?.at === 0);
+    check('a timestamp beyond the domain becomes 0 too', bounded.entries[1]?.at === 0);
+    check(
+      'an entry that already said "unknown" stays unknown and is not counted twice',
+      bounded.entries[2]?.at === 0 && bounded.counts.unknownTimestamps === 2,
+      bounded.counts,
+    );
+    check('an in-domain timestamp survives exactly', bounded.entries[3]?.at === real);
+    check(
+      'the domain edges are inside it',
+      boundHistory([
+        { role: 'user', text: 'min', at: TIMESTAMP_MIN },
+        { role: 'user', text: 'max', at: TIMESTAMP_MAX },
+      ]).counts.unknownTimestamps === 0,
+    );
+    // Only ONE of the two out-of-domain values is even expressible on the wire
+    // (`at` is int(0, TIMESTAMP_MAX)), which is exactly why the narrower domain
+    // is the daemon's job rather than the schema's.
+    expectViolation(
+      'the raw entry is refused by the wire',
+      canonicalJson({ t: 'history', s: sid, entries: [source[1]] }),
+      'out_of_range',
+    );
+    decodes('the bounded history decodes', { t: 'history', s: sid, entries: bounded.entries, truncated: true });
+
+    // An oversized line is CUT, not dropped: losing a line loses the turn it
+    // belonged to, while cutting it keeps the conversation legible.
+    const long = boundHistory([{ role: 'agent', text: 'z'.repeat(MAX_TEXT_CHARS + 10), at: real }]);
+    check(
+      'an entry past the text bound is cut rather than dropped',
+      long.entries.length === 1 &&
+        long.entries[0]?.text.length === MAX_TEXT_CHARS &&
+        long.entries[0]?.text.endsWith('…') === true &&
+        long.counts.truncatedTexts === 1,
+      long.counts,
+    );
+  }
 }
 
 // --- routers ------------------------------------------------------------------

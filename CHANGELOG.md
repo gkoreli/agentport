@@ -10,7 +10,22 @@ they moved.
 
 ## Unreleased
 
-### The consent-window service and popup API move out of the service worker
+### The daemon's transport and wire-bounding move out of the session aggregate
+
+`RelayLink` owns the socket — dial, greeting, ping/pong liveness, handshake
+deadline, backoff and redial, the decode-and-drop boundary — and emits
+frames, ticks, and down/failed events; the daemon subscribes. The heartbeat
+stays one interval (the revocation sweep has always lived and died with the
+socket, and an independent timer would have swept through backoff — a
+different daemon). Deliberately NOT unified with the client wallet's dial
+loop: that side re-resumes sessions on reconnect, this side holds them.
+`bounds.ts` holds the pure bounding functions — surrogate-safe text
+chunking, newest-first history budgeting, timestamp coercion — which were
+previously reachable only by standing up a daemon and a socket, and now
+have 32 direct wire-harness checks, each watched failing. One sabotage
+first came back green and the fixture was wrong, not the code (equal-sized
+entries could not distinguish budget direction) — rule 5, applied. The
+session aggregate stays in one file and the header now says why.
 
 `sw.ts` was a cohesive session registry with two unrelated services bolted
 on. `ConsentWindows` now owns the pending-consent state, the fail-closed
