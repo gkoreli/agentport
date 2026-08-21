@@ -492,7 +492,11 @@ async function infoFor(
     // verify anything with them — it would only gain the text needed to paint a
     // convincing fake of our chrome, so the ADR-009 rule that a page learns a
     // generic label and nothing about the attachment's keys holds here too.
-    return { agentName, runtime, ownTools, ...(verify ? { verify } : {}) };
+    // Since v7 the daemon omits `runtime` toward anything that is not the
+    // user's own key; this worker IS that key, so it normally arrives — but
+    // the widget surface renders in extension chrome either way, and 'agent'
+    // is the same generic fallback the page tier below has always shown.
+    return { agentName, runtime: runtime ?? 'agent', ownTools, ...(verify ? { verify } : {}) };
   }
   return {
     agentName: 'Personal agent',

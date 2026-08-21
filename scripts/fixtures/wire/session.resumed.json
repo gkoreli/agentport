@@ -43,6 +43,46 @@
       }
     },
     {
+      "name": "valid with runtime omitted (v7: redacted toward page tiers)",
+      "expect": "ok",
+      "frame": {
+        "t": "session.resumed",
+        "ownTools": false,
+        "s": "sess_0123456789abcdef01234567",
+        "agentName": "Agent",
+        "surface": {
+          "name": "Inkwell",
+          "origin": "https://inkwell.example"
+        },
+        "grant": {
+          "tools": [
+            {
+              "name": "inkwell.document.replaceSelection",
+              "description": "Replace the currently selected text in the open document.",
+              "inputSchema": {
+                "type": "object",
+                "properties": {
+                  "text": {
+                    "type": "string",
+                    "description": "Replacement text"
+                  }
+                },
+                "required": [
+                  "text"
+                ],
+                "additionalProperties": false
+              }
+            }
+          ],
+          "alwaysAsk": [],
+          "expiresAt": 1754350000000
+        },
+        "missed": 0,
+        "epk": "e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4",
+        "epkSig": "f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6"
+      }
+    },
+    {
       "name": "maximal valid: runtime at length limit, missed at cap, full surface",
       "expect": "ok",
       "frame": {

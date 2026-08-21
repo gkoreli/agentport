@@ -167,10 +167,12 @@ machine capabilities on this attachment. The verification words should match
 the words on the daemon or trusted consent surface and detect an intermediary
 in the sealing handshake.
 
-The current handle also contains `session.info.runtime`. Do not branch product
-behavior on it, display it, or send it to analytics. Exposing the runtime to
-the page conflicts with AgentPort's privacy goal and is a known protocol gap;
-app code should not make that field harder to remove.
+`session.info.runtime` is absent on every page tier since protocol v7: the
+daemon discloses the runtime only to a client that is the user's own key,
+because "which runtime" is the first item on the list of things a site never
+learns. Treat absence as the ordinary case — the field exists solely so a
+user-owned surface (the extension's own chrome, a direct-key embedder) can
+label the attachment for its user.
 
 `AgentConnectRequest` is defined at
 `packages/client/src/provider.ts#AgentConnectRequest`:

@@ -10,6 +10,24 @@ they moved.
 
 ## Unreleased
 
+### The site is no longer told which runtime the user runs
+
+"Which runtime" is the first item on the north star's list of things the
+site never learns, and `session.opened`/`session.resumed` shipped it to
+every tier — the one item on that list that was false in deployed code,
+enforced until now by a paragraph in APP-BUILDER asking integrators nicely.
+Since v7 the field is optional on the wire and the daemon discloses it only
+to a client that IS the user's own key: a delegated page and a connect-tier
+page get nothing, because absence cannot be mistaken for a generic runtime
+label. The redaction is bound into the EPK proof transcript exactly as the
+agent-name redaction already was, so a relay cannot reinsert it. Renderers
+treat absence as the ordinary case. Watched failing: forcing disclosure
+fails exactly the three withholding checks (delegated open, connect open,
+connect resume), each red with the leaked field in evidence, while the two
+direct-key presence checks stay green — including the one this batch
+corrected after it went red against a connect-tier session, which was the
+check being wrong, not the code.
+
 ### Protocol v7 begins: session denials are a closed vocabulary on the wire
 
 `SessionDenied.reason` narrows from free display text to an enum over

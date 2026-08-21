@@ -15,6 +15,18 @@
       }
     },
     {
+      "name": "valid with runtime omitted (v7: redacted toward page tiers)",
+      "expect": "ok",
+      "frame": {
+        "t": "session.opened",
+        "s": "sess_0123456789abcdef01234567",
+        "agentName": "Agent",
+        "epk": "e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4",
+        "epkSig": "f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6",
+        "ownTools": true
+      }
+    },
+    {
       "name": "maximal valid: resume token and agentName at length limits, agent stamped",
       "expect": "ok",
       "frame": {

@@ -346,6 +346,9 @@ const session = await wallet.openSession({
   },
 });
 check('session opened', session.info.agentName === "Goga's Writing Agent", session.info);
+// v7: the runtime is disclosed ONLY to the user's own key. This wallet is
+// exactly that, so absence here would be the redaction over-firing.
+check('a direct-key wallet is told the runtime', session.info.runtime === 'demo-writer', session.info);
 check('grant carries exactly the site tools', session.grant.tools.length === 2);
 
 const toolEvents: string[] = [];
@@ -490,6 +493,10 @@ const dropInSession = await requested.accepted;
 const seenOffer = offered as { surface: string; tools: number } | null;
 check('owner saw what was being asked for', seenOffer?.surface === 'Inkwell' && seenOffer?.tools === 2, seenOffer);
 check('session opened without any cert', dropInSession.info.agentName === 'Terminal Agent', dropInSession.info);
+// The connect tier's client is an authority-free page key — a SITE. The first
+// item on the north star's "learns nothing" list shipped false until v7;
+// this is the check that keeps it true.
+check('a connect-tier page is never told the runtime', dropInSession.info.runtime === undefined, dropInSession.info);
 
 await dropInSession.prompt('Add a line.');
 check('gated write was approved by the owner, not the page', localApprovals.length > 0, localApprovals);
@@ -841,6 +848,10 @@ const { session: back } = await reopened.resumeSession({
   decide: () => true,
 });
 check('the real tab resumes', back.info.agentName === 'Resume Agent', back.info);
+// This attachment came through beginConnect, so its client is a page key: the
+// redaction must hold across the resume too. (The first version of this check
+// asserted presence and went red — the check was wrong, not the code.)
+check('a connect-tier resume still withholds the runtime', back.info.runtime === undefined, back.info);
 
 const restored = await back.history();
 check('the conversation is restored after a refresh', restored.length > 0, restored.length);
@@ -1218,6 +1229,10 @@ console.log('\n12b. a dropped socket reconnects itself');
     after: session.info.verify,
   });
   check('and it is still sealed', /^(?:\w+-){5}\w+$/.test(session.info.verify ?? ''), session.info.verify);
+  // The other half of the v7 disclosure rule: a DIRECT-KEY reattachment is
+  // still the user's own key, so the runtime is restated to it — absence here
+  // would be the redaction over-firing on the one tier allowed to know.
+  check('a direct-key reattachment restates the runtime', session.info.runtime === 'demo-writer', session.info);
 
   // The real test: the SAME handle still drives the agent.
   recording = true;
@@ -1286,6 +1301,7 @@ console.log('\n13. delegated sessions');
     },
   });
   check('a user-signed delegation opens from the ephemeral page key', delegated.info.agentName === 'Personal agent', delegated.info);
+check('a delegated page is never told the runtime', delegated.info.runtime === undefined, delegated.info);
 
   doc.text = 'Delegated.';
   const localBefore = ownerLocalApprovals.length;

@@ -309,7 +309,7 @@ function attach(next: AgentSessionHandle): void {
   log.style.display = 'flex';
   $('composer').classList.add('live');
   const status = $('status');
-  status.textContent = `${next.info.agentName} · ${next.info.runtime}`;
+  status.textContent = next.info.runtime ? `${next.info.agentName} · ${next.info.runtime}` : next.info.agentName;
   status.className = 'online';
 
   line('meta', `connected · ${next.grant.tools.length} tools lent · grant expires ${new Date(next.grant.expiresAt).toLocaleTimeString()}`);

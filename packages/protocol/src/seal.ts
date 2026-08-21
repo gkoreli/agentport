@@ -101,7 +101,14 @@ export function answerProofBinding(
   grant: CapabilityGrant,
   details: {
     agentName: string;
-    runtime: string;
+    /**
+     * Absent toward every surface that is not the user's own key (v7): the
+     * runtime is redacted from the FRAME on those tiers, and the proof binds
+     * the exact clear response the client receives — so the binding omits it
+     * exactly when the frame does. `canonicalJson` drops undefined, which is
+     * what keeps both endpoints' transcripts identical without a second rule.
+     */
+    runtime?: string | undefined;
     resume?: string;
     missed?: number;
     /**

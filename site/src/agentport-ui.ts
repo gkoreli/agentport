@@ -59,6 +59,15 @@ export interface PanelApi {
 
 const text = (value: string) => ({ type: 'text' as const, text: value });
 
+/**
+ * The status line's name for the attached agent. Since v7 a page tier is not
+ * told the runtime at all — absence is the ordinary case here, not a gap —
+ * so the label is the name alone unless this surface is the user's own key.
+ */
+function agentLabel(info: AgentSessionHandle['info']): string {
+  return info.runtime ? `${info.agentName} · ${info.runtime}` : info.agentName;
+}
+
 function displayJson(value: unknown): string {
   try {
     return JSON.stringify(value, null, 2) ?? String(value);
@@ -253,7 +262,7 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
             // only check the user can actually perform.
             verify.value = event.value.verify ?? '';
             notice.value = 'reconnected · new sealing keys';
-            status.value = session ? `${session.info.agentName} · ${session.info.runtime}` : status.value;
+            status.value = session ? agentLabel(session.info) : status.value;
             // Re-read rather than remembered: a re-attachment restates the
             // policy, and the panel keeps nothing across the gap.
             ownTools.value = session?.info.ownTools === true;
@@ -454,7 +463,7 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
     // `=== true`, fail-closed: an attachment that did not positively say its
     // agent keeps its own tools is one whose agent does not.
     ownTools.value = next.info.ownTools === true;
-    status.value = `${next.info.agentName} · ${next.info.runtime}`;
+    status.value = agentLabel(next.info);
     notice.value = `connected · ${next.grant.tools.length} tools lent · expires ${new Date(
       next.grant.expiresAt,
     ).toLocaleTimeString()}`;

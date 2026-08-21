@@ -795,7 +795,7 @@ export class AgentWallet extends Emitter<WalletEvents> {
     id: string,
     surface: SurfaceDescriptor,
     grant: CapabilityGrant,
-    opened: { agentName: string; runtime: string; ownTools: boolean },
+    opened: { agentName: string; runtime?: string | undefined; ownTools: boolean },
     request: { tools: SiteTool[]; decide?: ApprovalDecider },
   ): AgentSession {
     const session = new AgentSession({
@@ -804,7 +804,7 @@ export class AgentWallet extends Emitter<WalletEvents> {
       grant,
       info: {
         agentName: opened.agentName,
-        runtime: opened.runtime,
+        ...(opened.runtime !== undefined ? { runtime: opened.runtime } : {}),
         // Carried through from the daemon's signed answer, never guessed from
         // which tier this wallet thinks it is: the daemon is the party that
         // decides, and a second derivation here is exactly the drift the one

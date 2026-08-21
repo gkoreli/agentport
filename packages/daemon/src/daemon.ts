@@ -1058,12 +1058,16 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     // right; the resume path derived it twice and got it wrong, which is the
     // whole argument for deriving it once.
     const resumedAgentName = session.delegation ? 'Personal agent' : this.#options.identity.name;
+    // Same tier rule as the open path, restated on every re-attachment: only
+    // the user's own key is told the runtime. A resume cannot change tiers.
+    const resumedRuntime =
+      session.delegation || session.viaConnect ? undefined : this.#options.identity.runtime;
 
     this.#send({
       t: 'session.resumed',
       s: frame.s,
       agentName: resumedAgentName,
-      runtime: this.#options.identity.runtime,
+      ...(resumedRuntime !== undefined ? { runtime: resumedRuntime } : {}),
       surface: session.surface,
       grant: session.grant,
       missed,
@@ -1078,7 +1082,7 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
         mine.publicKey,
         answerProofBinding('resume', session.clientKey, frame.epk, session.surface, session.grant, {
           agentName: resumedAgentName,
-          runtime: this.#options.identity.runtime,
+          runtime: resumedRuntime,
           missed,
           ownTools: session.policy.mayUseOwnTools,
         }),
@@ -1203,6 +1207,12 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     // here would make a valid response unverifiable at the other endpoint.
     const responseAgentName = frame.delegation ? 'Personal agent' : this.#options.identity.name;
     const viaConnect = Boolean(frame.viaConnect);
+    // "Which runtime" is the first item on the list of things the site never
+    // learns, and until v7 this field shipped it to every tier. Only a client
+    // that IS the user's own key — the direct-key tier, checked against the
+    // cert above — is told; a delegated page and a connect-tier page get
+    // nothing, because absence cannot be mistaken for a generic runtime name.
+    const responseRuntime = frame.delegation || viaConnect ? undefined : this.#options.identity.runtime;
     const delegation = frame.delegation;
     // Resolved before the answer is signed, because the answer STATES it: the
     // page is told what this attachment may do, and the statement is bound
@@ -1226,7 +1236,7 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
         mine.publicKey,
         answerProofBinding(frame.viaConnect ? 'connect' : 'open', frame.client, frame.epk, frame.surface, frame.grant, {
           agentName: responseAgentName,
-          runtime: this.#options.identity.runtime,
+          runtime: responseRuntime,
           resume: resumeToken,
           ownTools: policy.mayUseOwnTools,
         }),
@@ -1291,7 +1301,7 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
       // A delegated page receives the generic label the hosted wallet showed;
       // the user's real agent name stays inside the wallet-origin popup.
       agentName: responseAgentName,
-      runtime: this.#options.identity.runtime,
+      ...(responseRuntime !== undefined ? { runtime: responseRuntime } : {}),
       resume: session.resumeToken,
       ownTools: session.policy.mayUseOwnTools,
       ...myEpk,

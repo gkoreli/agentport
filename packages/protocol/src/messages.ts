@@ -101,7 +101,7 @@ export function wireFingerprint(): string {
  * commit as the version, deliberately by hand — but unlike the version, a
  * stale value here CANNOT pass, because the check recomputes it.
  */
-export const WIRE_FINGERPRINT = '76ebfa0c2f9f815c2095b8a5';
+export const WIRE_FINGERPRINT = '56a474f7493be6e90d3b142d';
 
 /**
  * The wire dialect both ends must agree on, checked at `hello` before
@@ -568,7 +568,15 @@ export const SessionOpened = obj({
   t: lit('session.opened'),
   s: idField,
   agentName: name,
-  runtime: name,
+  /**
+   * Present ONLY toward a client that is the user's own key (v7). "Which
+   * runtime" is the first item on the north star's list of things the site
+   * never learns, and this field used to ship it to every tier — the one
+   * item on that list that was false in deployed code. A delegated page and
+   * a connect-tier page get no runtime at all; absence is the honest shape,
+   * not a generic label a page could mistake for a real one.
+   */
+  runtime: opt(name),
   /**
    * Bearer secret stamped by the relay, used together with THIS client's
    * stable Ed25519 proof to re-attach after a reload. Scoped to one session,
@@ -634,7 +642,8 @@ export const SessionResumed = obj({
   t: lit('session.resumed'),
   s: idField,
   agentName: name,
-  runtime: name,
+  /** As on `session.opened`: only the user's own key is told the runtime. */
+  runtime: opt(name),
   surface: SurfaceDescriptor,
   grant: CapabilityGrant,
   /** Frames the agent sent while nobody was listening (daemon-counted). */

@@ -101,7 +101,13 @@ export type SessionEvents = {
 
 export interface SessionInfo {
   agentName: string;
-  runtime: string;
+  /**
+   * Present only when this client is the user's own key (v7). A page tier is
+   * deliberately not told which runtime the user runs — it is the first item
+   * on the north star's "the site learns nothing" list — so a renderer must
+   * treat absence as the ordinary case, not a loading state.
+   */
+  runtime?: string;
   /**
    * Fingerprint words for this attachment's sealing keys.
    * Render them: the daemon consent screen shows the same words, and a match
