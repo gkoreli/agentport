@@ -756,20 +756,39 @@ console.log('\n8. isGated');
 // producer had ever heard of. Source-matched on `SESSION_DENIAL_REASONS.x`,
 // fragile in the safe direction: a producer that goes back to a bare string
 // literal, or names a member that does not exist, fails here loudly.
+//
+// The PRODUCER SET is part of what this checks, and it moved. Two of the
+// daemon's reasons are no longer chosen at the send site: the attachment
+// boundary is one judge now (`AttachmentAuthority`), and the send site
+// forwards whichever refusal it returned. So the judge is a third producer,
+// and forwarding is admitted in exactly ONE spelling — an index INTO the
+// registry, `SESSION_DENIAL_REASONS[x]`, whose index type the compiler
+// already constrains to registry keys. Everything else at a send site,
+// including a bare string literal, is still a stray. This is rule 5b: the
+// suite has to stay shaped like the problem, and a coverage gate that could
+// no longer see two reasons would have reported green about them forever.
 
 console.log('\n9. session denial reasons');
 {
+  const SENDS = /t: 'session\.denied', s: [A-Za-z.]+, reason: ([^\s}]+)/g;
   const producers = [
-    { role: 'relay', file: 'packages/relay/src/core.ts' },
-    { role: 'daemon', file: 'packages/daemon/src/daemon.ts' },
+    { role: 'relay', file: 'packages/relay/src/core.ts', names: SENDS },
+    { role: 'daemon', file: 'packages/daemon/src/daemon.ts', names: SENDS },
+    // The judge behind the daemon's two authority refusals. It names them
+    // once, from the registry, and the daemon forwards what it returned.
+    { role: 'daemon.authority', file: 'packages/daemon/src/authority.ts', names: /new AuthorityDenied\(([^\s,]+)/g },
   ];
   const emitted = new Set<string>();
   const strays: string[] = [];
   const unknown: string[] = [];
   for (const producer of producers) {
     const source = readFileSync(new URL(`../${producer.file}`, import.meta.url), 'utf8');
-    for (const match of source.matchAll(/t: 'session\.denied', s: [A-Za-z.]+, reason: ([^\s}]+)/g)) {
+    for (const match of source.matchAll(producer.names)) {
       const spelling = match[1] as string;
+      // A forwarded judgement, type-constrained to a registry key by the index
+      // signature itself. It names no member here, so it contributes nothing
+      // to coverage — the judge above is where those members are counted.
+      if (/^SESSION_DENIAL_REASONS\[[A-Za-z.]+\]$/.test(spelling)) continue;
       const member = /^SESSION_DENIAL_REASONS\.([a-z_]+)$/.exec(spelling);
       if (!member) {
         strays.push(`${producer.role}: ${spelling.slice(0, 40)}`);
@@ -783,7 +802,7 @@ console.log('\n9. session denial reasons');
   check('every denial a producer emits comes from the registry', strays.length === 0, strays);
   check('every registry member a producer names exists', unknown.length === 0, unknown);
   const listed = Object.keys(SESSION_DENIAL_REASONS);
-  check(`both producers between them emit all ${listed.length} reasons`, emitted.size === listed.length, {
+  check(`the producers between them emit all ${listed.length} reasons`, emitted.size === listed.length, {
     missing: listed.filter((key) => !emitted.has(key)),
   });
   check(

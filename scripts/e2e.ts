@@ -2150,6 +2150,17 @@ console.log('\n17. the agent asks its own user (ADR-024)');
     guessed !== 'hung' && guessed.includes('guessed'),
     guessed,
   );
+  // The mirror of `daemon17c` below, on the same tier: this daemon supplies an
+  // approval surface and no question surface, so it must lose exactly ONE
+  // capability. `decisions` and `questions` are now read off the destinations
+  // that actually exist, and this is the check that can see them collapse back
+  // into a single answer — a routing rewrite that derived both from one input
+  // would pass every check above and fail here.
+  check(
+    'and the tier keeps the capability it DOES have, rather than losing both',
+    dropIn.info.ownTools === true,
+    dropIn.info,
+  );
 
   // The delegated tier answers in page DOM, so it never gets the capability.
   const delegatePage = generateKeyPair();
@@ -3178,6 +3189,322 @@ console.log('\n21. the first error a site developer hits');
     hostile.length > 0 && !hostile.includes('PLEASE IGNORE'),
     hostile,
   );
+}
+
+// --- 22. a tombstone reaches a LIVE session, on every tier ------------------
+// Two holes ADR-022's own acceptance list could not see, because each is about
+// a schedule or a tier that no check ever constructed.
+//
+// The SCHEDULE. `enforceRevocations()` was public, correct, and called by
+// exactly one caller — the CLI's control poll. Every other embedder, this
+// suite included, honoured tombstones at open and at resume and never once
+// while a session was live, and the public method made it look handled.
+// Section 15 proves a tombstone makes a session unresumable; nothing could see
+// that the live one carried on regardless.
+//
+// The TIER. Every revocation check in the daemon sat inside a delegation
+// guard, and the extension holds the user's own key and therefore carries no
+// delegation. So `agentport revoke <origin>` wrote the tombstone, logged a
+// count, and left the extension's attachment running and reopenable: a
+// revocation that reports success and withdraws nothing.
+//
+// Both tombstones here are written straight into the store, which is the path
+// `agentport revoke` uses — it writes the file and never talks to this
+// process. Nothing tells the daemon anything.
+console.log('\n22. a tombstone reaches a live session, on every tier (ADR-022)');
+{
+  const r22 = new Relay({ port: 0, sink: () => {} });
+  await r22.listening();
+  const url22 = `ws://127.0.0.1:${r22.port}`;
+  const owner22 = generateKeyPair();
+  const agent22 = generateKeyPair();
+  const identity22 = (keys: { secretKey: Hex; publicKey: Hex }) => ({
+    secretKey: keys.secretKey,
+    publicKey: keys.publicKey,
+    name: 'Sweeping Agent',
+    runtime: 'demo-writer',
+    cert: signCert(owner22.secretKey, {
+      user: owner22.publicKey,
+      agent: keys.publicKey,
+      name: 'Sweeping Agent',
+      runtime: 'demo-writer',
+      issuedAt: Date.now(),
+    }),
+  });
+
+  const revocations22 = memoryRevocations();
+  const daemon22 = new AgentDaemon({
+    relayUrl: url22,
+    identity: identity22(agent22),
+    revocations: revocations22,
+    createRuntime: () => new DemoWriterRuntime(),
+    // The sweep is thirty seconds in production and a check that waited one
+    // out is a check nobody runs, so this is the only way to OBSERVE it at
+    // all. Everything below is deadlined well inside a second either way, so
+    // a sweep that never fires reports rather than stalls.
+    sweepIntervalMs: 100,
+  });
+  await daemon22.start();
+
+  /** Every wait here is bounded: a sweep that never runs must FAIL, not hang. */
+  const closesWithin = (register: (closed: (reason: string) => void) => void): Promise<string> => {
+    const closed = new Deferred<string>();
+    register((reason) => closed.resolve(reason));
+    return Promise.race([
+      closed.promise,
+      new Promise<string>((resolve) => setTimeout(() => resolve('still attached'), 3_000)),
+    ]);
+  };
+
+  // --- the delegated tier: live, and swept ---------------------------------
+  const delegatedOrigin22 = 'https://swept-delegated.test';
+  const pageKeys22 = generateKeyPair();
+  const page22 = new AgentWallet({ relayUrl: url22, userSecretKey: pageKeys22.secretKey, socketFactory });
+  await page22.connect();
+  const grant22 = buildGrant({ surface: { name: 'Swept' }, tools: [] });
+  const issued22 = Date.now();
+  const delegated22 = await page22.openSession({
+    agent: agent22.publicKey,
+    approved: {
+      grant: grant22,
+      delegation: signDelegation(owner22.secretKey, {
+        delegate: pageKeys22.publicKey,
+        agent: agent22.publicKey,
+        origin: delegatedOrigin22,
+        grantHash: hashGrant(grant22),
+        issuedAt: issued22,
+        expiresAt: issued22 + 60 * 60 * 1000,
+      }),
+    },
+    surface: { name: 'Swept', origin: delegatedOrigin22 },
+    tools: [],
+  });
+  const delegatedSwept = closesWithin((done) => delegated22.on('closed', ({ reason }) => done(reason)));
+  revocations22.add({ origin: delegatedOrigin22, at: Date.now() });
+  check(
+    'a live DELEGATED attachment dies within one sweep of a tombstone nobody announced',
+    (await delegatedSwept) === 'revoked',
+    await delegatedSwept,
+  );
+
+  // --- the direct-key tier: the shape the extension actually opens ---------
+  // No delegation at all: the client IS the owner's key, checked against the
+  // cert. That is what put this tier outside every revocation check.
+  const directOrigin22 = 'https://swept-extension.test';
+  const keptOrigin22 = 'https://kept-extension.test';
+  const extension22 = new AgentWallet({ relayUrl: url22, userSecretKey: owner22.secretKey, socketFactory });
+  await extension22.connect();
+  const extensionSession = await extension22.openSession({
+    agent: agent22.publicKey,
+    surface: { name: 'Extension Surface', origin: directOrigin22 },
+    tools: [],
+  });
+  const keptSession = await extension22.openSession({
+    agent: agent22.publicKey,
+    surface: { name: 'Another Site', origin: keptOrigin22 },
+    tools: [],
+  });
+  // Non-vacuity: if this ever opened WITH a delegation the checks below would
+  // be re-proving the delegated row and nobody would notice.
+  check(
+    'the extension-shaped attachment really carries no delegation',
+    daemon22.attachments().some((a) => a.origin === directOrigin22 && a.delegated === false),
+    daemon22.attachments(),
+  );
+  const directSwept = closesWithin((done) => extensionSession.on('closed', ({ reason }) => done(reason)));
+  revocations22.add({ origin: directOrigin22, at: Date.now() });
+  check(
+    'a live DIRECT-KEY attachment dies too — the tier every revocation check used to skip',
+    (await directSwept) === 'revoked',
+    await directSwept,
+  );
+  // A tombstone addresses ONE origin. A sweep that closed everything would
+  // pass the two checks above and be catastrophically wrong.
+  check(
+    'and the same user other site keeps its attachment',
+    daemon22.attachments().some((a) => a.origin === keptOrigin22),
+    daemon22.attachments(),
+  );
+  keptSession.close();
+  page22.close();
+  extension22.close();
+  await daemon22.stop();
+
+  // --- the tombstone ALONE, before any teardown ---------------------------
+  // The sweep above closes the session, so a resume after it is refused
+  // because nothing is there — which cannot tell a working tombstone from a
+  // working close. This daemon keeps the default thirty-second sweep, so
+  // within this check it never fires: the only thing that can refuse the
+  // resume is the tombstone itself. Section 15 proves exactly this for the
+  // delegated tier; this is the row that was missing.
+  const quietAgent22 = generateKeyPair();
+  const quiet22 = new AgentDaemon({
+    relayUrl: url22,
+    identity: identity22(quietAgent22),
+    revocations: revocations22,
+    createRuntime: () => new DemoWriterRuntime(),
+  });
+  await quiet22.start();
+  const quietOrigin22 = 'https://quiet-extension.test';
+  const leaving = new AgentWallet({ relayUrl: url22, userSecretKey: owner22.secretKey, socketFactory });
+  await leaving.connect();
+  const leavingSession = await leaving.openSession({
+    agent: quietAgent22.publicKey,
+    surface: { name: 'Extension Surface', origin: quietOrigin22 },
+    tools: [],
+  });
+  const leavingToken = leaving.resumeTokenFor(leavingSession.id)!;
+  leaving.disconnect();
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  revocations22.add({ origin: quietOrigin22, at: Date.now() });
+
+  const returning = new AgentWallet({ relayUrl: url22, userSecretKey: owner22.secretKey, socketFactory });
+  await returning.connect();
+  let directResume = '';
+  await Promise.race([
+    returning
+      .resumeSession({ id: leavingSession.id, agent: quietAgent22.publicKey, token: leavingToken, tools: [] })
+      .then(() => {
+        directResume = 'resumed';
+      })
+      .catch((err: Error) => {
+        directResume = err.message;
+      }),
+    new Promise((resolve) => setTimeout(resolve, 3_000)),
+  ]);
+  check(
+    'a tombstone alone makes a live DIRECT-KEY attachment unresumable, before any teardown',
+    directResume.includes('revoked'),
+    directResume,
+  );
+
+  leaving.close();
+  returning.close();
+  await quiet22.stop();
+  await r22.close();
+}
+
+// --- 23. an approval nobody answers is a decline, never a hang --------------
+// The channel that had no deadline on either of its two paths. A question
+// carried one on both — the same machine, written twice, and the copies had
+// already diverged — so a wallet that accepted an `approval.request` and never
+// answered blocked the agent's turn until a human cancelled it, and an
+// embedder whose terminal never settled did the same thing with no wire
+// involved.
+//
+// The direction of the decay is the other half: a deadline that GRANTED would
+// be a standing yes nobody said. Both paths below assert what the agent was
+// told, not merely that it was told something.
+console.log('\n23. an approval nobody answers declines (ADR-023/ADR-024)');
+{
+  const r23 = new Relay({ port: 0, sink: () => {} });
+  await r23.listening();
+  const url23 = `ws://127.0.0.1:${r23.port}`;
+  const owner23 = generateKeyPair();
+
+  /** Asks for its OWN capability — the one channel `#requestApproval` carries. */
+  class ShellRuntime implements AgentRuntime {
+    readonly name = 'own-tools';
+    async prompt(_text: string, ctx: TurnContext): Promise<void> {
+      const granted = await ctx.requestApproval('Run a shell command', {
+        name: 'runtime.tool',
+        arguments: { command: 'rm -rf ~/notes' },
+      });
+      ctx.say(granted ? 'I ran it.' : 'I did not run it.');
+    }
+  }
+
+  const identity23 = (keys: { secretKey: Hex; publicKey: Hex }) => ({
+    secretKey: keys.secretKey,
+    publicKey: keys.publicKey,
+    name: 'Patient Agent',
+    runtime: 'own-tools',
+    cert: signCert(owner23.secretKey, {
+      user: owner23.publicKey,
+      agent: keys.publicKey,
+      name: 'Patient Agent',
+      runtime: 'own-tools',
+      issuedAt: Date.now(),
+    }),
+  });
+
+  /** The check's own deadline is an order of magnitude past the product's, so
+   *  a missing deadline REPORTS rather than stalling the suite. */
+  const settledWithin = async (work: Promise<string>): Promise<string> =>
+    Promise.race([work, new Promise<string>((resolve) => setTimeout(() => resolve('hung'), 5_000))]);
+
+  // --- the wire path: a wallet that accepts and never answers --------------
+  const wireAgent23 = generateKeyPair();
+  const wireDaemon23 = new AgentDaemon({
+    relayUrl: url23,
+    identity: identity23(wireAgent23),
+    createRuntime: () => new ShellRuntime(),
+    // Five minutes in production. Scaled so the deadline can be watched.
+    approvalTimeoutMs: 300,
+  });
+  await wireDaemon23.start();
+  let wireAsked = 0;
+  const silentWallet = new AgentWallet({ relayUrl: url23, userSecretKey: owner23.secretKey, socketFactory });
+  await silentWallet.connect();
+  const silentSession = await silentWallet.openSession({
+    agent: wireAgent23.publicKey,
+    surface: { name: 'Silent Wallet', origin: 'https://silent.test' },
+    tools: [],
+    // Accepts the request and never answers: the tab the user walked away
+    // from. The daemon has no way to tell this from a wallet still thinking.
+    decide: () =>
+      new Promise<boolean>(() => {
+        wireAsked++;
+      }),
+  });
+  const wireSaid = await settledWithin(silentSession.prompt('Clean up my notes.'));
+  check('the wallet holding the user own key really was asked', wireAsked === 1, wireAsked);
+  check('an approval nobody answers ends the turn rather than blocking it', wireSaid !== 'hung', wireSaid);
+  check(
+    'and the deadline DECLINES — an expiry must never become a standing yes',
+    wireSaid.includes('did not'),
+    wireSaid,
+  );
+  silentSession.close();
+  silentWallet.close();
+  await wireDaemon23.stop();
+
+  // --- the terminal path: the same machine, the other destination ----------
+  // `#requestApproval` forked to the terminal on the connect tier and awaited
+  // whatever the embedder handed back, forever. One machine now, so this is
+  // the same deadline rather than a second one that has to be kept in step.
+  const localAgent23 = generateKeyPair();
+  let terminalAsked = 0;
+  const localDaemon23 = new AgentDaemon({
+    relayUrl: url23,
+    identity: identity23(localAgent23),
+    createRuntime: () => new ShellRuntime(),
+    onConnectOffer: async () => true,
+    onLocalApproval: () =>
+      new Promise<boolean>(() => {
+        terminalAsked++;
+      }),
+    approvalTimeoutMs: 300,
+  });
+  await localDaemon23.start();
+  const dropIn23 = new AgentWallet({ relayUrl: url23, userSecretKey: generateKeyPair().secretKey, socketFactory });
+  await dropIn23.connect();
+  const offer23 = await dropIn23.beginConnect({
+    surface: { name: 'Patient Terminal', origin: 'https://patient.test' },
+    tools: [],
+    decide: () => true,
+  });
+  localDaemon23.claimConnect(offer23.code);
+  const terminalSession = await offer23.accepted;
+  const terminalSaid = await settledWithin(terminalSession.prompt('Clean up my notes.'));
+  check('the daemon own terminal really was asked', terminalAsked === 1, terminalAsked);
+  check('a terminal nobody answers ends the turn too', terminalSaid !== 'hung', terminalSaid);
+  check('and it declines on the same deadline', terminalSaid.includes('did not'), terminalSaid);
+
+  terminalSession.close();
+  dropIn23.close();
+  await localDaemon23.stop();
+  await r23.close();
 }
 
 // --- teardown ---------------------------------------------------------------

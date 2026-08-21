@@ -58,7 +58,8 @@ import {
   type ToolDefinition,
 } from '@agentport/protocol';
 import type { AgentIdentity } from './identity.js';
-import { isRevoked, memoryRevocations, type Revocation, type RevocationStore } from './revocations.js';
+import { AttachmentAuthority, type AuthorityDenied } from './authority.js';
+import { memoryRevocations, type Revocation, type RevocationStore } from './revocations.js';
 import {
   attachmentPolicy,
   type AskAnswers,
@@ -67,6 +68,43 @@ import {
   type AttachmentPolicy,
   type TurnContext,
 } from './runtime.js';
+
+/** One gated call, as both consent channels describe it. */
+type ApprovalCall = { name: string; arguments: Record<string, unknown> };
+
+/**
+ * Where this attachment's two consent channels actually LAND.
+ *
+ * Resolved once, when the session opens, and stored on it. Both fields are
+ * `undefined` exactly when no surface may answer, which is what
+ * `attachmentPolicy` is then derived from — so the policy the page is told and
+ * the destination a request reaches are one fact rather than two evaluations
+ * that have to keep agreeing (ADR-024 R12).
+ *
+ * That is the whole reason this type exists. `#ask` and `#requestApproval`
+ * each re-derived the `viaConnect` fork for themselves, under a comment in
+ * each calling the other one a "second lock on the same door" — and they had
+ * already drifted apart: one armed a deadline on both of its paths and the
+ * other armed none at all, so a wallet that accepted an `approval.request` and
+ * never answered blocked the agent's turn until a human cancelled it. A fork
+ * written twice is a fork that will be written differently twice.
+ *
+ * Each destination takes its own session back as its first argument rather
+ * than closing over it: the policy has to be signed into `session.opened`,
+ * which happens BEFORE the `SessionState` exists.
+ */
+interface ConsentRouting {
+  /**
+   * Ask the user to allow the agent its OWN capability, or `undefined` when no
+   * surface here may answer for them (ADR-024 R11 — refusal, not a reroute).
+   */
+  decide?: (session: SessionState, summary: string, call?: ApprovalCall, signal?: AbortSignal) => Promise<boolean>;
+  /**
+   * Put the agent's question to the user, or `undefined` when nobody here may
+   * answer in the user's name.
+   */
+  ask?: (session: SessionState, question: AskQuestion, signal?: AbortSignal) => Promise<AskAnswers | undefined>;
+}
 
 interface SessionState {
   id: string;
@@ -83,6 +121,25 @@ interface SessionState {
   surface: SurfaceDescriptor;
   grant: CapabilityGrant;
   tools: ToolDefinition[];
+  /**
+   * Unix ms at which this attachment's own authority began.
+   *
+   * Retained for the same reason `delegation` is, and for the tier that has
+   * none: it is the instant a per-origin tombstone judges a DIRECT-KEY session
+   * against (ADR-022 addendum). A resume must not restart it, which is exactly
+   * what makes a revoked extension attachment unresumable rather than merely
+   * closed.
+   */
+  readonly openedAt: number;
+  /**
+   * "May this attachment do X, right now?", as one object rather than three
+   * spellings. Built once at open and NOT rebuilt on resume: a resume is the
+   * same attachment returning, so its grant, its delegation and the instant
+   * its authority began are all unchanged.
+   */
+  readonly authority: AttachmentAuthority;
+  /** Where this attachment's consent actually lands (ADR-024 R12). */
+  readonly routing: ConsentRouting;
   runtime: AgentRuntime;
   /**
    * Decided ONCE, when the attachment opens, and then both declared to the
@@ -137,6 +194,47 @@ const MAX_RESUME_ATTEMPTS = 10;
  * at is the hang this whole design exists to avoid.
  */
 const ASK_TIMEOUT_MS = 5 * 60 * 1000;
+
+/**
+ * How long the agent waits for a DECISION before proceeding as declined.
+ *
+ * Its own constant beside `ASK_TIMEOUT_MS` rather than a shared one, because
+ * the two channels decay in opposite directions and only one of them is safe
+ * by default: an unanswered question means "proceed without an answer", while
+ * an unanswered decision must mean NO. A deadline that granted would be a
+ * standing yes nobody said, so every expiry on this channel resolves false.
+ *
+ * The same five minutes, for the same reason — a human has to read a summary
+ * and decide — and finite for a sharper one. This channel had no deadline at
+ * all: the terminal fork awaited a handler that might never settle, and the
+ * wire fork armed nothing, so a browser wallet that accepted an
+ * `approval.request` and never answered blocked the agent's turn until a human
+ * cancelled it. Tenet: a hang is indistinguishable from slowness.
+ */
+const APPROVAL_TIMEOUT_MS = 5 * 60 * 1000;
+
+/**
+ * How often the daemon sweeps its own state: stale connect offers, detached
+ * sessions past the grace, and revocation tombstones.
+ *
+ * The tombstone sweep lives HERE rather than only in `cli.ts` because a public
+ * `enforceRevocations()` that nothing calls on a schedule makes revocation
+ * look handled while every embedder but one honours tombstones at open and
+ * never again (ADR-022 addendum). The CLI still nudges it far more often, so
+ * the shipped path is unchanged; this is the floor underneath every other
+ * embedder.
+ */
+const SWEEP_INTERVAL_MS = 30_000;
+
+/**
+ * How often the daemon pings the relay to prove the pipe is still there.
+ *
+ * Kept separate from the sweep cadence rather than riding on it: the sweep
+ * interval is a test seam, and a 200 ms sweep must not become a 200 ms pong
+ * deadline, which any momentarily busy event loop would miss and answer by
+ * terminating a perfectly healthy socket.
+ */
+const PING_INTERVAL_MS = 30_000;
 
 /**
  * How long `start()` waits for the relay to finish the handshake.
@@ -230,6 +328,20 @@ export interface DaemonOptions {
    * "how long do we wait for a relay to say something".
    */
   handshakeTimeoutMs?: number;
+  /**
+   * Test seam for the housekeeping cadence — stale connect offers, detached
+   * sessions, revocation tombstones. The default is thirty seconds, and a
+   * check that waited one out is a check nobody runs, so the only way to
+   * OBSERVE a live sweep at all is to shorten it. The liveness ping keeps its
+   * own cadence on top of this and is unaffected.
+   */
+  sweepIntervalMs?: number;
+  /**
+   * Test seam for the approval deadline. Same argument as the sweep: the
+   * product deadline is five minutes, and "an unanswered approval declines"
+   * cannot be observed by a suite that has to wait for one.
+   */
+  approvalTimeoutMs?: number;
   sink?: LogSink;
 }
 
@@ -282,19 +394,17 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
   }
 
   /**
-   * The attachment may exercise only the intersection of its grant and the
-   * outer delegation that authorised it. This is consulted on LIVE traffic,
-   * not just open/resume: staying connected must not turn a short delegation
-   * into a longer grant, and a tool result arriving after the boundary must
-   * not complete work whose authority ended while it was in flight.
+   * The attachment boundary, asked at this daemon's clock.
+   *
+   * A thin call through `AttachmentAuthority`, which owns the rule: the
+   * intersection of grant and delegation, plus the tombstones the user may
+   * have written since. Consulted on LIVE traffic, not just open and resume —
+   * staying connected must not turn a short delegation into a longer grant,
+   * and a tool result arriving after the boundary must not complete work whose
+   * authority ended while it was in flight.
    */
-  #authorityError(session: Pick<SessionState, 'grant' | 'delegation'>): Error | undefined {
-    const now = this.#now();
-    if (session.grant.expiresAt <= now) return new Error('capability grant expired');
-    if (session.delegation && session.delegation.expiresAt <= now) {
-      return new Error('delegation authorization expired');
-    }
-    return undefined;
+  #authorityError(session: Pick<SessionState, 'authority'>): AuthorityDenied | undefined {
+    return session.authority.error(this.#now());
   }
 
   get identity(): AgentIdentity {
@@ -382,6 +492,11 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     let alive = true;
     socket.on('pong', () => (alive = true));
     clearInterval(this.#heartbeat);
+    const sweepMs = this.#options.sweepIntervalMs ?? SWEEP_INTERVAL_MS;
+    // The ping keeps its own cadence ON TOP of the sweep, so shortening the
+    // sweep for a test cannot shorten the pong deadline with it.
+    const sweepsPerPing = Math.max(1, Math.round(PING_INTERVAL_MS / sweepMs));
+    let sweepsSincePing = 0;
     this.#heartbeat = setInterval(() => {
       // Detached sessions do not wait forever: past the grace, close the
       // runtime and forget the token.
@@ -397,7 +512,17 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
           });
         }
       }
+      // The user may have written a tombstone while this session was live, and
+      // `agentport revoke` never talks to this process — so a live attachment
+      // is judged again HERE, not only when it next resumes (ADR-022 R11). The
+      // CLI's control poll calls the same idempotent method far more often;
+      // this is the floor for every other embedder, which previously had none.
+      void this.enforceRevocations().catch((err: unknown) => {
+        this.#log.error('could not close revoked attachments', { err });
+      });
       if (socket.readyState !== WebSocket.OPEN) return;
+      if (++sweepsSincePing < sweepsPerPing) return;
+      sweepsSincePing = 0;
       if (!alive) {
         this.#log.warn('heartbeat lost; terminating socket to force a redial');
         socket.terminate();
@@ -405,7 +530,7 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
       }
       alive = false;
       socket.ping();
-    }, 30_000);
+    }, sweepMs);
 
     socket.on('close', () => {
       this.#authenticated = false;
@@ -468,21 +593,23 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
   }
 
   /**
-   * Close every attachment a tombstone already covers.
+   * Close every attachment a tombstone already covers, and refresh what the
+   * survivors believe about the tombstones.
    *
    * `agentport revoke` writes the tombstone durably and does not talk to this
    * process — the store re-reads the file, so open and resume are refused
    * immediately. But a session that is already live is not judged again until
-   * it resumes, and ADR-022 R11 requires it to end. The daemon's existing
-   * control poll calls this; it is idempotent, so a repeat costs nothing.
+   * it resumes, and ADR-022 R11 requires it to end. The daemon's own sweep
+   * calls this, and the CLI's control poll nudges it far more often; it is
+   * idempotent, so a repeat costs nothing.
+   *
+   * ONE store read serves every live attachment, which is why the list is read
+   * here and handed to each authority rather than looked up per session.
    */
   async enforceRevocations(): Promise<number> {
     const revocations = this.#revocations.list();
-    if (revocations.length === 0) return 0;
-    const doomed = [...this.#sessions.values()].filter(
-      (session) => session.delegation && isRevoked(revocations, session.delegation),
-    );
-    for (const session of doomed) await this.#closeSession(session, 'revoked');
+    const doomed = [...this.#sessions.values()].filter((session) => session.authority.observe(revocations));
+    for (const session of doomed) await this.#closeSession(session, SESSION_DENIAL_REASONS.revoked);
     if (doomed.length > 0) this.#log.info('closed revoked attachments', { data: { sessions: doomed.length } });
     return doomed.length;
   }
@@ -503,7 +630,7 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     this.#revocations.add({ origin, at });
 
     const doomed = [...this.#sessions.values()].filter((session) => session.surface.origin === origin);
-    for (const session of doomed) await this.#closeSession(session, 'revoked');
+    for (const session of doomed) await this.#closeSession(session, SESSION_DENIAL_REASONS.revoked);
 
     this.#log.info('origin revoked', { data: { sessions: doomed.length } });
     this.emit('revoked', { origin, sessions: doomed.length });
@@ -522,7 +649,7 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     delete this.#options.identity.cert;
     this.#options.onUnbound?.();
 
-    for (const session of [...this.#sessions.values()]) await this.#closeSession(session, 'revoked');
+    for (const session of [...this.#sessions.values()]) await this.#closeSession(session, SESSION_DENIAL_REASONS.revoked);
 
     this.#log.info('agent unpaired');
     this.emit('unbound', undefined);
@@ -780,7 +907,11 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
         const pending = session.toolCalls.get(frame.id);
         if (!pending) return;
         session.toolCalls.delete(frame.id);
-        const authorityError = this.#authorityError(session);
+        // `lateError`, not `error`: this frame ANSWERS a call whose authority
+        // was already judged, with a fresh look at the tombstones, when it was
+        // dispatched. See `AttachmentAuthority#lateError` for why a second
+        // read on the receive path buys nothing.
+        const authorityError = session.authority.lateError(this.#now());
         if (authorityError) {
           this.#log.warn('refused a surface tool result after attachment authority expired', {
             sessionId: frame.s,
@@ -956,29 +1087,29 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
       this.#send({ t: 'session.denied', s: frame.s, reason: SESSION_DENIAL_REASONS.already_attached });
       return;
     }
-    const now = this.#now();
-    if (session.grant.expiresAt <= now) {
-      this.#send({ t: 'session.denied', s: frame.s, reason: SESSION_DENIAL_REASONS.grant_expired });
+    // The SAME boundary the live traffic is judged against, re-judged before a
+    // fresh channel replaces the detached one. Three clauses, one judge:
+    //
+    // - the grant's own deadline;
+    // - the delegation's, because a delegation authorizes the WHOLE logical
+    //   attachment and not merely its first open — a longer-lived grant must
+    //   not carry a resumed session past the root-signed authorization that
+    //   created it;
+    // - the tombstones. Revocation closes and forgets a session, so the lookup
+    //   above normally fails first; this closes the race the consent review
+    //   names, where a resume is already in flight when the tombstone lands
+    //   (ADR-022 R4). It is kept in addition to the stable-identity check
+    //   above, because the same attachment identity may still hold an
+    //   authority the user has since withdrawn.
+    //
+    // The tombstone clause used to sit inside `if (session.delegation)`, which
+    // meant an extension attachment — direct key, no delegation — resumed
+    // straight through a revocation (ADR-022 addendum). The authority judges
+    // by ORIGIN now, so both tiers are refused here.
+    const denial = this.#authorityError(session);
+    if (denial) {
+      this.#send({ t: 'session.denied', s: frame.s, reason: SESSION_DENIAL_REASONS[denial.reason] });
       return;
-    }
-    // Revocation closes and forgets a session, so the lookup above normally
-    // fails first. This closes the race the review names: a resume already in
-    // flight when the tombstone lands must not slip through the window
-    // between recording it and finishing teardown (ADR-022 R4). It is kept in
-    // addition to the stable-identity check above: the same attachment
-    // identity may still hold an authorization the user has since revoked.
-    if (session.delegation) {
-      // A delegation authorizes the WHOLE logical attachment, not merely its
-      // first open. A longer-lived grant must not carry a resumed session
-      // past the root-signed authorization that created it.
-      if (session.delegation.expiresAt <= now) {
-        this.#send({ t: 'session.denied', s: frame.s, reason: SESSION_DENIAL_REASONS.authorization_expired });
-        return;
-      }
-      if (isRevoked(this.#revocations.list(), session.delegation)) {
-        this.#send({ t: 'session.denied', s: frame.s, reason: SESSION_DENIAL_REASONS.revoked });
-        return;
-      }
     }
     const mine = generateSealKeyPair();
     session.sealChannel = deriveSealChannel(mine.secretKey, frame.epk, frame.s, 'agent');
@@ -1066,13 +1197,6 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
         this.#send({ t: 'session.denied', s: frame.s, reason: SESSION_DENIAL_REASONS.bad_delegation });
         return;
       }
-      // The user cut this origin off. The signature is still good and the
-      // page still holds it — which is exactly the case revocation exists
-      // for (ADR-022 R2).
-      if (isRevoked(this.#revocations.list(), delegation)) {
-        this.#send({ t: 'session.denied', s: frame.s, reason: SESSION_DENIAL_REASONS.revoked });
-        return;
-      }
     } else if (!frame.viaConnect && frame.client !== cert?.user) {
       // Fail closed on ABSENT ownership as well as wrong ownership (ADR-019
       // Gate B §5, ADR-022 R5). This used to read `cert && frame.client !==
@@ -1080,6 +1204,31 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
       // and the property survived only because the relay refused too. It also
       // made unpair() an opening rather than a closing.
       this.#send({ t: 'session.denied', s: frame.s, reason: SESSION_DENIAL_REASONS.not_your_agent });
+      return;
+    }
+
+    // The attachment boundary, built once and then both enforced and re-judged
+    // through this one object for the rest of the session's life.
+    //
+    // Judging it HERE also applies the tombstones, and it applies them to BOTH
+    // tiers. For a delegated attachment that is ADR-022 R2 unchanged: the
+    // signature is still good and the page still holds it, which is exactly
+    // the case revocation exists for. For a direct-key attachment the
+    // authority began just now, so a past tombstone cannot cover it — which is
+    // the tombstone's own shape (approving again works with no un-revoke verb)
+    // and safe here because a direct-key open is the user's own key answering
+    // for itself. The clause is written once for both rather than nested
+    // inside the delegated branch, which is where it used to hide.
+    const authority = new AttachmentAuthority({
+      grant: frame.grant,
+      ...(frame.delegation ? { delegation: frame.delegation } : {}),
+      origin: frame.surface.origin,
+      openedAt: now,
+      revocations: this.#revocations,
+    });
+    const authorityDenial = authority.error(now);
+    if (authorityDenial) {
+      this.#send({ t: 'session.denied', s: frame.s, reason: SESSION_DENIAL_REASONS[authorityDenial.reason] });
       return;
     }
 
@@ -1122,10 +1271,20 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     const responseAgentName = frame.delegation ? 'Personal agent' : this.#options.identity.name;
     const viaConnect = Boolean(frame.viaConnect);
     const delegation = frame.delegation;
-    // Decided before the answer is signed, because the answer states it: the
+    // Resolved before the answer is signed, because the answer STATES it: the
     // page is told what this attachment may do, and the statement is bound
     // into the epk proof so the relay cannot rewrite it (ADR-024 R11).
-    const policy = attachmentPolicy(this.#trustedSurfaces({ delegation, viaConnect }));
+    //
+    // The routing is built first and the policy read off it, never the other
+    // way round. A policy asserted separately from the routing is a claim
+    // about a destination, and a check that reads `policy.mayAsk` passes just
+    // as happily on a daemon that hands the question to the requesting site
+    // (ADR-024 R12).
+    const routing = this.#consentRouting({ delegation, viaConnect });
+    const policy = attachmentPolicy({
+      decisions: routing.decide !== undefined,
+      questions: routing.ask !== undefined,
+    });
     const myEpk = {
       epk: mine.publicKey,
       epkSig: signEpk(
@@ -1150,6 +1309,9 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
       surface: frame.surface,
       grant: frame.grant,
       tools: frame.grant.tools,
+      openedAt: now,
+      authority,
+      routing,
       runtime,
       transcript: [],
       toolCalls: new Map(),
@@ -1314,7 +1476,10 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
   ): Promise<unknown> {
     const authorityError = this.#authorityError(session);
     if (authorityError) throw authorityError;
-    const tool = session.tools.find((candidate) => candidate.name === name);
+    // Membership is part of the same boundary, not a separate lookup beside
+    // it: "may this attachment do X right now" has one answer and one place
+    // that gives it.
+    const tool = session.authority.allows(name);
     if (!tool) throw new Error(`tool "${name}" is not in this session's grant`);
 
     // Only the code-carrying fallback lacks browser consent and moves this
@@ -1370,32 +1535,45 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
   }
 
   /**
-   * Which of this attachment's consent surfaces can the requesting origin
-   * neither draw, read, nor forge? (ADR-024 R1.)
+   * Where can this attachment's consent actually be drawn — and therefore
+   * where does each channel's request GO? (ADR-024 R1/R12.)
    *
    * TWO answers, because there are two channels and they do not land on the
-   * same surfaces. `decisions` is yes-or-no about one call; `questions`
-   * carries fields. See `attachmentPolicy` for why this stopped being one
-   * boolean.
+   * same surfaces. A DECISION is yes-or-no about one call; a QUESTION carries
+   * fields and free text. See `attachmentPolicy` for why this stopped being
+   * one boolean.
+   *
+   * This returns the destinations themselves rather than a pair of booleans
+   * about them, and that is the invariant, not a refactor. `attachmentPolicy`
+   * is derived from which destinations EXIST, so building the surface is what
+   * grants the capability — where it used to be *asserted* by a predicate
+   * beside routing that two other methods each re-derived for themselves. A
+   * policy whose justification names a destination must be produced by the
+   * same code that routes there; a check that reads `policy.mayAsk` passes
+   * just as happily on a daemon that hands the question to the requesting
+   * site, which is exactly what used to happen.
    *
    * The first discriminator is DELEGATION, and the wire already separates the
    * tiers:
    *
    * - **Delegated** — the hosted wallet signed a short-lived authority for a
    *   page's ephemeral key, and that page answers in its own panel, which is
-   *   DOM the requesting origin renders. FALSE for both, and no repair exists
-   *   at the wallet origin: opening its popup needs user activation, and an
-   *   agent-initiated question has no gesture behind it — which is exactly
-   *   why `connect.ts` reserves its popup synchronously during the click. A
-   *   persistent cross-origin frame would be readable-proof and not
-   *   overlay-proof, which is the attack a real browser window exists to
-   *   defeat.
+   *   DOM the requesting origin renders. NEITHER destination exists, and no
+   *   repair exists at the wallet origin: opening its popup needs user
+   *   activation, and an agent-initiated question has no gesture behind it —
+   *   which is exactly why `connect.ts` reserves its popup synchronously
+   *   during the click. A persistent cross-origin frame would be
+   *   readable-proof and not overlay-proof, which is the attack a real browser
+   *   window exists to defeat.
    * - **Direct key** — no delegation: the client IS the owner's key, checked
-   *   against the cert. TRUE for both.
-   * - `viaConnect` — no delegation, and no browser wallet at all. Decisions
-   *   are TRUE because `#requestApproval` actually routes them to the
-   *   terminal. Questions are true only when the embedder supplied
-   *   `onLocalAsk`, because that is the only thing that can render one.
+   *   against the cert. Both destinations are that client, over the sealed
+   *   channel.
+   * - `viaConnect` — no delegation, and no browser wallet at all. Both
+   *   destinations are the daemon's own terminal, and each exists only when
+   *   the embedder supplied the handler that renders it. An embedder with no
+   *   terminal — a test, a service — therefore gets the refusing behaviour by
+   *   default rather than silently forwarding either channel to the requesting
+   *   page.
    *
    * The direct-key row is the non-obvious one, so state the argument rather
    * than the conclusion. It covers the extension, whose consent window a page
@@ -1410,240 +1588,332 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
    * that forwards the user's voice to page JavaScript has escalated on its
    * own behalf, and that is its bug to fix, not something the daemon can see.
    *
-   * The `viaConnect` row is where this predicate was wrong, and it is worth
-   * recording how. It read TRUE unconditionally, justified in a comment by
-   * "answers at the daemon's own terminal, a surface no page can reach" —
-   * except `#ask` never forked to the terminal the way `#requestApproval`
-   * does. The frame went to the session client, and on this tier the client
-   * is a page key the daemon deliberately does NOT check against a cert
-   * (`connect.ts` mints it "ephemeral and authority-free"). So the one tier
-   * whose client has no authority at all was the tier being handed the user's
-   * voice, while the delegated tier — whose client at least holds a
-   * user-signed delegation — was refused. The comment described the design;
-   * only the routing was missing; and because the policy was a single
-   * boolean, no type could express the disagreement.
+   * The `viaConnect` row is where the old predicate was wrong, and it is worth
+   * recording how. `questions` read TRUE unconditionally, justified in a
+   * comment by "answers at the daemon's own terminal, a surface no page can
+   * reach" — except `#ask` never forked to the terminal the way
+   * `#requestApproval` did. The frame went to the session client, and on this
+   * tier the client is a page key the daemon deliberately does NOT check
+   * against a cert (`connect.ts` mints it "ephemeral and authority-free"). So
+   * the one tier whose client has no authority at all was the tier being
+   * handed the user's voice, while the delegated tier — whose client at least
+   * holds a user-signed delegation — was refused. The comment described the
+   * design; only the routing was missing. Resolving the destination and
+   * reading the policy off it is what makes that state unrepresentable rather
+   * than merely fixed.
    *
-   * So the refusal lands where the escalation is: a client that does NOT hold
-   * the user key, answering for the user.
+   * `decisions` then repeated the mirror of it: it did not check
+   * `onLocalApproval` at all, so an embedder with no approval surface was told
+   * `mayUseOwnTools: true`, the page was told `ownTools: true`, and every
+   * request was refused by a bare `return false` that logged nothing — the
+   * invisible diminishment ADR-024 R4 exists to prevent, produced by the field
+   * meant to prevent it.
    *
    * Takes only what it reads, so it can be answered before the session state
    * it will be stored on exists — the answer has to be signed into the reply
    * that opens the attachment.
    */
-  #trustedSurfaces(session: Pick<SessionState, 'delegation' | 'viaConnect'>): {
-    decisions: boolean;
-    questions: boolean;
-  } {
-    // Both fields ask the same shape of question — is there a surface, and can
-    // this daemon actually reach it — so both check the handler that reaches
-    // it. `questions` guarded on `onLocalAsk` from the start and `decisions`
-    // did not, which was an asymmetry with a user-visible cost: an embedder
-    // with no `onLocalApproval` was told `mayUseOwnTools: true`, the page was
-    // told `ownTools: true`, and then every request was refused by a bare
-    // `return false` that logged nothing. The runtime believes it may, the
-    // user is told it may, and it silently may not — the invisible
-    // diminishment ADR-024 R4 exists to prevent, produced by the field meant
-    // to prevent it.
-    const owned = session.delegation === undefined;
+  #consentRouting(tier: Pick<SessionState, 'delegation' | 'viaConnect'>): ConsentRouting {
+    // Delegated: refusal, never a reroute. There is no surface in this tier
+    // the requesting origin cannot draw, so there is nobody who may answer,
+    // and asking anyway would mean asking the party the user is being
+    // protected from.
+    if (tier.delegation !== undefined) return {};
+
+    if (tier.viaConnect) {
+      const onLocalApproval = this.#options.onLocalApproval;
+      const onLocalAsk = this.#options.onLocalAsk;
+      return {
+        ...(onLocalApproval
+          ? {
+              decide: (session, summary, call, signal) =>
+                this.#decideAtTerminal(onLocalApproval, session, summary, call, signal),
+            }
+          : {}),
+        ...(onLocalAsk
+          ? { ask: (session, question, signal) => this.#askAtTerminal(onLocalAsk, session, question, signal) }
+          : {}),
+      };
+    }
+
     return {
-      decisions: owned && (!session.viaConnect || this.#options.onLocalApproval !== undefined),
-      questions: owned && (!session.viaConnect || this.#options.onLocalAsk !== undefined),
+      decide: (session, summary, call, signal) => this.#decideOverWire(session, summary, call, signal),
+      ask: (session, question, signal) => this.#askOverWire(session, question, signal),
     };
   }
 
-
   /**
-   * One question, one answer, and never a hang.
+   * One consent request, one settlement, and never a hang.
    *
-   * Resolves `undefined` for every non-answer — skipped, aborted, timed out,
-   * session gone. That is the ACP semantic too: declining means the tool runs
-   * with no answers and the model is told the user skipped, while cancelling
-   * aborts the turn. An unanswered question must decay into the first, not
-   * the second: losing the user's work because nobody clicked is a worse
-   * failure than proceeding without an answer.
+   * The machine every destination runs, written once because it was written
+   * twice and the copies diverged: `#ask` armed a deadline on both of its
+   * paths, `#requestApproval` armed none on either, and a wallet that accepted
+   * an `approval.request` and never answered blocked the agent's turn until a
+   * human cancelled it.
+   *
+   * The deadline is a REQUIRED field for that reason — a channel that forgets
+   * one cannot compile — and `unanswered` is required beside it because the
+   * two channels decay in opposite directions: a question that nobody answers
+   * means "proceed without an answer", and a decision that nobody answers must
+   * mean NO. An expiry never grants.
    */
-  #ask(
-    session: SessionState,
-    question: AskQuestion,
-    signal?: AbortSignal,
-  ): Promise<AskAnswers | undefined> {
-    // The capability declaration is what SHOULD stop this — a runtime that
-    // sees mayAsk false never advertises the tool, so its agent has no way to
-    // ask (ADR-024 R2). But that is the runtime honouring a policy, and this
-    // is the daemon: a runtime that ignored it, or one we did not write,
-    // would otherwise put a question on a tier where the PAGE answers it, and
-    // the answer would arrive carrying the user's authority while being
-    // authored by the site. R2's own falsifiability clause said this needed
-    // closing if negotiation ever stopped being sufficient; it costs one
-    // check, so it does not wait for that to be demonstrated.
-    //
-    // Resolving undefined rather than throwing keeps the contract: every
-    // non-answer means "proceed without one", and a runtime asking where it
-    // may not is a bug to log, not a turn to destroy.
-    if (!session.policy.mayAsk) {
-      this.#log.warn('runtime asked on an attachment with no trusted answer surface; declining', {
-        sessionId: session.id,
-      });
-      return Promise.resolve(undefined);
-    }
-
-    // Past the guard there are two trusted surfaces, exactly as
-    // `#requestApproval` has them: the connect tier has no wallet, so its
-    // questions stay with the daemon owner at the terminal, and everything
-    // else is a DIRECT-KEY attachment whose client is the owner's own key.
-    // This fork is the one that did not exist — the frame used to go to the
-    // client on every tier, including the one whose client is an
-    // authority-free page key.
-    if (session.viaConnect) {
-      const onLocalAsk = this.#options.onLocalAsk;
-      // `#trustedSurfaces` cannot set mayAsk on this tier without it, so this
-      // is a second lock on the same door rather than a reachable branch.
-      if (!onLocalAsk) return Promise.resolve(undefined);
-      // "Never a hang" has to hold for an embedder's terminal too, so the
-      // local path carries the same deadline and abort as the wire path.
-      return new Promise<AskAnswers | undefined>((resolve) => {
-        let settled = false;
-        const finish = (answers: AskAnswers | undefined): void => {
-          if (settled) return;
-          settled = true;
-          clearTimeout(timer);
-          signal?.removeEventListener('abort', onAbort);
-          resolve(answers);
-        };
-        const onAbort = (): void => finish(undefined);
-        const timer = setTimeout(() => {
-          this.#log.info('nobody answered the agent at the terminal; proceeding as skipped', {
-            sessionId: session.id,
-          });
-          finish(undefined);
-        }, ASK_TIMEOUT_MS);
-        if (signal?.aborted) return finish(undefined);
-        signal?.addEventListener('abort', onAbort, { once: true });
-        onLocalAsk(question).then(finish, (err: unknown) => {
-          this.#log.error('the local ask surface failed; proceeding as skipped', {
-            sessionId: session.id,
-            err,
-          });
-          finish(undefined);
-        });
-      });
-    }
-
-    const id = randomId('ask_');
-    const deferred = new Deferred<AskAnswers | undefined>();
-    session.asks.set(id, deferred);
-
-    // Registered before the frame leaves, so an instant answer cannot arrive
-    // before there is anything to resolve. Delete's own boolean is the
-    // single-winner interlock, so a timeout racing an answer cannot resolve
-    // twice — the same ordering the approval path depends on.
-    const settle = (): boolean => session.asks.delete(id);
-    const abort = () => {
-      if (settle()) deferred.resolve(undefined);
+  #awaitConsent<T>(request: {
+    session: SessionState;
+    /** Registered by the caller BEFORE this runs, so an instant answer cannot
+     *  arrive before there is anything to resolve. */
+    deferred: Deferred<T>;
+    /**
+     * Drops the pending registration, and its BOOLEAN is the single-winner
+     * interlock. Delete-before-resolve, and letting delete's own result decide,
+     * is what makes a replayed answer a no-op and stops a deadline racing an
+     * answer into a double resolve.
+     */
+    settle: () => boolean;
+    /** What every non-answer means on this channel. Never a grant. */
+    unanswered: T;
+    deadlineMs: number;
+    /** Logged once, when the deadline rather than a person settled it. */
+    deadlineMessage: string;
+    /** Puts the request in front of whoever may answer it. */
+    send: (settle: () => boolean) => void;
+    signal?: AbortSignal | undefined;
+  }): Promise<T> {
+    const { deferred, settle, signal, unanswered } = request;
+    const abort = (): void => {
+      if (settle()) deferred.resolve(unanswered);
     };
     const timer = setTimeout(() => {
       if (settle()) {
-        this.#log.info('nobody answered the agent; proceeding as skipped', { sessionId: session.id });
-        deferred.resolve(undefined);
+        this.#log.info(request.deadlineMessage, { sessionId: request.session.id });
+        deferred.resolve(unanswered);
       }
-    }, ASK_TIMEOUT_MS);
+    }, request.deadlineMs);
 
     if (signal?.aborted) abort();
     else signal?.addEventListener('abort', abort, { once: true });
-    if (!signal?.aborted) {
-      this.#sendSession(session, {
-        t: 'ask',
-        s: session.id,
-        id,
-        message: this.#bounded(question.message, MAX_DESCRIPTION_CHARS, 'ask.message', session.id),
-        fields: question.fields,
-      });
-    }
+    if (!signal?.aborted) request.send(settle);
     return deferred.promise.finally(() => {
       clearTimeout(timer);
       signal?.removeEventListener('abort', abort);
     });
   }
 
+  /** The agent's question, to the client that holds the user's own key. */
+  #askOverWire(
+    session: SessionState,
+    question: AskQuestion,
+    signal?: AbortSignal,
+  ): Promise<AskAnswers | undefined> {
+    const id = randomId('ask_');
+    const deferred = new Deferred<AskAnswers | undefined>();
+    session.asks.set(id, deferred);
+    return this.#awaitConsent<AskAnswers | undefined>({
+      session,
+      deferred,
+      settle: () => session.asks.delete(id),
+      unanswered: undefined,
+      deadlineMs: ASK_TIMEOUT_MS,
+      deadlineMessage: 'nobody answered the agent; proceeding as skipped',
+      signal,
+      send: () => {
+        this.#sendSession(session, {
+          t: 'ask',
+          s: session.id,
+          id,
+          message: this.#bounded(question.message, MAX_DESCRIPTION_CHARS, 'ask.message', session.id),
+          fields: question.fields,
+        });
+      },
+    });
+  }
+
+  /** The agent's question, to the daemon owner's own terminal (ADR-024 R12). */
+  #askAtTerminal(
+    onLocalAsk: NonNullable<DaemonOptions['onLocalAsk']>,
+    session: SessionState,
+    question: AskQuestion,
+    signal?: AbortSignal,
+  ): Promise<AskAnswers | undefined> {
+    const deferred = new Deferred<AskAnswers | undefined>();
+    // No map entry to drop, so the interlock is a flag — the same interlock
+    // for the same reason: whoever flips it first owns the settlement.
+    let open = true;
+    return this.#awaitConsent<AskAnswers | undefined>({
+      session,
+      deferred,
+      settle: () => {
+        const first = open;
+        open = false;
+        return first;
+      },
+      unanswered: undefined,
+      deadlineMs: ASK_TIMEOUT_MS,
+      deadlineMessage: 'nobody answered the agent at the terminal; proceeding as skipped',
+      signal,
+      send: (settle) => {
+        onLocalAsk(question).then(
+          (answers) => {
+            if (settle()) deferred.resolve(answers);
+          },
+          (err: unknown) => {
+            this.#log.error('the local ask surface failed; proceeding as skipped', {
+              sessionId: session.id,
+              err,
+            });
+            if (settle()) deferred.resolve(undefined);
+          },
+        );
+      },
+    });
+  }
+
+  /** An own-tool decision, to the client that holds the user's own key. */
+  #decideOverWire(
+    session: SessionState,
+    summary: string,
+    call?: ApprovalCall,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    const id = randomId('appr_');
+    const deferred = new Deferred<boolean>();
+    const callHash = call ? hashCall(call) : undefined;
+    session.approvals.set(id, { decision: deferred, ...(callHash ? { callHash } : {}) });
+    return this.#awaitConsent<boolean>({
+      session,
+      deferred,
+      settle: () => session.approvals.delete(id),
+      unanswered: false,
+      deadlineMs: this.#options.approvalTimeoutMs ?? APPROVAL_TIMEOUT_MS,
+      deadlineMessage: 'nobody answered the approval in time; proceeding as declined',
+      signal,
+      send: () => {
+        // The domain is a CONSTANT here, not a parameter, and that is the
+        // enforcement (ADR-023 R2). `TurnContext.requestApproval` is the only
+        // way a runtime can reach this, so everything arriving through it is by
+        // construction the runtime's own capability — and the runtime is
+        // precisely the party that must not get to say otherwise, since the
+        // `summary` beside it is already agent-authored text that page content
+        // steers. A parameter would be a self-declared field.
+        this.#sendSession(session, {
+          t: 'approval.request',
+          s: session.id,
+          id,
+          domain: 'runtime_own_tool',
+          summary,
+          ...(call ? { call } : {}),
+          ...(callHash ? { callHash } : {}),
+        });
+      },
+    });
+  }
+
+  /** An own-tool decision, at the daemon owner's own terminal. */
+  #decideAtTerminal(
+    onLocalApproval: NonNullable<DaemonOptions['onLocalApproval']>,
+    session: SessionState,
+    summary: string,
+    call?: ApprovalCall,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    const deferred = new Deferred<boolean>();
+    let open = true;
+    return this.#awaitConsent<boolean>({
+      session,
+      deferred,
+      settle: () => {
+        const first = open;
+        open = false;
+        return first;
+      },
+      unanswered: false,
+      deadlineMs: this.#options.approvalTimeoutMs ?? APPROVAL_TIMEOUT_MS,
+      deadlineMessage: 'nobody answered the approval at the terminal; proceeding as declined',
+      signal,
+      send: (settle) => {
+        onLocalApproval('runtime_own_tool', summary, call).then(
+          (granted) => {
+            if (settle()) deferred.resolve(granted);
+          },
+          (err: unknown) => {
+            // Fail closed and SAY so. This path used to hand the rejection to
+            // the runtime, which is a turn destroyed by a broken consent
+            // surface rather than a call refused by one.
+            this.#log.error('the local approval surface failed; refusing the agent its own tool', {
+              sessionId: session.id,
+              err,
+            });
+            if (settle()) deferred.resolve(false);
+          },
+        );
+      },
+    });
+  }
+
+  /**
+   * One question, one answer, and never a hang.
+   *
+   * Resolves `undefined` for every non-answer — skipped, aborted, timed out,
+   * no surface that may answer. That is the ACP semantic too: declining means
+   * the tool runs with no answers and the model is told the user skipped,
+   * while cancelling aborts the turn. An unanswered question must decay into
+   * the first, not the second: losing the user's work because nobody clicked
+   * is a worse failure than proceeding without an answer.
+   *
+   * The absent destination is what refuses, so this is not a second lock on a
+   * door the policy already closed — it IS the door. The capability
+   * declaration is what SHOULD stop a request getting this far (a runtime that
+   * sees `mayAsk` false never advertises the tool, ADR-024 R2), but that is
+   * the runtime honouring a policy and this is the daemon: a runtime that
+   * ignored it, or one we did not write, would otherwise put a question on a
+   * tier where the PAGE answers it, and the answer would arrive carrying the
+   * user's authority while being authored by the site.
+   */
+  #ask(
+    session: SessionState,
+    question: AskQuestion,
+    signal?: AbortSignal,
+  ): Promise<AskAnswers | undefined> {
+    const ask = session.routing.ask;
+    if (!ask) {
+      this.#log.warn('runtime asked on an attachment with no trusted answer surface; declining', {
+        sessionId: session.id,
+      });
+      return Promise.resolve(undefined);
+    }
+    return ask(session, question, signal);
+  }
+
+  /**
+   * One decision, and never a standing yes.
+   *
+   * Everything reaching this method is the agent's OWN capability — the domain
+   * the destinations stamp is a constant for that reason — so this is where
+   * ADR-024 R11 lands: a page may answer for its own capability, never for the
+   * user's, and never as the user.
+   *
+   * REFUSAL, not a reroute, and the refusal is the ABSENT destination. The
+   * delegated tier has no surface that could answer this: a wallet-origin
+   * popup needs a user gesture the agent does not have mid-turn, and a
+   * cross-origin frame the page can cover is not a consent surface. Refusing
+   * costs one synchronous return and cannot hang — the caller gets the same
+   * `false` a human decline produces, which every runtime already handles —
+   * and unlike the bare `return false` this replaces, it says so out loud.
+   */
   #requestApproval(
     session: SessionState,
     summary: string,
-    call?: { name: string; arguments: Record<string, unknown> },
+    call?: ApprovalCall,
     signal?: AbortSignal,
   ): Promise<boolean> {
-    // Everything reaching this method is the agent's OWN capability — the
-    // domain stamped below is a constant for that reason — so this fork is
-    // where ADR-024 R11 lands: a page may answer for its own capability, never
-    // for the user's, and never as the user.
-    //
-    // REFUSAL, not a reroute. The delegated tier has no surface that could
-    // answer this: a wallet-origin popup needs a user gesture the agent does
-    // not have mid-turn, and a cross-origin frame the page can cover is not a
-    // consent surface. So there is nobody who may say yes, and asking anyway
-    // would mean asking the party we are protecting the user from.
-    //
-    // `!== true`, not falsiness, and fail-closed: an attachment that does not
-    // positively carry this authority does not have it. Refusing here costs
-    // one synchronous return and cannot hang — the caller gets the same `false`
-    // a human decline produces, which every runtime already handles.
-    if (session.policy.mayUseOwnTools !== true) {
+    const decide = session.routing.decide;
+    if (!decide) {
       this.#log.warn('refused an own-tool approval: this attachment has no surface that may answer for the user', {
         sessionId: session.id,
         data: { origin: session.surface.origin, delegated: session.delegation !== undefined },
       });
       return Promise.resolve(false);
     }
-
-    // Past the guard there are two trusted surfaces, and which one depends on
-    // whether a browser wallet was ever involved. The code-carrying fallback
-    // has none, so its questions stay with the daemon owner at the terminal.
-    // Everything else here is a DIRECT-KEY attachment — the client is the
-    // owner's own key — so the question goes to that wallet, which is the
-    // extension's consent window when the extension is the wallet.
-    if (session.viaConnect) {
-      const ask = this.#options.onLocalApproval;
-      if (!ask) {
-        // `#trustedSurfaces` cannot set `decisions` on this tier without it, so
-        // this is a second lock rather than a reachable branch — but it used to
-        // be the FIRST lock and it denied in silence, which is how an embedder
-        // could be refused every own-tool call without anything saying why.
-        this.#log.warn('no local approval surface on this tier; refusing the agent its own tool', {
-          sessionId: session.id,
-        });
-        return Promise.resolve(false);
-      }
-      return ask('runtime_own_tool', summary, call);
-    }
-
-    const id = randomId('appr_');
-    const deferred = new Deferred<boolean>();
-    const callHash = call ? hashCall(call) : undefined;
-    session.approvals.set(id, { decision: deferred, ...(callHash ? { callHash } : {}) });
-    const abort = () => {
-      if (!session.approvals.delete(id)) return;
-      deferred.resolve(false);
-    };
-    if (signal?.aborted) abort();
-    else signal?.addEventListener('abort', abort, { once: true });
-    if (!signal?.aborted) {
-      // The domain is a CONSTANT here, not a parameter, and that is the
-      // enforcement (ADR-023 R2). `TurnContext.requestApproval` is the only
-      // way a runtime can reach this, so everything arriving through it is by
-      // construction the runtime's own capability — and the runtime is
-      // precisely the party that must not get to say otherwise, since the
-      // `summary` beside it is already agent-authored text that page content
-      // steers. A parameter would be a self-declared field.
-      this.#sendSession(session, {
-        t: 'approval.request',
-        s: session.id,
-        id,
-        domain: 'runtime_own_tool',
-        summary,
-        ...(call ? { call } : {}),
-        ...(callHash ? { callHash } : {}),
-      });
-    }
-    return deferred.promise.finally(() => signal?.removeEventListener('abort', abort));
+    return decide(session, summary, call, signal);
   }
 
   /**

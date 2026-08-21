@@ -202,6 +202,12 @@ const pairingControlTimer = setInterval(() => {
     // process for anything. Open and resume are already refused because the
     // store re-reads that file — this ends attachments that are ALREADY live
     // (ADR-022 R11). Idempotent, so polling it costs nothing.
+    //
+    // The daemon sweeps this itself now, so correctness no longer depends on
+    // anyone polling; what this poll still buys is LATENCY. It is kept for
+    // that and only that: the sweep's floor is thirty seconds, and the person
+    // who just typed `agentport revoke` is watching their terminal. Two
+    // callers of one idempotent method, not two implementations.
     void daemon.enforceRevocations().catch((err: unknown) => {
       log.error('could not close revoked attachments', { err });
     });

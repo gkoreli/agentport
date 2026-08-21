@@ -1,15 +1,22 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { MAX_DELEGATION_LIFETIME_MS, randomId, type SessionDelegation } from '@agentport/protocol';
+import { MAX_DELEGATION_LIFETIME_MS, randomId } from '@agentport/protocol';
 
 /**
  * "This website may no longer use my agent" (ADR-022).
  *
  * A revocation is a tombstone, not a denylist: `{origin, at}` refuses every
- * delegation that origin holds which was issued at or before `at`, and admits
- * one issued after it. So withdrawing authority is complete and re-approving
+ * authority that origin holds which began at or before `at`, and admits one
+ * that began after it. So withdrawing authority is complete and re-approving
  * needs no un-revoke verb — the user simply approves again, and the new
- * delegation carries a later `issuedAt`.
+ * authority carries a later instant.
+ *
+ * "Authority" and not "delegation": the object being addressed is the ORIGIN,
+ * across tiers. A delegated attachment's authority began when the wallet
+ * signed it (`issuedAt`); a direct-key attachment's — the extension, which
+ * holds the user key and needs no delegation — began when the session opened.
+ * Judging only the first is what left the extension tier outside revocation
+ * entirely (ADR-022 addendum, and `RevocableAuthority` below).
  *
  * That shape is also what keeps the store finite without a cap or an eviction
  * policy. A delegation's lifetime is bounded (MAX_DELEGATION_LIFETIME_MS), so
@@ -80,14 +87,33 @@ export function loadRevocations(path: string): { revocations: Revocation[]; erro
 }
 
 /**
- * The one place the rule lives, so the open path and the resume path cannot
- * drift. Origin comparison is exact: an origin is already a canonical
- * scheme+host+port triple, and substring or suffix matching would make
- * `https://evil-inkwell.example` a match for `inkwell.example`.
+ * What a tombstone is judged against: whose origin, and when that authority
+ * began.
+ *
+ * A SHAPE rather than `SessionDelegation`, because a delegation is not the
+ * only authority a tombstone addresses. A `SessionDelegation` satisfies it
+ * structurally, so the delegated tier keeps ADR-022's exact semantics; a
+ * direct-key attachment — the extension, which holds the user key and
+ * therefore carries no delegation — supplies its surface origin and the
+ * instant the session opened. Widening the parameter rather than adding a
+ * second predicate is what keeps this the ONE place the rule lives.
  */
-export function isRevoked(revocations: readonly Revocation[], delegation: SessionDelegation): boolean {
+export interface RevocableAuthority {
+  origin: string;
+  /** Unix ms. Authority that began at or before a tombstone's `at` is refused. */
+  issuedAt: number;
+}
+
+/**
+ * The one place the rule lives, so the open path, the resume path and the
+ * daemon's live sweep cannot drift. Origin comparison is exact: an origin is
+ * already a canonical scheme+host+port triple, and substring or suffix
+ * matching would make `https://evil-inkwell.example` a match for
+ * `inkwell.example`.
+ */
+export function isRevoked(revocations: readonly Revocation[], authority: RevocableAuthority): boolean {
   return revocations.some(
-    (entry) => entry.origin === delegation.origin && delegation.issuedAt <= entry.at,
+    (entry) => entry.origin === authority.origin && authority.issuedAt <= entry.at,
   );
 }
 

@@ -175,7 +175,7 @@ Open the demo, hit **Pair a new agent**, paste the code, then **Connect
 agent**. The daemon's pairing link (`/pair#code=…`) auto-fills the dialog.
 
 ```bash
-npm run e2e        # full loop over real sockets, no browser, 188 checks
+npm run e2e        # full loop over real sockets, no browser, 200 checks
 npm run webmcp:harvest # our belief about the WebMCP draft, checked
 npm run wire:check # wire validation: 521 fixture cases across all 45 frames
 npm run agui:check # every emitted AG-UI event parsed by @ag-ui/core's schemas
@@ -554,7 +554,7 @@ Working: pairing, cert issuance and verification, directory + presence,
 capability grants with TTL, prompt streaming, plan reporting, tool-call
 round-trip, approval round-trip, cancellation, reconnect with in-place session
 resume, session teardown, revocation, authority-tagged approvals, the agent
-asking its own user a question, and the full demo UI. 188 e2e checks and 521
+asking its own user a question, and the full demo UI. 200 e2e checks and 521
 wire-validation cases pass.
 
 Not built yet, in rough priority order:
@@ -620,11 +620,17 @@ Not built yet, in rough priority order:
    single source for the negative claim — ADR-006 points at it rather than
    restating it. The old "every WebMCP-adopting site becomes compatible" was
    withdrawn: it was false, and it is why nobody looked for five months.
-5. ~~Revocation.~~ **Done (ADR-022).** The revocation object is the
-   `SessionDelegation`, addressed by its origin, and a revocation is a
-   *tombstone* (`{origin, at}` refuses delegations issued at or before `at`),
-   not a denylist — so approving again works with no un-revoke verb, and the
-   store stays finite because a delegation's lifetime is bounded. Two frames
+5. ~~Revocation.~~ **Done (ADR-022, plus its addendum).** A revocation is a
+   *tombstone* (`{origin, at}`), not a denylist — so approving again works
+   with no un-revoke verb, and the store stays finite. It is judged
+   PER-ORIGIN ACROSS TIERS: for a delegated attachment it refuses
+   delegations issued at or before `at`; for a direct-key attachment (the
+   extension) it refuses authority whose session opened at or before `at`
+   (`AgentDaemon` records `openedAt`, never reset on resume). Before the
+   addendum every check hid behind a delegation guard, so `agentport revoke`
+   never reached an extension attachment at all. The daemon also sweeps its
+   own live sessions now (`AttachmentAuthority` carries revocation as a
+   clause of `error()`), instead of depending on the CLI's poll. Two frames
    (`revoke`/`revoked`, owner-key only, never a delegated page key), a daemon
    `revoke()`/`unpair()`, and `agentport status|revoke|unpair` over the
    control file. Revoked means **unresumable at the daemon**, not just closed

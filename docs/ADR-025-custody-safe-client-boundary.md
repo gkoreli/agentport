@@ -73,8 +73,8 @@ nor the daemon can infer where the signing operation ran. Adding a field named
 `trusted`, `wallet`, or `custody` would add a self-assertion, not evidence.
 
 ADR-024 currently acknowledges this limit in
-`AgentDaemon#trustedSurfaces`
-(`packages/daemon/src/daemon.ts#trustedSurfaces`): a direct-key client is
+`AgentDaemon#consentRouting`
+(`packages/daemon/src/daemon.ts#consentRouting`): a direct-key client is
 treated as trusted because a page holding the root key can already mint any
 authority. That observation is correct about a compromised root key and wrong
 as a production attachment design. "The escalation already happened" is a

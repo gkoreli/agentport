@@ -281,6 +281,66 @@ is the check to write, not a weaker one against a cooperating relay.
 Each check is verified non-vacuous by reverting the fix in place, per the
 house rule.
 
+## Addendum, 2026-08-20: the object is the ORIGIN, and the sweep is the daemon's
+
+R1 named the delegation as the revocation object, "addressed by its origin".
+That was the right object for the tier that existed when this shipped, and it
+quietly became a **false security guarantee** for the tier that shipped after
+it.
+
+Every revocation check in the daemon sat inside a delegation guard: the live
+sweep filtered on `session.delegation && isRevoked(...)`, and both the open and
+the resume paths consulted the tombstones only within `if (delegation)`. The
+extension holds the user's own key and therefore carries **no delegation** — it
+opens direct-key sessions, which is exactly what makes it a trusted consent
+surface (ADR-024 R11). So `agentport revoke <origin>` wrote the tombstone,
+logged a count, emitted `revoked`, and left the extension's attachment running
+and reopenable. The verb reported success and withdrew nothing.
+
+The fix keeps R2's shape exactly and moves the address up one level:
+
+- **A tombstone `{origin, at}` refuses any authority on that origin which began
+  at or before `at`.** For a delegated attachment "began" is still the
+  delegation's `issuedAt`, so nothing about the shipped tier changes. For a
+  direct-key attachment there is no delegation to address, so the authority is
+  the session itself: the surface's origin, beginning when it opened. That
+  instant is retained on the session, and a resume does not restart it — which
+  is what makes a revoked extension attachment *unresumable* rather than merely
+  closed (R4).
+- **Re-approving still needs no un-revoke verb.** An authority that began after
+  `at` is admitted, which for a direct-key session means a fresh open always
+  works. That is not a loophole: a direct-key open is the user's own key
+  answering for itself, through their own consent gesture, which is precisely
+  the "the user simply approves again" case R2 was written for.
+- **One judge, widened rather than duplicated.**
+  `packages/daemon/src/revocations.ts#RevocableAuthority` is a shape, not a
+  second predicate, and `SessionDelegation` satisfies it structurally. The
+  three checkpoints reach it through one value object,
+  `packages/daemon/src/authority.ts#AttachmentAuthority`, which also owns the
+  grant/delegation deadline and grant membership — the same question had three
+  unrelated spellings in the daemon, and revocation was the clause missing from
+  two of them.
+
+**R11's live-session requirement also had exactly one caller.**
+`packages/daemon/src/daemon.ts#enforceRevocations` was public and correct and
+was called only by the CLI's control poll, so every other embedder honoured
+tombstones at open and at resume and never once while a session was live — with
+a public method making it look handled. The daemon now runs it on its own
+housekeeping sweep, and the CLI keeps its poll for latency rather than for
+correctness: two callers of one idempotent method, not two implementations.
+
+R11's acceptance list gains three rows, all adversarial and all watched failing
+in place (`scripts/e2e.ts`, sections 22 and 23):
+
+7. A live **delegated** session dies within one sweep of a tombstone written
+   straight into the store — the path `agentport revoke` uses, which never
+   speaks to the daemon.
+8. A live **direct-key** session does too, and a tombstone alone makes it
+   unresumable before any teardown has happened. This is the check that fails
+   on the code this addendum replaces.
+9. Another origin's attachment is untouched by either — a sweep that closed
+   everything would pass 7 and 8 and be catastrophically wrong.
+
 ## What this does not do
 
 - **No remembered-consent policy store, no policy generation counter, no

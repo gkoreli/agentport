@@ -10,7 +10,38 @@ they moved.
 
 ## Unreleased
 
-### An agent's question finally renders, and the adapter can no longer drop an event silently
+### Revocation reaches every tier, and attachment authority is one object
+
+`agentport revoke <origin>` wrote a tombstone, logged, and left a live
+extension attachment running and reopenable: every revocation check in the
+daemon sat inside a delegation guard, and the extension's direct-key
+sessions carry no delegation. A false guarantee on north-star requirement 4,
+now closed two ways. The tombstone is judged per-origin across tiers — for
+a delegated attachment it still refuses delegations issued at or before
+`at` (ADR-022's exact semantics, so re-approval keeps working with no
+un-revoke verb); for a direct-key attachment it refuses authority whose
+session OPENED at or before `at`. And the daemon sweeps its own sessions
+from its heartbeat instead of depending on the CLI's poll, so any embedder
+gets live revocation, not just the terminal.
+
+"May this attachment do X right now" also had three unrelated spellings
+(a two-deadline compare, a `tools.find`, and revocation at open/resume
+only). `AttachmentAuthority` is now the one judge, built when the
+attachment opens; every checkpoint asks it. The judgement splits by caller
+on purpose — a fresh store look at open/resume/prompt/dispatch, the last
+look on the late-tool-result path — because the first memoization design
+was caught red by the EXISTING e2e check "a tombstone alone makes a live
+session unresumable", which is the suite working as designed.
+
+Consent routing is now built once at session open with its destinations
+bound, and `attachmentPolicy`'s inputs are read off which destinations
+exist — a policy claiming a surface that does not route there is
+unrepresentable, which is the rule invariant 8 stated and the code only
+approximated. The approval channel finally has a deadline (`#ask` had one;
+`#requestApproval` had none on either fork, so a wallet that accepted an
+approval and never answered blocked the agent's turn until a human
+cancelled). Expiry is a decline, never a grant. e2e: 188 → 200 checks,
+every new one watched failing.
 
 The AG-UI adapter subscribed to eight of the nine session events by
 hand-picked list; `ask` was the ninth. A direct-key attachment (the inkwell
