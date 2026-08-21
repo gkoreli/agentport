@@ -28,13 +28,19 @@ import { isRecord, toAgentRow, type Origin, type PopupToWorker } from './bridge.
 import {
   DEFAULT_RELAY_URL,
   clearResumesFor,
+  createProtectedKey,
+  custodyState,
+  enabledOrigins,
   ensureUserKey,
   importUserKey,
   listResumes,
   loadCerts,
+  protectExistingKey,
   relayUrl,
   saveCert,
+  setOriginEnabled,
   setRelayUrl,
+  unlockKey,
   userPublicKey,
   type StoredResume,
 } from './storage.js';
@@ -162,12 +168,44 @@ export class PopupApi {
 
   async #onMessage(message: PopupToWorker): Promise<unknown> {
     switch (message.t) {
-      case 'identity':
-        return { pubkey: await userPublicKey(), relay: await relayUrl(), defaultRelay: DEFAULT_RELAY_URL };
+      case 'identity': {
+        const custody = await custodyState();
+        return {
+          pubkey: await userPublicKey(),
+          relay: await relayUrl(),
+          defaultRelay: DEFAULT_RELAY_URL,
+          // The popup renders this word directly: 'legacy' is shown as
+          // UNPROTECTED with the protect flow beside it, 'locked' as the
+          // unlock form. Never collapsed into a boolean — the two non-usable
+          // states carry different instructions.
+          custody: custody.state,
+        };
+      }
       case 'identity.create': {
-        await ensureUserKey();
+        const passphrase = typeof message.passphrase === 'string' ? message.passphrase : undefined;
+        if (passphrase !== undefined) await createProtectedKey(passphrase);
+        else await ensureUserKey();
         this.#options.forgetWallet();
         return { pubkey: await userPublicKey() };
+      }
+      case 'identity.protect': {
+        await protectExistingKey(String(message.passphrase ?? ''));
+        return { custody: (await custodyState()).state };
+      }
+      case 'identity.unlock': {
+        await unlockKey(String(message.passphrase ?? ''));
+        // The wallet may have failed to dial while locked; let the next
+        // caller build one with the now-warm key.
+        this.#options.forgetWallet();
+        return { custody: (await custodyState()).state };
+      }
+      case 'sites':
+        return { origins: await enabledOrigins() };
+      case 'site.set': {
+        const origins = await setOriginEnabled(String(message.origin ?? ''), message.enabled === true);
+        // Registration re-syncs from storage.onChanged in the worker; nothing
+        // to do here, and that is the point — one path.
+        return { origins };
       }
       case 'identity.import': {
         await importUserKey(String(message.secretKey ?? '').trim());

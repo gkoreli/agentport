@@ -22,17 +22,25 @@ npx tsx packages/extension/build.ts --watch
 
 1. Open `chrome://extensions`, turn on **Developer mode**.
 2. **Load unpacked** → `packages/extension/dist`.
-3. Click the AgentPort toolbar icon → **Create a user key**.
-4. Set the relay if it is not `ws://127.0.0.1:8787`.
+3. Click the AgentPort toolbar icon; a key is created on first open (shown as
+   UNPROTECTED until you set a passphrase — the popup offers it right there).
+4. The relay defaults to the hosted one; change it behind the gear for a
+   local `npm run relay`.
 5. `npm run relay` and `npm run daemon` in two terminals; paste the daemon's
    pairing code into the popup and **Approve & sign**. The cert is signed inside
    the service worker.
 
+**The extension exists only on origins you enable.** By default no site can
+see it — no `navigator.agent`, no WebMCP shim, no widget, nothing detectable
+(`src/enablement.ts` holds the rule; the provider is a browser-registered
+MAIN-world script for enabled origins, which is what keeps it ahead of the
+page's own scripts). Open the popup on a site and press **Enable + reload**.
 Then either:
 
-- open the Inkwell demo (`npm run demo`) — with the extension installed the page
-  can drop its in-page wallet and call `navigator.agent.connect()`; or
-- open any site at all and use the floating ◆ widget in the corner.
+- open the Inkwell demo (`npm run demo`), enable its origin — with the
+  extension installed the page can drop its in-page wallet and call
+  `navigator.agent.connect()`; or
+- enable any site at all and use the floating ◆ widget in the corner.
 
 Reload the extension from `chrome://extensions` after each rebuild; content
 scripts need a page reload too.
@@ -202,13 +210,17 @@ keeps its ref and never notices.
 
 ## What is stubbed
 
-- **No key protection at rest.** `ensureUserKey` writes a raw hex key. Passkey
-  wrapping, or delegating signing to a NIP-46 bunker, changes `src/storage.ts`
-  and nothing else.
-- **No revocation UI.** The popup lists agents and live sessions; it cannot
-  unpair one. Revocation is edge-side since ADR-016 made the relay stateless:
-  it belongs to the daemon's identity file and the wallet's own store, not to
-  the relay.
+- **Key protection is passphrase-based, and opt-in.** The silent first-run key
+  is plaintext at rest, labeled UNPROTECTED in the popup with the upgrade
+  beside it; setting a passphrase wraps it (AES-GCM over PBKDF2 —
+  `src/keywrap.ts` holds the crypto and the honest threat model: this protects
+  a stolen disk or copied profile, not a compromised running browser). A
+  PASSKEY wrap is not possible today: WebAuthn does not work on
+  `chrome-extension://` origins (no valid RP ID), and deriving the wrapping
+  key on a web origin would make extension custody depend on a website. The
+  `kdf` field in the wrapped record is where a PRF-derived key slots in the
+  day the platform allows one. Delegating signing to a NIP-46 bunker still
+  changes `src/storage.ts` and nothing else.
 - **MV3 idle eviction.** A 20s heartbeat plus a 1-minute `chrome.alarms` wake
   keep the worker and socket alive while sessions exist. Chrome 116+ also
   counts WebSocket traffic as activity. A long silent session can still be

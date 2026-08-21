@@ -5,9 +5,19 @@
   "_build_note": "Placeholder only; build.ts stamps the root package version into dist/manifest.json.",
   "description": "Bring your own agent to any website. navigator.agent, with the wallet outside the page.",
   "minimum_chrome_version": "116",
-  "permissions": ["storage", "alarms"],
-  "icons": { "128": "icon128.png" },
-  "host_permissions": ["http://*/*", "https://*/*"],
+  "permissions": [
+    "storage",
+    "alarms",
+    "activeTab",
+    "scripting"
+  ],
+  "icons": {
+    "128": "icon128.png"
+  },
+  "host_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ],
   "background": {
     "service_worker": "sw.js",
     "type": "module"
@@ -18,16 +28,28 @@
   },
   "content_scripts": [
     {
-      "matches": ["http://*/*", "https://*/*"],
-      "js": ["content.js"],
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "js": [
+        "content.js"
+      ],
       "run_at": "document_start",
       "all_frames": true
     }
   ],
   "web_accessible_resources": [
     {
-      "resources": ["inpage.js", "overlay.html", "overlay.js"],
-      "matches": ["http://*/*", "https://*/*"]
+      "resources": [
+        "overlay.html",
+        "overlay.js"
+      ],
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "use_dynamic_url": true
     }
   ]
 }

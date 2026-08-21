@@ -625,7 +625,16 @@ async function main(): Promise<void> {
       }
       if (message.method === 'Log.entryAdded') {
         const entry = message.params?.['entry'] as JsonObject | undefined;
-        if (entry?.['level'] === 'error') runtimeErrors.push(`log: ${String(entry['text'] ?? 'unknown')}`);
+        if (entry?.['level'] !== 'error') return;
+        const text = String(entry['text'] ?? 'unknown');
+        // The enablement section PROBES the static overlay.html URL from a
+        // disabled page and requires the load to be denied — that denial is a
+        // pass, and Chrome logs it as an error. Tolerating exactly this pair
+        // is safe because a denial that mattered (the real overlay iframe)
+        // would also fail the FAB checks loudly.
+        if (/Denying load of chrome-extension:\/\/[^/]+\/overlay\.html/.test(text)) return;
+        if (text === 'Failed to load resource: net::ERR_FAILED') return;
+        runtimeErrors.push(`log: ${text}`);
       }
     });
 
@@ -681,12 +690,87 @@ async function main(): Promise<void> {
       [...sessions.values()].find((target) => target.info.targetId === pageTargetId));
     await settleCurrentPreparation();
     await client.send('Page.enable', {}, page.sessionId);
+
+    // --- per-origin enablement: a DISABLED origin must be unobservable ------
+    //
+    // Default is off for every origin, so the first navigation happens with
+    // nothing enabled, and the page must find NOTHING: no provider, no WebMCP
+    // shim, no widget host, and no probe of the extension's web-accessible
+    // resources by their static URL (`use_dynamic_url` — the extension id
+    // must not be a stable fingerprinting bit). Only then is the origin
+    // enabled, through the same storage key the popup writes, and the
+    // registration sync in the worker must make the provider real for the
+    // NEXT document.
+    const preWorkerInfo = await waitFor('extension service worker target', async () =>
+      targetInfos(await client!.send('Target.getTargets')).find(
+        (candidate) => candidate.type === 'service_worker' && /^chrome-extension:\/\/[^/]+\/sw\.js$/.test(candidate.url),
+      ));
+    const extensionId = new URL(preWorkerInfo.url).host;
+
+    await client.send('Page.navigate', { url: `${otherOrigin}/hostile` }, page.sessionId);
+    await waitFor('disabled-origin page navigation', () => {
+      const target = [...sessions.values()].find((candidate) => candidate.info.targetId === pageTargetId);
+      return target?.info.url === `${otherOrigin}/hostile` ? target : undefined;
+    });
+    await settleCurrentPreparation();
+    // Give a would-be injection every chance to happen before looking.
+    await delay(400);
+    const disabled = await evaluate<JsonObject>(client, page.sessionId, `(async () => {
+      let warStatus = 'unreachable';
+      try {
+        const answer = await fetch('chrome-extension://${extensionId}/overlay.html');
+        warStatus = 'readable:' + answer.status;
+      } catch { /* blocked is the expected shape */ }
+      return {
+        agent: typeof navigator.agent,
+        modelContext: typeof document.modelContext,
+        host: document.querySelectorAll('[data-agentport-ui]').length,
+        scripts: [...document.scripts].filter((s) => s.src.startsWith('chrome-extension:')).length,
+        warStatus,
+      };
+    })()`);
+    check('a disabled origin sees no navigator.agent', disabled['agent'] === 'undefined', disabled);
+    // `document.modelContext` is deliberately NOT asserted absent: Chrome for
+    // Testing 151 ships a NATIVE WebMCP surface on every page, so its presence
+    // is the platform's, not ours. Our shim can only exist where inpage.js
+    // ran, and the line above proves it did not.
+    check('a disabled origin renders no widget host', disabled['host'] === 0, disabled);
+    check('a disabled origin carries no extension script tags', disabled['scripts'] === 0, disabled);
+    check('the static resource URL is not a probe', disabled['warStatus'] === 'unreachable', disabled);
+
+    const preWorker = await discoverExtensionWorker(`chrome-extension://${extensionId}`);
+    await evaluate(client, preWorker.sessionId, `chrome.storage.local.set({
+      'agentport.enabled.origins.v1': ${JSON.stringify([origin, otherOrigin])},
+    })`);
+    await waitFor('provider registration for enabled origins', async () => {
+      const registered = await evaluate<number>(client!, preWorker.sessionId,
+        `chrome.scripting.getRegisteredContentScripts().then((list) => list.length)`);
+      return registered > 0 ? registered : undefined;
+    });
+
     await client.send('Page.navigate', { url }, page.sessionId);
 
     page = await waitFor('hostile page navigation', () => {
       const target = [...sessions.values()].find((candidate) => candidate.info.targetId === pageTargetId);
       return target?.info.url === url ? target : undefined;
     });
+
+    // The other half of enablement: the SAME assertions, inverted, on the
+    // origin the user just enabled — and the provider must have been there
+    // from document_start (browser-registered), not appended late.
+    const enabledState = await waitFor<JsonObject>('provider on the enabled origin', async () => {
+      const value = await evaluate<JsonObject>(client!, page.sessionId, `({
+        agent: typeof navigator.agent,
+        modelContext: typeof document.modelContext,
+      })`);
+      return value['agent'] === 'object' ? value : undefined;
+    });
+    check('an enabled origin gets navigator.agent', enabledState['agent'] === 'object', enabledState);
+    check(
+      'an enabled origin has document.modelContext (native on this Chrome, shimmed where absent)',
+      enabledState['modelContext'] === 'object',
+      enabledState,
+    );
 
     const frame = await waitFor('extension overlay iframe', () =>
       [...sessions.values()].find((target) =>

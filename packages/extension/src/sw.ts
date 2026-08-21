@@ -85,11 +85,14 @@ import {
   type WorkerToContent,
 } from './bridge.js';
 import { ConsentWindows } from './consent-windows.js';
+import { ENABLED_ORIGINS_KEY, INPAGE_SCRIPT_ID, desiredRegistration, originPattern } from './enablement.js';
 import { KeepAlive } from './keepalive.js';
 import { leftBehindByNavigation, mayReclaim, reclaimKeyFor, synthesisedNames } from './lifecycle.js';
 import { PopupApi } from './popup-api.js';
 import { saveCert,
   clearResume,
+  custodyState,
+  enabledOrigins,
   loadResume,
   originAlias,
   relayUrl,
@@ -124,7 +127,17 @@ async function getWallet(): Promise<AgentWallet> {
   if (walletPromise) return walletPromise;
   walletPromise = (async () => {
     const secret = await userSecretKey();
-    if (!secret) throw new Error('no identity yet — open the AgentPort popup and create one');
+    if (!secret) {
+      // Two different instructions hide behind one undefined; tell the person
+      // the one that applies. Every consumer of this wallet surfaces the
+      // message it throws, so the locked state is never a silent dead end.
+      const custody = await custodyState();
+      throw new Error(
+        custody.state === 'locked'
+          ? 'AgentPort is locked — open the popup and unlock it'
+          : 'no identity yet — open the AgentPort popup and create one',
+      );
+    }
     const wallet = new AgentWallet({ relayUrl: await relayUrl(), userSecretKey: secret });
     // Reconnection belongs to the wallet, and only to the wallet. A dropped
     // socket is not a goodbye for the sessions it carried, so the wallet
@@ -268,6 +281,60 @@ chrome.alarms?.onAlarm.addListener((alarm) => {
 // from the generation that was evicted holding a session. Reconciling once at
 // load is the only moment that one is ever cleared.
 keepAlive.sync();
+
+// --- provider registration (per-origin enablement) --------------------------
+//
+// The page-world provider is a browser-REGISTERED MAIN-world document_start
+// script for enabled origins (`enablement.ts` holds the reasoning: only the
+// browser can guarantee the WebMCP shim exists before the first page script;
+// the mediator's async storage read cannot). One registration, updated to the
+// enabled list; deregistered outright when the list empties. Every writer —
+// popup, a CDP harness, an import — converges here through `storage.onChanged`,
+// so there is no second path to forget.
+async function syncInpageRegistration(): Promise<void> {
+  const desired = desiredRegistration(await enabledOrigins());
+  const existing = await chrome.scripting.getRegisteredContentScripts({ ids: [INPAGE_SCRIPT_ID] });
+  if (!desired) {
+    if (existing.length > 0) await chrome.scripting.unregisterContentScripts({ ids: [INPAGE_SCRIPT_ID] });
+    return;
+  }
+  const spec: chrome.scripting.RegisteredContentScript = {
+    id: desired.id,
+    js: ['inpage.js'],
+    matches: desired.matches,
+    runAt: 'document_start',
+    world: 'MAIN',
+    allFrames: true,
+    persistAcrossSessions: true,
+  };
+  try {
+    if (existing.length > 0) await chrome.scripting.updateContentScripts([spec]);
+    else await chrome.scripting.registerContentScripts([spec]);
+  } catch (err) {
+    // Chrome match patterns and explicit ports have a fraught history. Retry
+    // port-blind (`enablement.ts#originPattern` documents the cost: sibling
+    // ports of an enabled localhost may see the provider object; the
+    // mediator's exact-origin gate still refuses their traffic) rather than
+    // leaving the user's enablement silently inert.
+    const fallback = [
+      ...new Set(
+        (await enabledOrigins())
+          .map((origin) => originPattern(origin))
+          .flatMap((derived) => (derived ? [derived.portBlind ?? derived.pattern] : [])),
+      ),
+    ];
+    log.warn('exact-origin registration failed; retrying port-blind', { err, data: { fallback } });
+    const blindSpec = { ...spec, matches: fallback };
+    if (existing.length > 0) await chrome.scripting.updateContentScripts([blindSpec]);
+    else await chrome.scripting.registerContentScripts([blindSpec]);
+  }
+}
+
+observe(syncInpageRegistration(), 'provider registration sync failed at worker start');
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== 'local' || !(ENABLED_ORIGINS_KEY in changes)) return;
+  observe(syncInpageRegistration(), 'provider registration sync failed after an enablement change');
+});
 
 /** The two ways the table changes, so nothing keyed on its size is forgotten. */
 function rememberSession(entry: SessionEntry): void {
@@ -1020,9 +1087,15 @@ async function onContentMessage(port: chrome.runtime.Port, message: ContentReque
         post(port, { t: 'err', rid: message.rid, reason: 'denied', message: 'pairing links are only accepted from your configured AgentPort host' });
         return;
       }
+      // Reason 'error', not 'denied', and the split is deliberate: everything
+      // past the origin gate above happened on the user's own configured host,
+      // where the content script may render the failure into the page. The
+      // gate's own refusal stays 'denied' — the one answer an ARBITRARY site's
+      // /pair page can provoke — and the content script renders 'denied' as
+      // nothing at all, because that render is a fingerprinting bit.
       const code = message.code.trim().toUpperCase();
       if (!/^[A-Z2-9]{4}-[A-Z2-9]{4}$/.test(code)) {
-        post(port, { t: 'err', rid: message.rid, reason: 'denied', message: 'invalid pairing code' });
+        post(port, { t: 'err', rid: message.rid, reason: 'error', message: 'invalid pairing code' });
         return;
       }
       const wallet = await getWallet();

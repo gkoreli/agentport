@@ -42,6 +42,18 @@ import {
 /** Envelope discriminator. Present on every frame in both directions. */
 export const ENVELOPE = 'agentport/ext/1';
 
+/**
+ * The one page↔mediator channel name. A CONSTANT, and that is a considered
+ * position: the channel only separates our envelopes from a page's other
+ * postMessage traffic — the envelope marker already does most of that — and
+ * it has never carried authority ("authority never derives from it" predates
+ * this constant; the page could always read the old per-document value off
+ * the injecting script tag). A constant is what lets the provider be injected
+ * by BROWSER REGISTRATION (`enablement.ts`), where no per-document dataset
+ * exists to mint a random one into.
+ */
+export const PAGE_CHANNEL = 'agentport';
+
 /** Page → content script. */
 export const TO_WALLET = 'page->wallet';
 /** Content script → page. */
@@ -348,8 +360,19 @@ export type WorkerToConsent =
 /** Popup ⇄ service worker. Extension-origin only; still typed, still checked. */
 export type PopupToWorker =
   | { t: 'identity' }
-  | { t: 'identity.create' }
+  /** Create a fresh identity. With a passphrase it is wrapped from birth;
+   *  without one it is the legacy plaintext format, and the popup's own UI
+   *  always sends a passphrase — the bare form exists for the dev flow. */
+  | { t: 'identity.create'; passphrase?: string }
   | { t: 'identity.import'; secretKey: string }
+  /** Wrap the existing legacy plaintext key (verify-then-delete ordering
+   *  lives in storage.ts#protectExistingKey). */
+  | { t: 'identity.protect'; passphrase: string }
+  /** Unlock a wrapped identity for this browser session. */
+  | { t: 'identity.unlock'; passphrase: string }
+  /** Origins the page-world provider exists on (enablement.ts). */
+  | { t: 'sites' }
+  | { t: 'site.set'; origin: string; enabled: boolean }
   | { t: 'agents' }
   | { t: 'pair.claim'; code: string }
   | { t: 'pair.approve'; code: string; name?: string }

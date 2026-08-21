@@ -34,6 +34,7 @@ import {
 } from '@agentport/protocol';
 import {
   ENVELOPE,
+  PAGE_CHANNEL,
   TO_PAGE,
   TO_WALLET,
   isRecord,
@@ -49,9 +50,11 @@ import { AGENTPORT_VERSION } from './version.js';
 /** Bump whenever the injected provider or page-session surface changes shape. */
 export const CONTRACT_REVISION = 1;
 
-// Handed over on the injecting <script> tag. Same-document scoping only — the
-// page can read it, and reading it buys nothing: see the note in bridge.ts.
-const CHANNEL = (document.currentScript as HTMLScriptElement | null)?.dataset['channel'] ?? '';
+// A constant, because this file is injected by browser registration on
+// enabled origins (`enablement.ts`) and a registered script has no <script>
+// tag to carry a per-document value. Traffic separation only — it never
+// carried authority: see the note on PAGE_CHANNEL in bridge.ts.
+const CHANNEL = PAGE_CHANNEL;
 
 type Listener = (payload: never) => void;
 
@@ -271,7 +274,6 @@ function rid(prefix: string): string {
 }
 
 function send(body: PageOutbound): void {
-  if (!CHANNEL) throw new Error('AgentPort provider was loaded without a channel');
   const envelope: PageEnvelope<PageOutbound> = { e: ENVELOPE, dir: TO_WALLET, channel: CHANNEL, body };
   window.postMessage(envelope, window.origin === 'null' ? '*' : window.origin);
 }

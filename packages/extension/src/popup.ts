@@ -63,6 +63,12 @@ const status = signal('');
 const pairing = signal(false);
 const settings = signal(false);
 const offer = signal<{ code: string; agent: { name: string; runtime: string; location?: string } } | null>(null);
+/** 'legacy' | 'locked' | 'unlocked' | 'none' — rendered, never collapsed. */
+const custody = signal('none');
+/** Origins the provider exists on, plus this tab's own origin if readable. */
+const enabledSites = signal<string[]>([]);
+const tabOrigin = signal<string | null>(null);
+const tabId = signal<number | null>(null);
 
 async function run(label: string, work: () => Promise<void>): Promise<void> {
   status.value = label;
@@ -221,6 +227,103 @@ const Settings = component('ap-settings', () => {
     </section>`;
 });
 
+/**
+ * Key custody, shown honestly. 'legacy' is not an error state — it is how
+ * every pre-wrapping install arrives and how the silent first-run create
+ * works — but it is UNPROTECTED at rest and the card says so, with the
+ * upgrade beside it. What a passphrase protects (the key at rest: a stolen
+ * disk or copied profile) and what it does not (a compromised running
+ * browser) is stated in keywrap.ts and must not be oversold here.
+ */
+const Custody = component('ap-custody', () => {
+  const pass = signal('');
+  const passField = (placeholder: string) => html`
+    <input
+      type="password"
+      placeholder=${placeholder}
+      @input=${(event: Event) => { pass.value = (event.target as HTMLInputElement).value; }}
+    />`;
+  return html`
+    <section>
+      ${when(computed(() => custody.value === 'locked'), () => html`
+        <div class="card">
+          <b>Locked</b>
+          <small>Unlock to use your agents in this browser session.</small>
+          <div class="row">
+            ${passField('passphrase')}
+            <button class="primary" @click=${() => void run('unlocking…', async () => {
+              const result = await ask<{ custody: string }>({ t: 'identity.unlock', passphrase: pass.value });
+              custody.value = result.custody;
+              pass.value = '';
+              await refresh();
+            })}>Unlock</button>
+          </div>
+        </div>`)}
+      ${when(computed(() => custody.value === 'legacy'), () => html`
+        <div class="card">
+          <b>Key is unprotected at rest</b>
+          <small>Set a passphrase to encrypt it on disk. You will unlock once per browser session. This protects a stolen disk or copied profile — not a compromised browser.</small>
+          <div class="row">
+            ${passField('new passphrase (8+ characters)')}
+            <button @click=${() => void run('protecting…', async () => {
+              const result = await ask<{ custody: string }>({ t: 'identity.protect', passphrase: pass.value });
+              custody.value = result.custody;
+              pass.value = '';
+            })}>Protect</button>
+          </div>
+        </div>`)}
+    </section>`;
+});
+
+/**
+ * Where AgentPort exists, per origin. Everything page-visible — the provider,
+ * the WebMCP shim, the panel — exists only on origins enabled here; on every
+ * other site the extension is unobservable. Enabling registers the provider
+ * for the NEXT document, so the button offers the reload rather than
+ * pretending a mid-life injection could still catch document_start.
+ */
+const Sites = component('ap-sites', () => {
+  const here = computed(() => tabOrigin.value);
+  const hereEnabled = computed(() => here.value !== null && enabledSites.value.includes(here.value));
+  const others = computed(() => enabledSites.value.filter((origin) => origin !== tabOrigin.value));
+  return html`
+    <section>
+      <h2>Where AgentPort is on</h2>
+      ${when(computed(() => here.value !== null && !hereEnabled.value), () => html`
+        <div class="card row-card">
+          <div class="grow"><b>${computed(() => here.value ?? '')}</b><small>off — this site cannot see AgentPort</small></div>
+          <button class="primary" @click=${() => void run('enabling…', async () => {
+            const origin = here.value;
+            if (!origin) return;
+            const result = await ask<{ origins: string[] }>({ t: 'site.set', origin, enabled: true });
+            enabledSites.value = result.origins;
+            const tab = tabId.value;
+            if (tab !== null) await chrome.tabs.reload(tab);
+          })}>Enable + reload</button>
+        </div>`)}
+      ${when(hereEnabled, () => html`
+        <div class="card row-card">
+          <div class="grow"><b>${computed(() => here.value ?? '')}</b><small>on — this site can use your agent</small></div>
+          <button @click=${() => void run('disabling…', async () => {
+            const origin = here.value;
+            if (!origin) return;
+            const result = await ask<{ origins: string[] }>({ t: 'site.set', origin, enabled: false });
+            enabledSites.value = result.origins;
+            const tab = tabId.value;
+            if (tab !== null) await chrome.tabs.reload(tab);
+          })}>Disable</button>
+        </div>`)}
+      ${each(others, (origin) => origin, (origin) => html`
+        <div class="card row-card">
+          <div class="grow"><small>${origin}</small></div>
+          <button class="ghost" @click=${() => void run('disabling…', async () => {
+            const result = await ask<{ origins: string[] }>({ t: 'site.set', origin: origin.value, enabled: false });
+            enabledSites.value = result.origins;
+          })}>Off</button>
+        </div>`)}
+    </section>`;
+});
+
 const App = component('ap-app', () => {
   const showPairing = computed(() => pairing.value || agents.value.length === 0);
   const haveSessions = computed(() => sessions.value.length > 0);
@@ -232,6 +335,8 @@ const App = component('ap-app', () => {
         <span>${status}</span>
         <button class="icon" title="Settings" @click=${() => { settings.value = !settings.value; }}>⚙</button>
       </header>
+      ${Custody({})}
+      ${when(computed(() => custody.value !== 'locked'), () => Sites({}))}
       ${when(havePaired, () => Agents({}))}
       ${when(haveSessions, () => Sessions({}))}
       ${when(showPairing, () => Pairing({}))}
@@ -246,17 +351,30 @@ const App = component('ap-app', () => {
 html`${App({})}`.mount(document.body);
 
 // First open: make the key silently — there is no meaningful choice to offer,
-// and every extra step before "pair your agent" is a step people quit on.
+// and every extra step before "pair your agent" is a step people quit on. The
+// silent key is the LEGACY (unprotected-at-rest) format, and the custody card
+// says so and offers the passphrase upgrade right there — protection is an
+// offered step, never a wall in front of pairing.
 void run('', async () => {
-  const identity = await ask<{ pubkey?: string; relay: string }>({ t: 'identity' });
+  const identity = await ask<{ pubkey?: string; relay: string; custody: string }>({ t: 'identity' });
   relay.value = identity.relay;
+  custody.value = identity.custody;
   if (!identity.pubkey) {
     const created = await ask<{ pubkey: string }>({ t: 'identity.create' });
     pubkey.value = created.pubkey;
+    custody.value = 'legacy';
   } else {
     pubkey.value = identity.pubkey;
   }
-  await refresh();
+  // The current tab's origin, readable because opening this popup IS the
+  // activeTab grant. A tab with no readable http(s) URL renders no toggle.
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (tab?.id !== undefined) tabId.value = tab.id;
+  if (tab?.url && /^https?:/.test(tab.url)) tabOrigin.value = new URL(tab.url).origin;
+  enabledSites.value = (await ask<{ origins: string[] }>({ t: 'sites' })).origins;
+  // A locked identity cannot refresh (the wallet cannot dial); the custody
+  // card is the whole popup until it is unlocked.
+  if (custody.value !== 'locked') await refresh();
 });
 
 // Presence changes while the popup is open should show up without a button.

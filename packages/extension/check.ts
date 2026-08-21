@@ -455,7 +455,7 @@ console.log(`extension build stamp check passed (${rootPackage.version})`);
 // where only the real-Chrome harness can reach it.
 
 const { Window } = await import('happy-dom');
-const { ENVELOPE, TO_PAGE, TO_WALLET } = await import('./src/bridge.js');
+const { ENVELOPE, PAGE_CHANNEL, TO_PAGE, TO_WALLET } = await import('./src/bridge.js');
 
 const win = new Window({ url: 'https://elicit.test/' });
 const globals = globalThis as Record<string, unknown>;
@@ -481,13 +481,10 @@ for (const key of ['window', 'document', 'navigator', 'location', 'MessageEvent'
 // esbuild substitutes this at build time; the source reads it as a global.
 installGlobal('__AGENTPORT_VERSION__', rootPackage.version);
 
-const CHANNEL = 'ch_check';
-const injected = win.document.createElement('script');
-injected.dataset['channel'] = CHANNEL;
-win.document.head.appendChild(injected);
-// The provider reads its channel off the injecting <script> exactly as it does
-// in a real document; `currentScript` is null during a dynamic import.
-Object.defineProperty(win.document, 'currentScript', { value: injected, configurable: true });
+// The channel is the fixed constant now — the provider is browser-registered
+// on enabled origins (`enablement.ts`) and a registered script has no
+// injecting <script> tag to carry a per-document value off.
+const CHANNEL = PAGE_CHANNEL;
 
 /** Everything the page posted, as the CONTENT SCRIPT would see it: validated. */
 const validated: PageOutbound[] = [];
@@ -1998,3 +1995,112 @@ function keepAliveFixture() {
 }
 
 console.log('worker keep-alive check passed');
+
+// --- per-origin enablement: the rules a page's invisibility rests on --------
+//
+// `enablement.ts` decides which origins may carry the page-world provider and
+// what the browser registration for them looks like. The rules are pure so
+// they are assertable here; the applier in sw.ts and the observable "a
+// disabled origin sees nothing" live in scripts/extension-ui-smoke.ts, in a
+// real Chrome.
+
+{
+  const { desiredRegistration, isEnableableOrigin, originPattern } = await import('./src/enablement.js');
+
+  // Only exact http(s) origins. Anything else recorded as "enabled" would be
+  // authority that either cannot be matched again (opaque) or is not a
+  // website at all.
+  assert.equal(isEnableableOrigin('https://example.com'), true);
+  assert.equal(isEnableableOrigin('http://127.0.0.1:8788'), true);
+  assert.equal(isEnableableOrigin('https://example.com/'), false, 'a path-carrying spelling was accepted');
+  assert.equal(isEnableableOrigin('chrome-extension://abcdefg'), false, 'an extension origin was enableable');
+  // `ws:` is the one non-http scheme WHATWG URL gives a REAL origin in Node
+  // too, so this is the case that can actually see the scheme clause fail
+  // here. The chrome-extension case above only fails in a BROWSER, whose URL
+  // parser grants extension schemes a real origin — a sabotage of the scheme
+  // clause was invisible to this file until this line existed (rule 6: the
+  // no-failure run was evidence about the check, not the code).
+  assert.equal(isEnableableOrigin('ws://example.com'), false, 'a non-http scheme with a real origin was enableable');
+  assert.equal(isEnableableOrigin('file:///tmp'), false, 'a file origin was enableable');
+  assert.equal(isEnableableOrigin('null'), false, 'an opaque origin was enableable');
+  assert.equal(isEnableableOrigin('not a url'), false);
+
+  assert.deepEqual(originPattern('https://example.com'), { pattern: 'https://example.com/*' });
+  // A ported origin carries its fallback, because Chrome match patterns and
+  // explicit ports have a fraught history; the fallback is port-blind and the
+  // mediator's exact-origin gate is what keeps it honest.
+  assert.deepEqual(originPattern('http://127.0.0.1:8788'), {
+    pattern: 'http://127.0.0.1:8788/*',
+    portBlind: 'http://127.0.0.1/*',
+  });
+  assert.equal(originPattern('file:///tmp'), undefined);
+
+  // No enabled origins means NO registration — not an empty one. An invalid
+  // origin that somehow reached storage is skipped, never widened.
+  assert.equal(desiredRegistration([]), undefined, 'an empty list still produced a registration');
+  assert.deepEqual(desiredRegistration(['https://a.example', 'garbage', 'https://b.example']), {
+    id: 'agentport-inpage',
+    matches: ['https://a.example/*', 'https://b.example/*'],
+  });
+}
+
+console.log('enablement rules check passed');
+
+// --- key wrapping: the seed at rest, and the ordering that never loses it ---
+//
+// `keywrap.ts` is pure WebCrypto, so the properties the popup's copy claims
+// are asserted here directly: a wrap round-trips, a wrong passphrase is
+// refused, a tampered record is refused, a record claiming a different
+// identity than it holds is refused EVEN with a valid tag, and the plaintext
+// copy may only be deleted after a verified round-trip.
+
+{
+  const { generateKeyPair, publicKeyOf } = await import('@agentport/protocol');
+  const { mayDeletePlaintext, unwrapSeed, wrapSeed } = await import('./src/keywrap.js');
+
+  const seed = generateKeyPair().secretKey;
+  const wrapped = await wrapSeed(seed, 'correct horse battery');
+  assert.equal(wrapped.publicKey, publicKeyOf(seed), 'the record does not name the identity it wraps');
+  assert.equal(await unwrapSeed(wrapped, 'correct horse battery'), seed, 'a wrap did not round-trip');
+
+  await assert.rejects(
+    () => unwrapSeed(wrapped, 'wrong passphrase!'),
+    /wrong passphrase|corrupt/,
+    'a wrong passphrase produced a seed instead of a refusal',
+  );
+
+  // Tamper with one ciphertext byte: the AEAD tag must refuse it.
+  const tampered = {
+    ...wrapped,
+    ciphertext: `${wrapped.ciphertext.slice(0, 2)}${wrapped.ciphertext[2] === '0' ? '1' : '0'}${wrapped.ciphertext.slice(3)}`,
+  };
+  await assert.rejects(
+    () => unwrapSeed(tampered, 'correct horse battery'),
+    /wrong passphrase|corrupt/,
+    'a tampered record still unwrapped',
+  );
+
+  // A record whose claimed identity disagrees with its contents is refused
+  // even though the tag verifies — an identity swap that authenticates is
+  // exactly the corruption the publicKey field exists to catch.
+  const swapped = { ...wrapped, publicKey: publicKeyOf(generateKeyPair().secretKey) };
+  await assert.rejects(
+    () => unwrapSeed(swapped, 'correct horse battery'),
+    /different identity/,
+    'a record claiming another identity unwrapped anyway',
+  );
+
+  // Deletion ordering: only a verified round-trip to the SAME seed permits
+  // deleting the plaintext. "The write succeeded" is not evidence.
+  assert.equal(mayDeletePlaintext(seed, { seed }), true);
+  assert.equal(mayDeletePlaintext(seed, { failed: true }), false, 'a failed round-trip still allowed deletion');
+  assert.equal(
+    mayDeletePlaintext(seed, { seed: generateKeyPair().secretKey }),
+    false,
+    'a round-trip to a DIFFERENT seed still allowed deletion',
+  );
+
+  await assert.rejects(() => wrapSeed(seed, 'short'), /at least 8/, 'a trivial passphrase was accepted');
+}
+
+console.log('key wrapping check passed');

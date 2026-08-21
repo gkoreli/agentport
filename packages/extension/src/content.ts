@@ -34,6 +34,7 @@ import { createLogger, type ToolDefinition } from '@agentport/protocol';
 import {
   ENVELOPE,
   LIMITS,
+  PAGE_CHANNEL,
   TO_PAGE,
   TO_WALLET,
   isRecord,
@@ -49,6 +50,7 @@ import {
 } from './bridge.js';
 import type { OverlayAction, OverlayCommand } from './overlay.js';
 import { describeHandle, genericPageTools } from './pagetools.js';
+import { isOriginEnabled } from './storage.js';
 import { AGENTPORT_VERSION } from './version.js';
 import {
   WidgetSurface,
@@ -58,8 +60,20 @@ import {
   type WidgetToolSource,
 } from './widget.js';
 
-const CHANNEL = mintId('ch_');
+const CHANNEL = PAGE_CHANNEL;
 const TOOL_CALL_TIMEOUT_MS = 30_000;
+
+/**
+ * Whether this origin is enabled, resolved once at boot; `undefined` while
+ * the storage read is in flight. Page envelopes that arrive before the answer
+ * are QUEUED, not dropped: on an enabled origin the browser-registered
+ * provider runs at document_start and its WebMCP harvest can land here before
+ * `chrome.storage` answers, and a harvest lost to that race is a site whose
+ * declared tools silently vanish. On a disabled origin the queue is discarded
+ * unprocessed — fail closed, nothing answered, nothing observable.
+ */
+let originEnabled: boolean | undefined;
+const preEnablementQueue: MessageEvent[] = [];
 const PAIR_CODE = /^[A-Z2-9]{4}-[A-Z2-9]{4}$/;
 const log = createLogger('extension.content');
 
@@ -143,16 +157,12 @@ function toPage(body: PageInbound): void {
   window.postMessage({ e: ENVELOPE, dir: TO_PAGE, channel: CHANNEL, body }, window.origin === 'null' ? '*' : window.origin);
 }
 
-function injectProvider(): void {
-  const script = document.createElement('script');
-  script.src = chrome.runtime.getURL('inpage.js');
-  // Not a secret — the page can read this attribute. It separates our traffic
-  // from every other postMessage on the page; authority never derives from it.
-  script.dataset.channel = CHANNEL;
-  script.async = false;
-  script.addEventListener('load', () => script.remove());
-  (document.head ?? document.documentElement).append(script);
-}
+// The provider is NOT injected from here. On enabled origins the browser
+// injects `inpage.js` as a registered MAIN-world document_start script
+// (`enablement.ts`, applied by the service worker) — the only way it reliably
+// exists before the first page script runs; on every other origin nothing
+// page-visible exists at all. This file's job on a disabled origin is to be
+// unobservable: no DOM, no injected script, no answered message.
 
 /** The pairing link contains no authority: it only opens an extension-owned
  * confirmation. The content script reports success into the otherwise static
@@ -173,7 +183,20 @@ function handlePairingLink(): void {
   };
   request<{ agent: { name: string } }>((rid) => ({ t: 'pair.link', rid, code })).then(
     (result) => show(`${result.agent.name} is paired. You can close this tab.`),
-    (err: Error) => show(err.message, true),
+    (err: Error & { reason?: string }) => {
+      // 'denied' is the worker's origin gate: this document is NOT the user's
+      // configured AgentPort host, so it is an arbitrary page probing with a
+      // fabricated code — and writing ANYTHING into its DOM is a pre-consent
+      // "the extension is installed" bit. Silence, logged on our side only.
+      // Every other failure happened on the configured host ('error') or
+      // after the user acted in extension chrome ('cancelled'); those may
+      // render where the person who caused them is looking.
+      if (err.reason === 'denied') {
+        log.info('ignored a pairing link from a host that is not the configured AgentPort host');
+        return;
+      }
+      show(err.message, true);
+    },
   );
 }
 
@@ -182,6 +205,22 @@ window.addEventListener('message', (event: MessageEvent) => {
   const data: unknown = event.data;
   if (!isRecord(data) || data['e'] !== ENVELOPE || data['dir'] !== TO_WALLET || data['channel'] !== CHANNEL) return;
 
+  // A disabled origin is answered by NOTHING — not an error, not a refusal
+  // frame, no observable difference from the extension being absent. This
+  // also backstops the port-blind registration fallback (`enablement.ts`):
+  // even where the provider script leaked onto a sibling port, its traffic
+  // dies here. While the enablement read is in flight the event is queued;
+  // see `preEnablementQueue`.
+  if (originEnabled === undefined) {
+    preEnablementQueue.push(event);
+    return;
+  }
+  if (!originEnabled) return;
+  handlePageEnvelope(event);
+});
+
+function handlePageEnvelope(event: MessageEvent): void {
+  const data = event.data as Record<string, unknown>;
   // Everything below this line came from a hostile context. `readPageOutbound`
   // rebuilds it; anything it cannot rebuild is dropped without a reply, because
   // a parse error is not something the page is owed an answer about.
@@ -291,7 +330,7 @@ window.addEventListener('message', (event: MessageEvent) => {
       return;
     }
   }
-});
+}
 
 /**
  * A question the agent asked could not be put to the user.
@@ -633,11 +672,20 @@ function overlay(): OverlayBridge {
       disposeBridge('widget_reloaded');
       return;
     }
-    // The iframe URL is extension-origin. The page cannot name this browsing
-    // context because it is nested in the closed root above.
+    // targetOrigin '*', and that is a considered position, not a shortcut.
+    // Under `use_dynamic_url` (manifest) the overlay document's own origin is
+    // a per-session GUID origin while `frame.src` spells the static extension
+    // id — a static targetOrigin therefore mismatches and the browser DROPS
+    // the handshake silently, which presented as a loaded overlay that never
+    // rendered. What actually scopes this message is structure, not the
+    // origin filter: the frame lives in a closed shadow root the page cannot
+    // reach or replace (the MutationObserver below disposes the bridge if the
+    // host leaves the DOM), the receiver accepts only `window.parent` as the
+    // source, and the port is adopted only with the fragment secret minted
+    // beside the iframe.
     frame.contentWindow?.postMessage(
       { t: 'agentport.overlay.connect', secret: overlaySecret },
-      new URL(frame.src).origin,
+      '*',
       [channel.port2],
     );
     connected = true;
@@ -727,24 +775,51 @@ const widget = new WidgetSurface({
 
 // --- boot ------------------------------------------------------------------
 
-injectProvider();
+// The pairing-link flow runs on EVERY origin, enabled or not, because the
+// pairing page is wherever the daemon's printed link points (the deployed
+// site, a self-hosted one) and demanding the user enable that origin first
+// would strand exactly the stranger it exists for. It is extension-chrome
+// bound: consent renders in an extension window, and nothing is written into
+// page DOM before that consent settles (see `handlePairingLink` for the
+// fingerprinting reasoning).
 handlePairingLink();
 
 // Only the top frame gets a widget: a floating panel per iframe would be noise,
 // and an iframe is not where a user expects to grant page-wide capabilities.
 if (window.top === window) {
-  // Opening the port IS the announcement: the worker reads this document's
-  // origin and tab from the browser's own stamp on it, and closes any
-  // attachment the tab left behind on another origin. Subframes stay silent —
-  // a cross-origin iframe must not be able to detach the tab's session.
+  // Opening the port IS the announcement, and it happens on DISABLED origins
+  // too: the worker reads this document's origin and tab from the browser's
+  // own stamp on it, and closes any attachment the tab left behind on another
+  // origin — navigating from an enabled origin to a disabled one must still
+  // end what the tab was holding. The port is invisible to the page (isolated
+  // world, no DOM), so this does not weaken the unobservability rule.
+  // Subframes stay silent — a cross-origin iframe must not be able to detach
+  // the tab's session.
   workerPort();
-  if (location.pathname !== '/pair') {
-    // Before anything is rendered, because a tool call the agent issued just
-    // before the navigation is already parked in the worker waiting for a
-    // document to bind. Failures inside are logged and surfaced there.
-    void widget.reclaim();
-    const start = () => overlay().show();
-    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, { once: true });
-    else start();
-  }
 }
+
+void isOriginEnabled(window.origin).then(
+  (enabled) => {
+    originEnabled = enabled;
+    const queued = preEnablementQueue.splice(0);
+    if (!enabled) return; // Queued page envelopes die unprocessed — nothing observable.
+    for (const event of queued) handlePageEnvelope(event);
+    if (window.top === window && location.pathname !== '/pair') {
+      // Before anything is rendered, because a tool call the agent issued just
+      // before the navigation is already parked in the worker waiting for a
+      // document to bind. Failures inside are logged and surfaced there.
+      void widget.reclaim();
+      const start = () => overlay().show();
+      if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, { once: true });
+      else start();
+    }
+  },
+  (err: unknown) => {
+    // Fail closed: an unreadable enablement list is a disabled origin, and the
+    // queued envelopes die with it. Logged because a user who enabled this
+    // origin and sees nothing deserves a trace to find.
+    originEnabled = false;
+    preEnablementQueue.length = 0;
+    log.error('could not read origin enablement; treating this origin as disabled', { err });
+  },
+);
