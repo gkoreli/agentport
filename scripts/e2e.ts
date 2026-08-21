@@ -3583,7 +3583,10 @@ console.log('\n24. page context reaches the runtime turn');
   session24.close();
   wallet24.close();
   await daemon24.stop();
-// 24. Prompt content blocks (v7): the upload direction, end to end. An image
+  await r24.close();
+}
+
+// 25. Prompt content blocks (v7): the upload direction, end to end. An image
 // the user attaches must arrive at the RUNTIME as the bytes they attached,
 // the transcript must record the fact of it (never the payload), and an
 // attachment that cannot go on the wire must be refused at the composer —
@@ -3665,7 +3668,7 @@ console.log('\n24. page context reaches the runtime turn');
   await r24.close();
 }
 
-// 25. grant.update (v7): a live grant reconciles under the session, and the
+// 26. grant.update (v7): a live grant reconciles under the session, and the
 // asymmetry is the boundary — NARROWING is the client tidying up after its
 // own page and needs nothing; WIDENING is new authority and has an owner.
 // A page that could widen its own grant mid-session would have repealed
