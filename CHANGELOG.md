@@ -89,6 +89,7 @@ truncates loudly), and e2e §24 sends both channels through a real wallet,
 relay and daemon and asserts what the runtime observed. Both watched
 failing — the e2e sabotage discriminates: the surface channel stays green
 while the dropped prompt channel goes red.
+
 ### `npm run typecheck` covers the esbuild-bundled projects, ending the forgettable-command class
 
 The consent-window follow-up changed `askApproval`'s signature and updated
@@ -102,7 +103,6 @@ by a sibling stream's clean-worktree gates. The call sites are fixed, and
 `typecheck:bundled` folds all five out-of-reference projects into
 `npm run typecheck`, so the local command now equals what CI's verify job
 already ran.
-||||||| parent of 20e6490 (daemon: thread page context into the agent's turn)
 
 ### The daemon's transport and wire-bounding move out of the session aggregate
 
@@ -120,6 +120,8 @@ have 32 direct wire-harness checks, each watched failing. One sabotage
 first came back green and the fixture was wrong, not the code (equal-sized
 entries could not distinguish budget direction) — rule 5, applied. The
 session aggregate stays in one file and the header now says why.
+
+### The consent-window service and popup API move out of the service worker
 
 `sw.ts` was a cohesive session registry with two unrelated services bolted
 on. `ConsentWindows` now owns the pending-consent state, the fail-closed
@@ -139,6 +141,8 @@ leaving an Approve button that grants a call the session already abandoned;
 and a window whose decision settles while creation is still in flight is
 closed on arrival instead of leaking on screen answering "nothing to
 decide" forever.
+
+### Revocation reaches every tier, and attachment authority is one object
 
 `agentport revoke <origin>` wrote a tombstone, logged, and left a live
 extension attachment running and reopenable: every revocation check in the
@@ -171,6 +175,20 @@ approval and never answered blocked the agent's turn until a human
 cancelled). Expiry is a decline, never a grant. e2e: 188 → 200 checks,
 every new one watched failing.
 
+### The wallet's request/response multiplexer is extracted, and its two recorded bugs are now assertions
+
+`FrameCorrelator` lifts the correlation registry out of `AgentWallet` —
+nothing in it knew about wallets, sockets or keys — and the two defects its
+comments recorded (a deferred registered under two types leaving a stale
+twin that starved later waiters; a refusal frame nobody listed leaving its
+caller hanging) are now direct, socket-free assertions in
+`npm run client:check`, each watched failing by reintroducing the exact
+recorded bug. One deliberate behavior change rides along:
+`AgentWallet#close()` now rejects requests still in flight instead of
+leaving them hanging forever, argued safe by reading every call site.
+
+### An agent's question finally renders, and the adapter can no longer drop an event silently
+
 The AG-UI adapter subscribed to eight of the nine session events by
 hand-picked list; `ask` was the ninth. A direct-key attachment (the inkwell
 demo, or any embedder building its own wallet) that received an agent
@@ -185,17 +203,7 @@ Inkwell answers asks too. The rendering states its own reachability: none of
 connect.js's three tiers can receive a question today — that is ADR-024's
 routing, not an accident — so the comment at the case says which tiers can.
 
-### The wallet's request/response multiplexer is extracted, and its two recorded bugs are now assertions
-
-`FrameCorrelator` lifts the correlation registry out of `AgentWallet` —
-nothing in it knew about wallets, sockets or keys — and the two defects its
-comments recorded (a deferred registered under two types leaving a stale
-twin that starved later waiters; a refusal frame nobody listed leaving its
-caller hanging) are now direct, socket-free assertions in
-`npm run client:check`, each watched failing by reintroducing the exact
-recorded bug. One deliberate behavior change rides along:
-`AgentWallet#close()` now rejects requests still in flight instead of
-leaving them hanging forever, argued safe by reading every call site.
+### Three domain rules own themselves, and one missing clause is closed
 
 Three rules that more than one party judges were copy-pasted wherever they
 were judged, and each set of copies had drifted. They are now one exported
@@ -231,6 +239,8 @@ fails the build, not just a harness. The wire schema is untouched —
 narrowing `SessionDenied.reason` is a lockstep change deferred to v7 and
 recorded on the field.
 
+### The widget's state machine became an object its checks can drive
+
 The extension's fallback surface was eleven module-scope variables in
 `content.ts` maintained by convention across ten functions, and every hazard
 its comments warned about — a plan arriving for a turn this document is not
@@ -248,6 +258,8 @@ and one pre-existing race was found and named at the site rather than fixed
 under a refactor's no-behavior-change claim: the grant is snapshotted before
 the consent await while WebMCP routes are built after it, so a page that
 re-registers during consent can leave a granted tool with no route.
+
+### `agentport doctor`, and a preflight before any pairing code
 
 The default runtime — Claude Code over ACP — had an undeclared prerequisite:
 the adapter has to be fetchable, runnable, and logged in, and nothing checked
