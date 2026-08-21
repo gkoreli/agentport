@@ -20,6 +20,10 @@ import * as esbuild from 'esbuild';
 const here = dirname(fileURLToPath(import.meta.url));
 const outdir = join(here, 'dist');
 const watch = process.argv.includes('--watch');
+// A store upload must not carry inline sourcemaps — they multiply the package
+// size and ship the whole source tree to every install. Dev builds keep them,
+// because a stack trace into minified extension code is undebuggable.
+const release = process.argv.includes('--release') || process.env['AGENTPORT_RELEASE'] === '1';
 const rootPackage = JSON.parse(await readFile(join(here, '../../package.json'), 'utf8')) as { version?: unknown };
 const version = rootPackage.version;
 
@@ -33,11 +37,12 @@ await mkdir(outdir, { recursive: true });
 const shared = {
   bundle: true,
   target: 'es2022',
-  sourcemap: 'inline',
+  sourcemap: release ? false : 'inline',
+  minify: release,
   logLevel: 'info',
   legalComments: 'none',
   define: { __AGENTPORT_VERSION__: JSON.stringify(version) },
-} as const satisfies Partial<esbuild.BuildOptions>;
+} satisfies Partial<esbuild.BuildOptions>;
 
 const builds: esbuild.BuildOptions[] = [
   { ...shared, entryPoints: [join(here, 'src/sw.ts')], outfile: join(outdir, 'sw.js'), format: 'esm' },

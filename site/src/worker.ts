@@ -27,6 +27,13 @@ export default {
       return env.ASSETS.fetch(new Request(url, request));
     }
 
+    // The Chrome Web Store listing links this path; the asset router would
+    // 404 the extensionless spelling before serving privacy.html.
+    if (url.pathname === '/privacy') {
+      url.pathname = '/privacy.html';
+      return env.ASSETS.fetch(new Request(url, request));
+    }
+
     return env.ASSETS.fetch(request);
   },
 };

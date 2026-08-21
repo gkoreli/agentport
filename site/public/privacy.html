@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Privacy — AgentPort</title>
+<link rel="stylesheet" href="/styles.css"/>
+<style>
+  .privacy { max-width: 720px; margin: 6vh auto; padding: 0 24px 64px; }
+  .privacy h1 { margin-bottom: 4px; }
+  .privacy h2 { margin-top: 32px; }
+  .privacy table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 14px; }
+  .privacy th, .privacy td { text-align: left; padding: 6px 10px 6px 0; vertical-align: top; border-bottom: 1px solid rgba(128,128,128,.25); }
+  .privacy code { font-size: 13px; }
+</style></head><body>
+<main class="privacy">
+<h1>AgentPort privacy policy</h1>
+<p class="hint">Applies to the AgentPort browser extension and the hosted relay at this origin. Last updated 2026-08-21. This document is source-controlled with the code it describes.</p>
+
+<h2>The short version</h2>
+<p>AgentPort connects websites you choose to an AI agent <em>you</em> run. Your conversations travel end-to-end encrypted between your browser and your own agent; the relay in the middle routes ciphertext and stores nothing. We operate no accounts, collect no telemetry, and sell nothing. On websites you have not enabled, the extension does nothing and is not detectable.</p>
+
+<h2>What leaves your device, and where it goes</h2>
+<p>Nothing leaves your device until you enable a site and attach your agent there. When you do:</p>
+<ul>
+  <li><b>To your own agent</b> (the machine you paired): your prompts, and — when the agent uses tools you approved — page content those tools read (for example, the text of the page, or a form value you asked it to fill). This is the product working as described: the data goes to <em>your</em> agent on <em>your</em> machine, encrypted end-to-end so the relay cannot read it.</li>
+  <li><b>Through the relay</b> (this origin, or one you self-host): encrypted session frames it cannot decrypt, plus the unencrypted routing metadata a stateless router needs — public keys, agent name and runtime labels, the site's surface name and origin, and the names (not contents) of tools in a session's grant. The relay holds routing entries for live connections only; it writes nothing to disk and keeps no history, no transcripts, and no logs of page content. Its source is public, and pointing the extension at your own relay is one setting.</li>
+</ul>
+<p>The extension itself sends nothing to the developer. There is no analytics endpoint, no crash reporting, no update-time phone-home beyond Chrome's own store mechanism.</p>
+
+<h2>What the extension stores on your device</h2>
+<table>
+  <tr><th>What</th><th>Where</th><th>How long</th></tr>
+  <tr><td>Your identity key — encrypted under your passphrase once you set one; until then stored unencrypted and labeled "unprotected" in the popup</td><td><code>chrome.storage.local</code></td><td>Until you remove it</td></tr>
+  <tr><td>The unlocked copy of a passphrase-protected key</td><td><code>chrome.storage.session</code> (memory only)</td><td>Cleared when the browser exits</td></tr>
+  <tr><td>Origins you enabled AgentPort on</td><td><code>chrome.storage.local</code></td><td>Until you disable them</td></tr>
+  <tr><td>Your paired agents (public keys and names you chose)</td><td><code>chrome.storage.local</code></td><td>Until you unpair</td></tr>
+  <tr><td>Relay URL, per-site display aliases (random, derived per site so sites cannot correlate you)</td><td><code>chrome.storage.local</code></td><td>Until changed</td></tr>
+  <tr><td>Session-resume records (which lets a page reload re-attach)</td><td><code>chrome.storage.session</code> (memory only)</td><td>Cleared when the browser exits, or on revocation</td></tr>
+</table>
+<p>Conversation transcripts are <b>not</b> stored by the extension or the relay. Your agent keeps its own history on your machine, in its own store, under its own settings.</p>
+
+<h2>What websites learn</h2>
+<p>An enabled site learns that an agent is attached, a per-site display alias, and the results of the tools it lent for that session. It never learns which agent software or model you run, your keys, your other sessions, or anything about you on other sites. A site you have not enabled learns nothing, including that AgentPort is installed.</p>
+
+<h2>Your controls</h2>
+<ul>
+  <li>Enable or disable AgentPort per site, from the toolbar popup, any time.</li>
+  <li>See every origin currently holding your agent, and revoke any of them — revocation takes effect immediately, including for live sessions.</li>
+  <li>Protect your identity key with a passphrase; unlock once per browser session.</li>
+  <li>Self-host the relay so no third party is in the path at all.</li>
+</ul>
+
+<h2>Limited use</h2>
+<p>The extension's access to website data is used only to provide the user-facing features described here — attaching your agent to sites you enabled and running the tools you approved — and is not used for advertising, sold, or transferred to any party other than the agent you paired.</p>
+
+<h2>Changes and contact</h2>
+<p>Changes to this policy are made in the public repository alongside the code they describe. Questions: open an issue on the AgentPort repository.</p>
+</main>
+</body></html>

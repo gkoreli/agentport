@@ -10,6 +10,51 @@ they moved.
 
 ## Unreleased
 
+### The extension exists only where you enabled it
+
+The content script used to announce the extension on every page on the web
+before any consent — `navigator.agent`, the WebMCP shim, and the FAB, a
+pre-consent fingerprinting bit that contradicted the north star verbatim
+and would have been a store reviewer's first question. The page-world
+provider is now injected by browser registration per ENABLED origin only
+(the one mechanism that keeps it ahead of the page's first script);
+disabled origins get nothing page-visible, no resource probe
+(`use_dynamic_url`, proven in both directions in real Chrome), and no
+answer — early page envelopes queue until the enablement read resolves, so
+an enabled origin's harvest cannot be lost to the race. Enabling is a
+popup gesture on the current tab's origin. Two fixes rode along: the
+pairing-link flow no longer renders denial text into arbitrary pages' DOM,
+and the overlay handshake survives dynamic resource URLs with its
+structural scoping argued at the site.
+
+### The root key can be wrapped, and its custody states have names
+
+`ensureUserKey` wrote raw hex to disk-synced storage. The seed can now be
+wrapped — passphrase through PBKDF2-SHA-256 (600k) into AES-GCM, with the
+honest constraint recorded where it bit: WebAuthn does not exist on
+extension origins, so the PRF/passkey KEK gets a reserved slot in the
+record format rather than a pretend implementation. States are
+`none | legacy | locked | unlocked`, never collapsed: the frictionless
+first-run key stays legacy and the popup says UNPROTECTED with the upgrade
+inline; locked operations fail into "unlock AgentPort in the popup",
+never into nowhere. Migration wraps, reads back, round-trip-verifies
+against the seed's own public key, and only then deletes plaintext — a
+failed verify withdraws the wrapped copy, never the seed. The threat
+model is stated in `keywrap.ts`: at-rest protection, not a compromised
+running browser, and the popup's copy may not imply more.
+
+### The store gate's paperwork is code now
+
+`packages/extension/store/` holds the single-purpose statement and
+per-permission justifications (broad host access requested broadly,
+exercised only on user-enabled origins, with the activeTab-cannot-
+substitute argument) and the listing copy with asset specs; the privacy
+policy is served at `/privacy` by the site worker and enumerates every
+storage key and exactly what crosses the relay sealed versus clear;
+release builds drop inline sourcemaps. What remains for submission is the
+owner's: the developer account, real screenshots per the specs, and — per
+ADR-026 — pairwise identity in the wire first.
+
 ### A daemon holds a bounded number of sessions, and says "busy" honestly
 
 `AgentDaemon` spawned a runtime per session with no bound, so N attachments
