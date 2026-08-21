@@ -10,6 +10,34 @@ they moved.
 
 ## Unreleased
 
+### `agentport doctor`, and a preflight before any pairing code
+
+The default runtime — Claude Code over ACP — had an undeclared prerequisite:
+the adapter has to be fetchable, runnable, and logged in, and nothing checked
+any of it. A fresh machine paired perfectly and failed minutes later, at the
+first prompt, inside somebody's browser on the far side of a relay — while
+the one terminal that could fix it never heard a word.
+
+`agentport doctor` starts the configured agent, speaks one real ACP
+`initialize` under a hard deadline, and reports what came back: agent and
+ACP version, `loadSession`, and the login commands the agent itself
+advertises — rendered, not invented, and control-character-sanitized like
+everything else a terminal reads to decide something. Every failure mode is
+classified (cannot spawn, exited, refused, silent) with the remediation for
+that failure, and the probed process tree is reaped on every path. The
+daemon runs the same probe — one implementation — before it dials the relay
+or prints a pairing code; demo runtimes never pay for it. A green probe
+explicitly does not claim a login: proving that costs a model turn, so the
+gap is stated instead of papered over, and the README documents the
+runtime's own read-only `auth status` command for the reader who wants
+proof. `AGENTPORT_AGENT_CWD` — the variable that decides what the agent can
+see on disk — is finally documented.
+
+Found while wiring it: `packages/cli`, the package that IS the published
+`npx @gkoreli/agentport`, typechecked nowhere — the eighth instance of the
+esbuild-does-not-typecheck lesson. It now sits in the root project
+references, watched failing both ways.
+
 ### The front door works without the extension, and is executed by checks
 
 The two paths a stranger actually walks were both broken, in the

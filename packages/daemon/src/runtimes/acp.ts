@@ -20,7 +20,13 @@ import { McpBridge, mcpToolName } from '../mcp-bridge.js';
 
 const PROCESS_EXIT_GRACE_MS = 2_000;
 
-async function terminateProcessTree(child: ChildProcessWithoutNullStreams): Promise<void> {
+/**
+ * Exported for `packages/daemon/src/acp-preflight.ts#probeAcpRuntime`, which
+ * spawns the same adapter and therefore has the same descendants to reap. A
+ * second copy of the process-group contract is a second chance to orphan a
+ * model process.
+ */
+export async function terminateProcessTree(child: ChildProcessWithoutNullStreams): Promise<void> {
   const pid = child.pid;
   if (pid === undefined) return;
 

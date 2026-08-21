@@ -111,6 +111,22 @@ Start your agent and pair it with Chrome:
 npx @gkoreli/agentport
 ```
 
+The default runtime is Claude Code over ACP. npx fetches the adapter, but the
+Claude it bundles has to be **logged in as you** — an unauthenticated machine
+pairs perfectly and then fails on the first prompt, in the browser. Check the
+machine first, before a website is waiting on it:
+
+```bash
+npx @gkoreli/agentport doctor
+```
+
+It starts the configured agent, speaks one ACP `initialize`, and prints what
+came back — including the login commands the agent itself advertises. Exit 0
+means the agent runs. `agentport` runs the same probe before it prints a
+pairing code, so a runtime that cannot start fails in the terminal that can
+fix it. Full prerequisites and what a green `doctor` does *not* prove are in
+[the CLI README](./packages/cli/README.md).
+
 Open the one-time link it prints and approve it. Where that approval appears
 depends on what you have, and you do not have to know which:
 

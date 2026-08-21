@@ -2,14 +2,21 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { AgentDaemon } from './daemon.js';
-import { resolveAcpCommand } from './acp-command.js';
+import {
+  ACP_PROBE_DEADLINE_MS,
+  acpCommandLine,
+  describeAcpProbe,
+  isAcpRuntime,
+  probeAcpRuntime,
+  registerAcpRuntimes,
+  resolveAcpSpawn,
+} from './acp-preflight.js';
 import { createTerminalAsk } from './terminal-ask.js';
 import { loadIdentity, saveIdentity } from './identity.js';
 import { pairingControlPath, readPairingControl, writePairingControl } from './pairing-control.js';
 import { fileRevocations, revocationsPath } from './revocations.js';
-import { RUNTIMES, registerRuntime } from './runtime.js';
+import { RUNTIMES } from './runtime.js';
 import { McpBridge } from './mcp-bridge.js';
-import { AcpRuntime } from './runtimes/acp.js';
 import { createLogger } from '@agentport/protocol';
 
 const log = createLogger('daemon.cli');
@@ -24,7 +31,7 @@ process.on('unhandledRejection', (err) => {
 });
 
 // One bridge per daemon; each session gets its own token-scoped endpoint on it.
-const acp = resolveAcpCommand(process.env);
+const acp = resolveAcpSpawn(process.env);
 if (typeof acp === 'string') {
   log.error(acp);
   process.exit(1);
@@ -32,28 +39,10 @@ if (typeof acp === 'string') {
 
 const bridge = new McpBridge();
 
-registerRuntime(
-  'claude-code',
-  () =>
-    new AcpRuntime({
-      command: acp.command,
-      args: acp.args,
-      cwd: process.env.AGENTPORT_AGENT_CWD ?? process.cwd(),
-      bridge,
-    }),
-);
-
-// Any ACP agent at all: AGENTPORT_ACP_COMMAND=goose AGENTPORT_ACP_ARGS=acp
-registerRuntime(
-  'acp',
-  () =>
-    new AcpRuntime({
-      command: acp.command,
-      args: acp.args,
-      cwd: process.env.AGENTPORT_AGENT_CWD ?? process.cwd(),
-      bridge,
-    }),
-);
+// `claude-code` and `acp` both mean "drive the resolved command pair over ACP"
+// — the second exists so any agent at all can be named:
+// AGENTPORT_ACP_COMMAND=goose AGENTPORT_ACP_ARGS=acp
+registerAcpRuntimes(acp, bridge);
 
 const relayUrl = process.env.AGENTPORT_RELAY ?? 'ws://127.0.0.1:8787';
 const walletUrl = process.env.AGENTPORT_WALLET ?? 'http://127.0.0.1:8788/pair';
@@ -65,6 +54,43 @@ const createRuntime = RUNTIMES[runtimeName];
 if (!createRuntime) {
   log.error('unknown runtime', { data: { runtimeName, known: Object.keys(RUNTIMES) } });
   process.exit(1);
+}
+
+// Preflight, before the relay is dialled and before a pairing code exists.
+// An ACP agent that cannot be started is a failure the terminal running this
+// can fix; the same failure discovered after pairing is a session error in
+// someone's browser, on the far side of a relay. Demo runtimes spawn nothing,
+// so `npm run daemon` never pays for this. `agentport doctor` runs the same
+// probe on demand — one implementation, one remediation.
+if (isAcpRuntime(runtimeName)) {
+  log.info('checking the agent runtime before pairing', {
+    data: {
+      command: acpCommandLine(acp),
+      // Honest about the cost: this delays the pairing code, and a machine
+      // that has never fetched the agent waits for npx to download it first.
+      // This is where the wait stops either way.
+      atMostSeconds: Math.round(ACP_PROBE_DEADLINE_MS / 1000),
+    },
+  });
+  const probe = await probeAcpRuntime(acp);
+  if (!probe.ok) {
+    for (const line of describeAcpProbe(probe, runtimeName)) console.error(line);
+    log.error('the agent runtime is not usable; not pairing', {
+      data: { runtimeName, kind: probe.kind, command: acpCommandLine(acp) },
+    });
+    process.exit(1);
+  }
+  log.info('agent runtime ready', {
+    data: {
+      runtimeName,
+      command: acpCommandLine(acp),
+      acpVersion: probe.protocolVersion,
+      loadSession: probe.loadSession,
+      // Not proof of a login — see acp-preflight.ts's header. `agentport
+      // doctor` prints the auth methods this counted.
+      authMethods: probe.authMethods.length,
+    },
+  });
 }
 
 const identity = loadIdentity(identityPath, {

@@ -1,3 +1,9 @@
+// `packages/cli` is here because it was NOWHERE: not in these references, not
+// in tsconfig.harness.json, and bundled by esbuild, which does not typecheck.
+// A deliberate `const _: number = doctor;` in `packages/cli/src/doctor.ts`
+// passed `npm run typecheck` cleanly — in the package that IS the published
+// `npx @gkoreli/agentport`. It is AGENTS.md's own lesson with a sixth name on
+// it: a package that typechecks nowhere is where a shipped bug hides.
 {
   "files": [],
   "references": [
@@ -5,6 +11,7 @@
     { "path": "packages/relay" },
     { "path": "packages/daemon" },
     { "path": "packages/client" },
-    { "path": "packages/agui" }
+    { "path": "packages/agui" },
+    { "path": "packages/cli" }
   ]
 }

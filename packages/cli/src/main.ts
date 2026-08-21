@@ -48,6 +48,11 @@ if (command === 'connect') {
   // Internal systemd entry point. Kept out of user-facing help.
   defaults();
   await import('@agentport/daemon/cli');
+} else if (command === 'doctor') {
+  // defaults() first, so doctor probes the runtime `agentport` would start
+  // rather than the daemon's own repo-development default.
+  defaults();
+  process.exit(await (await import('./doctor.js')).doctor());
 } else if (command === 'status') {
   process.exit((await import('./revoke.js')).status());
 } else if (command === 'revoke') {
@@ -65,6 +70,7 @@ if (command === 'connect') {
   console.log(`AgentPort ${CLI_VERSION}
 
   npx @gkoreli/agentport            start your agent, or pair the one already running
+  npx @gkoreli/agentport doctor     can this machine actually run the agent?
   npx @gkoreli/agentport status     who owns this agent, and what you have cut off
   npx @gkoreli/agentport revoke URL stop an origin using this agent
   npx @gkoreli/agentport unpair     this agent belongs to nobody until you pair it again`);

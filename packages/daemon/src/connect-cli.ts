@@ -11,12 +11,11 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { AgentDaemon } from './daemon.js';
-import { resolveAcpCommand } from './acp-command.js';
+import { registerAcpRuntimes, resolveAcpSpawn } from './acp-preflight.js';
 import { createTerminalAsk } from './terminal-ask.js';
 import { loadIdentity, saveIdentity } from './identity.js';
-import { RUNTIMES, registerRuntime } from './runtime.js';
+import { RUNTIMES } from './runtime.js';
 import { McpBridge } from './mcp-bridge.js';
-import { AcpRuntime } from './runtimes/acp.js';
 import { createLogger } from '@agentport/protocol';
 
 const log = createLogger('daemon.connect-cli');
@@ -43,25 +42,18 @@ const relayUrl = process.env.AGENTPORT_RELAY ?? 'wss://agentport.gogakoreli.work
 const identityPath = process.env.AGENTPORT_IDENTITY ?? join(homedir(), '.agentport', 'agent.json');
 const runtimeName = process.env.AGENTPORT_RUNTIME ?? 'claude-code';
 
-const acp = resolveAcpCommand(process.env);
+const acp = resolveAcpSpawn(process.env);
 if (typeof acp === 'string') {
   log.error(acp);
   process.exit(1);
 }
 
 const bridge = new McpBridge();
-for (const name of ['claude-code', 'acp']) {
-  registerRuntime(
-    name,
-    () =>
-      new AcpRuntime({
-        command: acp.command,
-        args: acp.args,
-        cwd: process.env.AGENTPORT_AGENT_CWD ?? process.cwd(),
-        bridge,
-      }),
-  );
-}
+// No runtime preflight here, unlike `packages/daemon/src/cli.ts`: a connect
+// code is already on a screen and expires in minutes, and the probe's own
+// bound is up to a minute of it. `agentport doctor` is the command for
+// "before a site is waiting on me".
+registerAcpRuntimes(acp, bridge);
 
 const createRuntime = RUNTIMES[runtimeName];
 if (!createRuntime) {

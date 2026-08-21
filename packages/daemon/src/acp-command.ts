@@ -34,6 +34,16 @@ export interface AcpCommand {
 }
 
 /**
+ * The pair used when neither variable is set. Exported so a preflight that has
+ * to tell someone what unsetting both would give them quotes the same pair the
+ * resolver would hand back, rather than a second copy of it in prose.
+ */
+export const DEFAULT_ACP_COMMAND: AcpCommand = {
+  command: DEFAULT_COMMAND,
+  args: DEFAULT_ARGS.split(' ').filter(Boolean),
+};
+
+/**
  * Resolves the pair, or explains what is missing. Returns a string instead of
  * throwing so each CLI can report it the way it reports everything else.
  */
@@ -42,7 +52,9 @@ export function resolveAcpCommand(env: Record<string, string | undefined>): AcpC
   const args = env['AGENTPORT_ACP_ARGS'];
 
   if (command === undefined && args === undefined) {
-    return { command: DEFAULT_COMMAND, args: DEFAULT_ARGS.split(' ').filter(Boolean) };
+    // A fresh copy: callers own their args array, and the exported default is
+    // read by remediation text that must not be able to see a caller's edits.
+    return { command: DEFAULT_ACP_COMMAND.command, args: [...DEFAULT_ACP_COMMAND.args] };
   }
   if (command === undefined) {
     return 'AGENTPORT_ACP_ARGS is set but AGENTPORT_ACP_COMMAND is not — they are a pair, and arguments alone name no agent.';
