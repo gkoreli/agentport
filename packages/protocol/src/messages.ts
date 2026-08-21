@@ -42,7 +42,6 @@ import {
   ID_PATTERN,
   MAX_AGENTS_LISTED,
   MAX_CIPHERTEXT_BYTES,
-  MAX_DELEGATION_LIFETIME_MS,
   MAX_DESCRIPTION_CHARS,
   MAX_ANSWER_CHARS,
   MAX_ERROR_CHARS,
@@ -236,16 +235,10 @@ export const SessionDelegation = obj({
 });
 export type SessionDelegation = Infer<typeof SessionDelegation>;
 
-/**
- * A delegation's lifetime is bounded (ADR-022 R3), which is both what stops
- * an approval outliving the browser session that made it and what keeps the
- * daemon's revocation store finite. Checked wherever a delegation is judged —
- * relay and daemon both — since neither may trust the other to have done it.
- */
-export function delegationLifetimeOk(delegation: SessionDelegation): boolean {
-  const lifetime = delegation.expiresAt - delegation.issuedAt;
-  return lifetime > 0 && lifetime <= MAX_DELEGATION_LIFETIME_MS;
-}
+// The schema says what a delegation LOOKS like. Whether one is an authority —
+// signed by this owner, naming this agent and this page key, committing to
+// this grant, live on this judge's clock — is `delegation.ts#delegationAuthorizes`,
+// which every judge calls instead of assembling its own conjunction.
 
 export const AgentSummary = obj({
   agent: pubkey,
@@ -650,6 +643,13 @@ export type SessionResumed = Infer<typeof SessionResumed>;
 export const SessionDenied = obj({
   t: lit('session.denied'),
   s: idField,
+  /**
+   * Deliberately `display` and not an enum over `SESSION_DENIAL_REASONS`
+   * (`denials.ts`). Both producers emit from that registry and the resume
+   * consumers judge terminality from it, but narrowing the SCHEMA would refuse
+   * a peer whose build knows a reason this one does not — a lockstep wire
+   * change, and so a PROTOCOL_VERSION bump, deferred to v7.
+   */
   reason,
 });
 export type SessionDenied = Infer<typeof SessionDenied>;

@@ -22,15 +22,15 @@ import {
 } from '@agentport/client';
 import {
   ID_PATTERN,
+  SIGNER_UNKNOWN,
+  SessionDelegation,
   TOKEN_PATTERN,
-  delegationLifetimeOk,
+  delegationAuthorizes,
   generateKeyPair,
-  hashGrant,
   publicKeyOf,
   randomId,
   toErr,
   type CapabilityGrant,
-  type SessionDelegation,
 } from '@agentport/protocol';
 import { openConnectModal } from './modal.js';
 import { createWebMcpHarvester } from './webmcp.js';
@@ -296,32 +296,45 @@ async function requestHostedDelegation(
       if (message.t !== 'connect.result') return;
 
       const result = message.result;
-      if (
-        !result ||
-        !/^[0-9a-f]{64}$/.test(result.agent) ||
-        result.displayName !== 'Personal agent' ||
-        !isRecord(result.delegation) ||
-        'user' in result.delegation ||
-        result.delegation.delegate !== delegate.publicKey ||
-        result.delegation.agent !== result.agent ||
-        result.delegation.origin !== location.origin ||
-        // The wallet must have signed the grant we sent — a mismatch here
-        // would otherwise only surface as an opaque daemon denial later.
-        result.delegation.grantHash !== hashGrant(grant) ||
-        // Checked here so a wallet that mints an over-long or backdated
-        // authority fails visibly on this page instead of as an opaque
-        // daemon denial three hops later.
-        !delegationLifetimeOk(result.delegation as SessionDelegation) ||
-        typeof result.delegation.sig !== 'string' ||
-        !/^[0-9a-f]{128}$/.test(result.delegation.sig) ||
-        typeof result.delegation.expiresAt !== 'number' ||
-        !Number.isFinite(result.delegation.expiresAt) ||
-        result.delegation.expiresAt <= Date.now()
-      ) {
+      if (!result || !/^[0-9a-f]{64}$/.test(result.agent) || result.displayName !== 'Personal agent') {
         finish({ error: new Error('hosted wallet returned an invalid delegation') });
         return;
       }
-      finish({ result });
+
+      // Shape first, from the protocol's own schema rather than the regexes
+      // that used to stand in for it here — a page cannot reach for a looser
+      // spelling of a rule it does not own. The schema is also what proves the
+      // absence of a `user` field: `obj()` is exact, so an unknown key rejects.
+      let delegation: SessionDelegation;
+      try {
+        delegation = SessionDelegation(result.delegation, 'delegation');
+      } catch (err) {
+        log.warn('hosted wallet returned a malformed delegation', { err });
+        finish({ error: new Error('hosted wallet returned an invalid delegation') });
+        return;
+      }
+
+      // Then the same judge the relay and the daemon run. Checked HERE so a
+      // wallet that mints an over-long, backdated or future-dated authority
+      // fails visibly on this page instead of as an opaque daemon denial three
+      // hops later — except for the signature, which this page structurally
+      // cannot check, because a delegation deliberately carries no user key.
+      const denial = delegationAuthorizes(delegation, {
+        owner: SIGNER_UNKNOWN,
+        agent: result.agent,
+        delegate: delegate.publicKey,
+        origin: location.origin,
+        // The wallet must have signed the grant we sent — a mismatch here
+        // would otherwise only surface as an opaque daemon denial later.
+        grant,
+        now: Date.now(),
+      });
+      if (denial) {
+        log.warn('hosted wallet returned a delegation this page cannot use', { data: { denial } });
+        finish({ error: new Error('hosted wallet returned an invalid delegation') });
+        return;
+      }
+      finish({ result: { ...result, delegation } });
     };
 
     window.addEventListener('message', onMessage);
@@ -505,14 +518,11 @@ const provider: AgentProvider & {
       // Anything transient — a lost already_attached race, a rekey timeout, a
       // network blip — keeps the token so the next load can try again;
       // deleting it here is how a one-second race used to become a
-      // permanently lost session.
+      // permanently lost session. Which is which is the protocol's answer
+      // (`ResumeError#terminal`), not a list of four strings copied into every
+      // consumer and never told when a fifth appeared.
       const reason = err instanceof ResumeError ? err.reason : '';
-      if (
-        reason === 'not_resumable' ||
-        reason === 'grant_expired' ||
-        reason === 'authorization_expired' ||
-        reason === 'revoked'
-      ) {
+      if (err instanceof ResumeError && err.terminal) {
         log.info('previous session is gone; starting fresh', {
           sessionId: record.id,
           data: { reason, surface: request.name },

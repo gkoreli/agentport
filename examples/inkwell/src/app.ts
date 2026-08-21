@@ -21,7 +21,7 @@ import {
   type ApprovalPrompt,
   type SiteTool,
 } from '@agentport/client';
-import { generateKeyPair, type AgentSummary } from '@agentport/protocol';
+import { generateKeyPair, isGated, type AgentSummary } from '@agentport/protocol';
 
 const RELAY_URL = (globalThis as { AGENTPORT_RELAY?: string }).AGENTPORT_RELAY ?? 'ws://127.0.0.1:8787';
 
@@ -97,7 +97,6 @@ async function chooseAgent(agents: AgentSummary[]): Promise<AgentSummary | null>
 
 async function confirmGrant(agent: AgentSummary, request: AgentConnectRequest): Promise<boolean> {
   const dialog = $<HTMLDialogElement>('consent');
-  const ask = new Set(request.alwaysAsk ?? []);
   $('consent-sub').textContent = `${request.name} → ${agent.name}`;
 
   const allowed = $('consent-caps');
@@ -108,7 +107,7 @@ async function confirmGrant(agent: AgentSummary, request: AgentConnectRequest): 
   for (const tool of request.tools) {
     const item = document.createElement('li');
     item.textContent = tool.description;
-    if (ask.has(tool.name) || tool.requiresApproval) {
+    if (isGated(tool, request)) {
       item.className = 'ask';
       gated.append(item);
     } else {

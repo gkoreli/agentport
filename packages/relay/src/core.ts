@@ -1,20 +1,19 @@
 import {
   MAX_MALFORMED_FRAMES,
   PROTOCOL_VERSION,
+  SESSION_DENIAL_REASONS,
   WireViolation,
   authChallengeMessage,
   createLogger,
   decodeFrame,
   isSessionFrame,
   mayOriginate,
-  delegationLifetimeOk,
-  hashGrant,
+  delegationAuthorizes,
   pairingCode,
   randomBytes,
   toHex,
   verify,
   verifyCert,
-  verifyDelegation,
   type AgentCert,
   type AgentSummary,
   randomId,
@@ -629,7 +628,7 @@ export class RelayCore {
 
     const agentConn = this.#agents.get(frame.agent);
     if (!agentConn) {
-      return conn.peer.send({ t: 'session.denied', s: frame.s, reason: 'agent_offline' });
+      return conn.peer.send({ t: 'session.denied', s: frame.s, reason: SESSION_DENIAL_REASONS.agent_offline });
     }
 
     this.#pendingResumes.set(frame.s, { conn, agent: agentConn, at: this.#now() });
@@ -678,7 +677,7 @@ export class RelayCore {
     if (conn.role !== 'client') return this.#fail(conn, 'role', 'only clients open sessions', frame.s);
 
     const agentConn = this.#agents.get(frame.agent);
-    if (!agentConn) return conn.peer.send({ t: 'session.denied', s: frame.s, reason: 'agent_offline' });
+    if (!agentConn) return conn.peer.send({ t: 'session.denied', s: frame.s, reason: SESSION_DENIAL_REASONS.agent_offline });
     // Ownership is judged only from live, presented proofs: either the
     // connected client is the cert's user, or that user signed a still-live
     // delegation to this exact authenticated client key. The daemon repeats
@@ -686,33 +685,38 @@ export class RelayCore {
     const cert = agentConn.cert;
     const delegation = frame.delegation;
     const directlyOwned = cert?.user === conn.pubkey;
-    const delegated = Boolean(
-      cert &&
-        delegation &&
-        verifyDelegation(cert.user, delegation) &&
-        delegation.delegate === conn.pubkey &&
-        delegation.agent === agentConn.pubkey &&
-        // Semantic expiry only — the field's shape is decodeFrame's problem.
-        // The relay cannot authenticate a browser origin; the signed origin
-        // rides along for the daemon to compare with frame.surface.origin.
-        delegation.expiresAt > this.#now() &&
-        // The daemon checks this too. Both must, because the bound is what
-        // makes the daemon's revocation store finite, and neither judge may
-        // assume the other did its job (ADR-022 R3).
-        delegationLifetimeOk(delegation) &&
-        // Structural, not authoritative: both grant and delegation are in
-        // this clear lifecycle frame, so the relay can refuse an approval
-        // replayed under a different grant early. The daemon re-checks.
-        delegation.grantHash === hashGrant(frame.grant),
-    );
+    // One judge, shared with the daemon (`delegationAuthorizes`), so the two
+    // cannot drift into checking different conjunctions. The relay's answer is
+    // structural rather than authoritative — the daemon repeats the whole
+    // chain independently — but every clause it CAN apply, it applies. An
+    // unbound agent has no owner key, so nothing it presents can be judged.
+    const denial =
+      cert && delegation
+        ? delegationAuthorizes(delegation, {
+            owner: cert.user,
+            agent: agentConn.pubkey!,
+            delegate: conn.pubkey,
+            // No `origin`: a relay cannot authenticate a browser origin. The
+            // signed one rides along for the daemon to compare against
+            // frame.surface.origin, and omitting it here says so out loud
+            // instead of leaving a clause quietly missing from a conjunction.
+            grant: frame.grant,
+            now: this.#now(),
+          })
+        : undefined;
+    const delegated = Boolean(cert && delegation && !denial);
     if (!directlyOwned && !delegated) {
-      return conn.peer.send({ t: 'session.denied', s: frame.s, reason: 'not_your_agent' });
+      // From a closed set, never from the frame — and never sent: the wire
+      // reason below stays one word, so a prober learns nothing about which of
+      // the bindings it got wrong.
+      if (denial) this.#log.info('delegated open refused', { sessionId: frame.s, data: { denial } });
+      return conn.peer.send({ t: 'session.denied', s: frame.s, reason: SESSION_DENIAL_REASONS.not_your_agent });
     }
     if (this.#sessions.has(frame.s)) {
-      return conn.peer.send({ t: 'session.denied', s: frame.s, reason: 'duplicate_session' });
+      return conn.peer.send({ t: 'session.denied', s: frame.s, reason: SESSION_DENIAL_REASONS.duplicate_session });
     }
     if (frame.grant.expiresAt <= this.#now()) {
-      return conn.peer.send({ t: 'session.denied', s: frame.s, reason: 'grant_expired' });
+      return conn.peer.send({ t: 'session.denied', s: frame.s, reason: SESSION_DENIAL_REASONS.grant_expired });
     }
 
     const session: Session = { id: frame.s, client: conn, agent: agentConn };

@@ -178,6 +178,33 @@ export const MAX_PLAN_STEP_CHARS = MAX_DESCRIPTION_CHARS;
 export const MAX_DELEGATION_LIFETIME_MS = 24 * 60 * 60 * 1000;
 
 /**
+ * How far into the FUTURE a delegation's `issuedAt` may sit before a judge
+ * refuses it (`delegation.ts` → `not_yet_valid`).
+ *
+ * Three parties judge a delegation on three machines — the page that received
+ * it, the relay that routes it, the daemon that honours it — and none of them
+ * shares a clock. A consumer browser a couple of minutes out of step is
+ * ordinary, and refusing an honest approval over it would be a worse failure
+ * than the one this bound exists to stop.
+ *
+ * Past that, a future `issuedAt` is not skew, it is an escape. Revocation is a
+ * tombstone (`packages/daemon/src/revocations.ts#isRevoked`) that refuses delegations
+ * issued at or before the moment of revocation, so a delegation dated forward
+ * survives every tombstone recorded before its date — and because
+ * MAX_DELEGATION_LIFETIME_MS is measured from `issuedAt`, post-dating slides
+ * the whole live window forward with it. Without this bound a wallet holding
+ * the user key (the in-page demo tier) could mint an authority that is both
+ * effectively permanent and unrevocable, and every judge would have called it
+ * well-formed.
+ *
+ * Five minutes is the same order as Kerberos' default clock skew and the
+ * leeway conventionally allowed on a JWT `nbf`: wide enough for unsynchronised
+ * consumer clocks, narrow enough that "revoke, then wait five minutes" is a
+ * complete answer rather than an open question.
+ */
+export const MAX_DELEGATION_CLOCK_SKEW_MS = 5 * 60 * 1000;
+
+/**
  * Fields in one elicitation form, and options in one choice field (ADR-024).
  *
  * Bounded by US, not by the asker. A real `AskUserQuestion` is already capped

@@ -16,7 +16,7 @@ import { createTerminalAsk } from './terminal-ask.js';
 import { loadIdentity, saveIdentity } from './identity.js';
 import { RUNTIMES } from './runtime.js';
 import { McpBridge } from './mcp-bridge.js';
-import { createLogger } from '@agentport/protocol';
+import { createLogger, isGated } from '@agentport/protocol';
 
 const log = createLogger('daemon.connect-cli');
 
@@ -95,19 +95,17 @@ const daemon = new AgentDaemon({
 
   onConnectOffer: async ({ surface, grant, verify }) => {
     offerReceived = true;
-    const gated = new Set([
-      ...grant.alwaysAsk,
-      ...grant.tools.filter((tool) => tool.requiresApproval).map((tool) => tool.name),
-    ]);
     console.log('');
     console.log(`  ${bold(surface.name)} ${dim(surface.origin)}`);
     console.log(`  wants to use ${bold(identity.name)} (${identity.runtime}).`);
     console.log('');
     console.log(dim('  It will be able to:'));
     for (const tool of grant.tools) {
-      console.log(`    ${gated.has(tool.name) ? '[33m![0m' : '[32m✓[0m'} ${tool.description}`);
+      console.log(`    ${isGated(tool, grant) ? '[33m![0m' : '[32m✓[0m'} ${tool.description}`);
     }
-    if (gated.size) console.log(dim(`\n  ! = asks you again, every single time`));
+    if (grant.tools.some((tool) => isGated(tool, grant))) {
+      console.log(dim(`\n  ! = asks you again, every single time`));
+    }
     if (verify) {
       console.log('');
       console.log(`  Verify: ${bold(verify)}`);

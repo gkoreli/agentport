@@ -23,9 +23,21 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
+import { ResumeError } from '../packages/client/src/wallet.js';
 import { encrypt } from '../packages/protocol/src/channel.js';
 import {
+  DELEGATION_DENIALS,
+  SIGNER_UNKNOWN,
+  delegationAuthorizes,
+  type DelegationContext,
+  type DelegationDenial,
+} from '../packages/protocol/src/delegation.js';
+import { SESSION_DENIAL_REASONS, isTerminalResumeDenial } from '../packages/protocol/src/denials.js';
+import { isGated } from '../packages/protocol/src/grant.js';
+import {
   MAX_CIPHERTEXT_BYTES,
+  MAX_DELEGATION_CLOCK_SKEW_MS,
+  MAX_DELEGATION_LIFETIME_MS,
   MAX_FRAME_CHARS,
   MAX_SEALED_PLAINTEXT_BYTES,
   MAX_TEXT_CHARS,
@@ -37,7 +49,9 @@ import {
   PROTOCOL_VERSION,
   WIRE_FINGERPRINT,
   wireFingerprint,
+  type CapabilityGrant,
   type Frame,
+  type SessionDelegation,
   type SessionFrame,
 } from '../packages/protocol/src/messages.js';
 import { VIOLATION_CODES, WireViolation, type ViolationCode } from '../packages/protocol/src/schema.js';
@@ -50,7 +64,14 @@ import {
   verifyEpk,
   type SealedFrame,
 } from '../packages/protocol/src/seal.js';
-import { canonicalJson, generateKeyPair, sign, verify } from '../packages/protocol/src/crypto.js';
+import {
+  canonicalJson,
+  generateKeyPair,
+  hashGrant,
+  sign,
+  signDelegation,
+  verify,
+} from '../packages/protocol/src/crypto.js';
 import { decodeFrame, encodeFrame } from '../packages/protocol/src/wire.js';
 
 let failures = 0;
@@ -547,6 +568,243 @@ console.log('\n6. protocol version');
   check(
     'v6 rejects a legacy versionless EPK proof',
     !verifyEpk(identity.publicKey, scope, epk, legacySignature, binding),
+  );
+}
+
+// --- 7. the delegation judge ---------------------------------------------------
+//
+// Not a fixture suite: fixtures here are `decodeFrame` cases, and this rule is
+// not a decode question — a delegation can be perfectly well-formed on the wire
+// and still authorise nothing. It lived as three drifted copies (relay, daemon,
+// page) for exactly that reason: no gate was shaped like it.
+
+console.log('\n7. delegationAuthorizes');
+{
+  // A fixed clock inside the protocol's timestamp domain, so nothing here
+  // depends on when the suite runs.
+  const now = 1_800_000_000_000;
+  const owner = generateKeyPair();
+  const stranger = generateKeyPair();
+  const agent = generateKeyPair();
+  const page = generateKeyPair();
+  const origin = 'https://judged.test';
+  const grant: CapabilityGrant = { tools: [], alwaysAsk: [], expiresAt: now + 60 * 60 * 1000 };
+  const otherGrant: CapabilityGrant = { ...grant, expiresAt: grant.expiresAt + 1000 };
+
+  const body = {
+    delegate: page.publicKey,
+    agent: agent.publicKey,
+    origin,
+    grantHash: hashGrant(grant),
+    issuedAt: now - 1000,
+    expiresAt: now + 60 * 60 * 1000,
+  };
+  const sign_ = (over: Partial<typeof body> = {}): SessionDelegation =>
+    signDelegation(owner.secretKey, { ...body, ...over });
+  const valid = sign_();
+  const context: DelegationContext = {
+    owner: owner.publicKey,
+    agent: agent.publicKey,
+    delegate: page.publicKey,
+    origin,
+    grant,
+    now,
+  };
+
+  check('a valid delegation authorizes', delegationAuthorizes(valid, context) === undefined,
+    delegationAuthorizes(valid, context));
+
+  // One case per member of the closed reason set, each violating exactly one
+  // clause. Anything that fires for a reason other than its own is a clause
+  // that overlaps another and would report the wrong cause in a log.
+  const cases: { label: string; expect: DelegationDenial; delegation: SessionDelegation; context: DelegationContext }[] = [
+    {
+      label: 'a delegation naming another page key',
+      expect: 'delegate',
+      delegation: valid,
+      context: { ...context, delegate: stranger.publicKey },
+    },
+    {
+      label: 'a delegation replayed toward another agent',
+      expect: 'agent',
+      delegation: valid,
+      context: { ...context, agent: stranger.publicKey },
+    },
+    {
+      label: 'a delegation presented from another origin',
+      expect: 'origin',
+      delegation: valid,
+      context: { ...context, origin: 'https://elsewhere.test' },
+    },
+    {
+      label: 'a delegation presented with a grant it does not commit to',
+      expect: 'grant',
+      delegation: valid,
+      context: { ...context, grant: otherGrant },
+    },
+    {
+      label: 'a delegation living longer than MAX_DELEGATION_LIFETIME_MS',
+      expect: 'lifetime',
+      delegation: sign_({ expiresAt: body.issuedAt + MAX_DELEGATION_LIFETIME_MS + 1000 }),
+      context,
+    },
+    {
+      label: 'a delegation that expires before it is issued',
+      expect: 'lifetime',
+      delegation: sign_({ issuedAt: now + 1000, expiresAt: now + 1000 }),
+      context,
+    },
+    {
+      label: 'an expired delegation',
+      expect: 'expired',
+      delegation: sign_({ issuedAt: now - 120_000, expiresAt: now - 60_000 }),
+      context,
+    },
+    {
+      label: 'a delegation dated past the clock-skew tolerance',
+      expect: 'not_yet_valid',
+      delegation: sign_({
+        issuedAt: now + MAX_DELEGATION_CLOCK_SKEW_MS + 1000,
+        expiresAt: now + MAX_DELEGATION_CLOCK_SKEW_MS + 61_000,
+      }),
+      context,
+    },
+    {
+      label: 'a delegation signed by anyone but the owner',
+      expect: 'sig',
+      delegation: signDelegation(stranger.secretKey, body),
+      context,
+    },
+  ];
+
+  const fired = new Set<string>();
+  for (const one of cases) {
+    const denial = delegationAuthorizes(one.delegation, one.context);
+    fired.add(one.expect);
+    check(`${one.label} → ${one.expect}`, denial === one.expect, denial ?? 'authorized');
+  }
+  // The registry guard: a reason nobody can produce is a reason nobody checks.
+  const unfired = DELEGATION_DENIALS.filter((denial) => !fired.has(denial));
+  check('every DELEGATION_DENIALS member has a case that produces it', unfired.length === 0, unfired);
+
+  // The new clause's other side. Skew tolerance is not decoration: a browser a
+  // few minutes fast must still be able to approve something.
+  check(
+    'a delegation dated forward WITHIN the skew tolerance still authorizes',
+    delegationAuthorizes(
+      sign_({
+        issuedAt: now + MAX_DELEGATION_CLOCK_SKEW_MS - 1000,
+        expiresAt: now + MAX_DELEGATION_CLOCK_SKEW_MS + 59_000,
+      }),
+      context,
+    ) === undefined,
+  );
+
+  // The two stated weakenings, asserted as weakenings rather than trusted as
+  // comments. Each judge's shorter conjunction is a parameter it passes, so
+  // each is visible here — and so is the fact that the OTHER clauses still
+  // apply to that judge.
+  const { origin: _omitted, ...relayContext } = context;
+  check(
+    'the relay position (no origin) admits a delegation for another origin',
+    delegationAuthorizes(sign_({ origin: 'https://elsewhere.test' }), relayContext) === undefined,
+  );
+  check(
+    'the relay position still refuses that delegation for every other clause',
+    delegationAuthorizes(sign_({ origin: 'https://elsewhere.test' }), {
+      ...relayContext,
+      delegate: stranger.publicKey,
+    }) === 'delegate',
+  );
+  const pageContext: DelegationContext = { ...context, owner: SIGNER_UNKNOWN };
+  check(
+    'the page position (SIGNER_UNKNOWN) cannot detect a forged signature',
+    delegationAuthorizes(signDelegation(stranger.secretKey, body), pageContext) === undefined,
+  );
+  check(
+    'the page position still applies every clause it can',
+    delegationAuthorizes(signDelegation(stranger.secretKey, { ...body, origin: 'https://elsewhere.test' }), pageContext) ===
+      'origin',
+  );
+
+  // A judge that authenticated nobody must not accept an authority naming
+  // somebody. This is the `!` at a call site, turned into a value.
+  check(
+    'an unauthenticated presenter matches no delegation',
+    delegationAuthorizes(valid, { ...context, delegate: undefined }) === 'delegate',
+  );
+}
+
+// --- 8. the gating rule --------------------------------------------------------
+
+console.log('\n8. isGated');
+{
+  const plain = { name: 'site.read', description: '', inputSchema: {} };
+  const flagged = { ...plain, name: 'site.write', requiresApproval: true };
+  check('a tool gated by neither is not gated', isGated(plain, { alwaysAsk: [] }) === false);
+  check('a tool gated only by requiresApproval is gated', isGated(flagged, { alwaysAsk: [] }) === true);
+  check('a tool gated only by alwaysAsk is gated', isGated(plain, { alwaysAsk: ['site.read'] }) === true);
+  check('a tool gated by both is gated', isGated(flagged, { alwaysAsk: ['site.write'] }) === true);
+  check('alwaysAsk naming another tool does not gate this one', isGated(plain, { alwaysAsk: ['site.write'] }) === false);
+  check('an absent alwaysAsk gates nothing by itself', isGated(plain, {}) === false);
+  check('requiresApproval: false is not gated', isGated({ ...plain, requiresApproval: false }, {}) === false);
+}
+
+// --- 9. session denial reasons -------------------------------------------------
+//
+// Invariant 9 rested on two hand-copied lists of four strings, in consumers no
+// producer had ever heard of. Source-matched on `SESSION_DENIAL_REASONS.x`,
+// fragile in the safe direction: a producer that goes back to a bare string
+// literal, or names a member that does not exist, fails here loudly.
+
+console.log('\n9. session denial reasons');
+{
+  const producers = [
+    { role: 'relay', file: 'packages/relay/src/core.ts' },
+    { role: 'daemon', file: 'packages/daemon/src/daemon.ts' },
+  ];
+  const emitted = new Set<string>();
+  const strays: string[] = [];
+  const unknown: string[] = [];
+  for (const producer of producers) {
+    const source = readFileSync(new URL(`../${producer.file}`, import.meta.url), 'utf8');
+    for (const match of source.matchAll(/t: 'session\.denied', s: [A-Za-z.]+, reason: ([^\s}]+)/g)) {
+      const spelling = match[1] as string;
+      const member = /^SESSION_DENIAL_REASONS\.([a-z_]+)$/.exec(spelling);
+      if (!member) {
+        strays.push(`${producer.role}: ${spelling.slice(0, 40)}`);
+        continue;
+      }
+      const key = member[1] as string;
+      if (!Object.hasOwn(SESSION_DENIAL_REASONS, key)) unknown.push(`${producer.role}: ${key}`);
+      else emitted.add(key);
+    }
+  }
+  check('every denial a producer emits comes from the registry', strays.length === 0, strays);
+  check('every registry member a producer names exists', unknown.length === 0, unknown);
+  const listed = Object.keys(SESSION_DENIAL_REASONS);
+  check(`both producers between them emit all ${listed.length} reasons`, emitted.size === listed.length, {
+    missing: listed.filter((key) => !emitted.has(key)),
+  });
+  check(
+    'the registry is self-consistent (key === value)',
+    Object.entries(SESSION_DENIAL_REASONS).every(([key, value]) => key === value),
+  );
+
+  // Terminality, which is what the resume consumers actually read.
+  const terminal = listed.filter((reason) => isTerminalResumeDenial(reason));
+  check(
+    'exactly the four proven-dead reasons are terminal',
+    isDeepStrictEqual(terminal.sort(), ['authorization_expired', 'grant_expired', 'not_resumable', 'revoked']),
+    terminal,
+  );
+  check('already_attached is transient', !isTerminalResumeDenial(SESSION_DENIAL_REASONS.already_attached));
+  check('a reason this build has never heard of is transient', !isTerminalResumeDenial('reason_from_the_future'));
+  check('a handshake timeout message is transient', !isTerminalResumeDenial('session.resume handshake timed out'));
+  check(
+    'the client surfaces terminality from the registry, not a copied list',
+    new ResumeError(SESSION_DENIAL_REASONS.revoked).terminal &&
+      !new ResumeError(SESSION_DENIAL_REASONS.already_attached).terminal,
   );
 }
 

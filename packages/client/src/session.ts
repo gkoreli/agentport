@@ -10,6 +10,7 @@ import {
   WireViolation,
   createLogger,
   hashCall,
+  isGated,
   isPromptId,
   jsonValue,
   randomId,
@@ -164,7 +165,6 @@ export class AgentSession extends Emitter<SessionEvents> implements AgentSession
   }
 
   #tools: Map<string, SiteTool>;
-  #alwaysAsk: Set<string>;
   #decide: ApprovalDecider;
   #log: Logger;
   #send: (frame: SessionFrame) => void;
@@ -191,7 +191,6 @@ export class AgentSession extends Emitter<SessionEvents> implements AgentSession
     this.grant = init.grant;
     this.#info = init.info;
     this.#tools = new Map(init.tools.map((tool) => [tool.name, tool]));
-    this.#alwaysAsk = new Set(init.grant.alwaysAsk);
     this.#decide = init.decide;
     this.#log = init.logger ?? createLogger('client.session');
     this.#send = init.send;
@@ -410,7 +409,7 @@ export class AgentSession extends Emitter<SessionEvents> implements AgentSession
       return;
     }
 
-    if (tool.requiresApproval || this.#alwaysAsk.has(frame.name)) {
+    if (isGated(tool, this.grant)) {
       // This one the client knows for itself: the tool came from the grant
       // it registered, so the domain is not taken from anybody's word.
       const prompt: ApprovalPrompt = {

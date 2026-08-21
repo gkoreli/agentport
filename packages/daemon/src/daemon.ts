@@ -14,6 +14,7 @@ import {
   MAX_TEXT_CHARS,
   PROTOCOL_VERSION,
   SEALED_TYPES,
+  SESSION_DENIAL_REASONS,
   TIMESTAMP_MAX,
   TIMESTAMP_MIN,
   NonceMismatchError,
@@ -24,11 +25,11 @@ import {
   decodeFrame,
   deriveSealChannel,
   encodeFrame,
-  delegationLifetimeOk,
+  delegationAuthorizes,
   fingerprintWords,
   generateSealKeyPair,
   hashCall,
-  hashGrant,
+  isGated,
   openSealed,
   openProofBinding,
   randomBytes,
@@ -42,7 +43,6 @@ import {
   toHex,
   verifyEpk,
   verifyCert,
-  verifyDelegation,
   type AgentCert,
   type AuthorityDomain,
   type CapabilityGrant,
@@ -908,11 +908,11 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
   #onSessionResume(frame: Extract<Frame, { t: 'session.resume' }>): void {
     const session = this.#sessions.get(frame.s);
     if (!session) {
-      this.#send({ t: 'session.denied', s: frame.s, reason: 'not_resumable' });
+      this.#send({ t: 'session.denied', s: frame.s, reason: SESSION_DENIAL_REASONS.not_resumable });
       return;
     }
     if (++session.resumeAttempts > MAX_RESUME_ATTEMPTS) {
-      this.#send({ t: 'session.denied', s: frame.s, reason: 'not_resumable' });
+      this.#send({ t: 'session.denied', s: frame.s, reason: SESSION_DENIAL_REASONS.not_resumable });
       return;
     }
     // The token is visible to the relay, so it is necessary but never
@@ -923,7 +923,7 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     const tokenMatches = timingSafeEqualStr(session.resumeToken, frame.token);
     const clientMatches = typeof frame.client === 'string' && timingSafeEqualStr(session.clientKey, frame.client);
     if (!tokenMatches || !clientMatches) {
-      this.#send({ t: 'session.denied', s: frame.s, reason: 'not_resumable' });
+      this.#send({ t: 'session.denied', s: frame.s, reason: SESSION_DENIAL_REASONS.not_resumable });
       return;
     }
     // A malicious relay may stamp the stored public key without possessing
@@ -942,7 +942,7 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
         resumeProofBinding(frame.agent, frame.token),
       )
     ) {
-      this.#send({ t: 'session.denied', s: frame.s, reason: 'not_resumable' });
+      this.#send({ t: 'session.denied', s: frame.s, reason: SESSION_DENIAL_REASONS.not_resumable });
       return;
     }
     // A proven resumer resets failed guesses even when it loses the ordinary
@@ -953,12 +953,12 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     // token must not hijack a session out from under it. The refresh race
     // resolves through the wallet's retry — the detach lands within a second.
     if (session.detachedAt === undefined) {
-      this.#send({ t: 'session.denied', s: frame.s, reason: 'already_attached' });
+      this.#send({ t: 'session.denied', s: frame.s, reason: SESSION_DENIAL_REASONS.already_attached });
       return;
     }
     const now = this.#now();
     if (session.grant.expiresAt <= now) {
-      this.#send({ t: 'session.denied', s: frame.s, reason: 'grant_expired' });
+      this.#send({ t: 'session.denied', s: frame.s, reason: SESSION_DENIAL_REASONS.grant_expired });
       return;
     }
     // Revocation closes and forgets a session, so the lookup above normally
@@ -972,11 +972,11 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
       // first open. A longer-lived grant must not carry a resumed session
       // past the root-signed authorization that created it.
       if (session.delegation.expiresAt <= now) {
-        this.#send({ t: 'session.denied', s: frame.s, reason: 'authorization_expired' });
+        this.#send({ t: 'session.denied', s: frame.s, reason: SESSION_DENIAL_REASONS.authorization_expired });
         return;
       }
       if (isRevoked(this.#revocations.list(), session.delegation)) {
-        this.#send({ t: 'session.denied', s: frame.s, reason: 'revoked' });
+        this.#send({ t: 'session.denied', s: frame.s, reason: SESSION_DENIAL_REASONS.revoked });
         return;
       }
     }
@@ -1029,7 +1029,7 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     // refuses grants it cannot honour.
     const now = this.#now();
     if (frame.grant.expiresAt <= now) {
-      this.#send({ t: 'session.denied', s: frame.s, reason: 'grant_expired' });
+      this.#send({ t: 'session.denied', s: frame.s, reason: SESSION_DENIAL_REASONS.grant_expired });
       return;
     }
 
@@ -1043,25 +1043,34 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     const cert = this.#options.identity.cert;
     if (frame.delegation) {
       const delegation = frame.delegation;
-      if (
-        !cert ||
-        !verifyDelegation(cert.user, delegation) ||
-        delegation.delegate !== frame.client ||
-        delegation.agent !== this.#options.identity.publicKey ||
-        typeof delegation.origin !== 'string' ||
-        delegation.origin !== frame.surface.origin ||
-        delegation.grantHash !== hashGrant(frame.grant) ||
-        !delegationLifetimeOk(delegation) ||
-        delegation.expiresAt <= now
-      ) {
-        this.#send({ t: 'session.denied', s: frame.s, reason: 'bad_delegation' });
+      // The same judge the relay runs, plus the two clauses only this end can
+      // apply: it knows the owner key and it can compare the signed origin
+      // against the surface the frame claims. An UNBOUND daemon has no owner
+      // to have signed anything, so there is nothing to judge — refuse rather
+      // than fall through to a shorter conjunction.
+      const denial = cert
+        ? delegationAuthorizes(delegation, {
+            owner: cert.user,
+            agent: this.#options.identity.publicKey,
+            delegate: frame.client,
+            origin: frame.surface.origin,
+            grant: frame.grant,
+            now,
+          })
+        : 'sig';
+      if (denial) {
+        // Logged as a closed-set word, sent as one: `bad_delegation` on the
+        // wire covers all eight clauses, so a page learns that its authority
+        // did not hold and nothing about which binding failed.
+        this.#log.warn('refused a delegated session', { sessionId: frame.s, data: { denial } });
+        this.#send({ t: 'session.denied', s: frame.s, reason: SESSION_DENIAL_REASONS.bad_delegation });
         return;
       }
       // The user cut this origin off. The signature is still good and the
       // page still holds it — which is exactly the case revocation exists
       // for (ADR-022 R2).
       if (isRevoked(this.#revocations.list(), delegation)) {
-        this.#send({ t: 'session.denied', s: frame.s, reason: 'revoked' });
+        this.#send({ t: 'session.denied', s: frame.s, reason: SESSION_DENIAL_REASONS.revoked });
         return;
       }
     } else if (!frame.viaConnect && frame.client !== cert?.user) {
@@ -1070,7 +1079,7 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
       // cert.user`, so an unbound daemon accepted whoever the relay stamped
       // and the property survived only because the relay refused too. It also
       // made unpair() an opening rather than a closing.
-      this.#send({ t: 'session.denied', s: frame.s, reason: 'not_your_agent' });
+      this.#send({ t: 'session.denied', s: frame.s, reason: SESSION_DENIAL_REASONS.not_your_agent });
       return;
     }
 
@@ -1078,7 +1087,7 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     // relay stamped, over a scope that stops replay into another session
     // ('connect' pre-session for the drop-in flow, the session id otherwise).
     if (!frame.epk || !frame.epkSig || !frame.client) {
-      this.#send({ t: 'session.denied', s: frame.s, reason: 'sealing_required' });
+      this.#send({ t: 'session.denied', s: frame.s, reason: SESSION_DENIAL_REASONS.sealing_required });
       return;
     }
     const scope = frame.viaConnect ? 'connect' : frame.s;
@@ -1086,7 +1095,7 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
       ? openProofBinding('connect', frame.surface, frame.grant)
       : openProofBinding('open', frame.surface, frame.grant, frame.agent);
     if (!verifyEpk(frame.client, scope, frame.epk, frame.epkSig, requestBinding)) {
-      this.#send({ t: 'session.denied', s: frame.s, reason: 'bad_epk_proof' });
+      this.#send({ t: 'session.denied', s: frame.s, reason: SESSION_DENIAL_REASONS.bad_epk_proof });
       return;
     }
 
@@ -1097,7 +1106,7 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
       const approved = this.#offerSeals.get(frame.epk);
       if (!approved || approved.at < this.#now() - CONNECT_APPROVAL_TTL_MS) {
         this.#offerSeals.delete(frame.epk);
-        this.#send({ t: 'session.denied', s: frame.s, reason: 'connect_not_approved' });
+        this.#send({ t: 'session.denied', s: frame.s, reason: SESSION_DENIAL_REASONS.connect_not_approved });
         return;
       }
       mine = approved.keys;
@@ -1177,7 +1186,7 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
         err,
         data: { surface: frame.surface.name, origin: frame.surface.origin },
       });
-      this.#send({ t: 'session.denied', s: frame.s, reason: 'runtime_failed' });
+      this.#send({ t: 'session.denied', s: frame.s, reason: SESSION_DENIAL_REASONS.runtime_failed });
       return;
     }
 
@@ -1313,7 +1322,7 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
     // surface in the wallet-origin popup; subsequent approvals therefore go
     // to its CLIENT panel, which is the consent boundary that replaces the
     // viaConnect terminal gate.
-    if (session.viaConnect && (tool.requiresApproval || session.grant.alwaysAsk.includes(name))) {
+    if (session.viaConnect && isGated(tool, session.grant)) {
       this.#log.info('surface tool awaiting terminal approval', { sessionId: session.id, data: { tool: name } });
       // A GRANTED tool, asked about in the terminal. The other caller of
       // onLocalApproval is the runtime's own capability, and until now the
@@ -1343,8 +1352,7 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
       data: {
         tool: name,
         toolCallId: id,
-        browserApprovalRequired: !session.viaConnect &&
-          (tool.requiresApproval === true || session.grant.alwaysAsk.includes(name)),
+        browserApprovalRequired: !session.viaConnect && isGated(tool, session.grant),
       },
     });
     const abort = () => {

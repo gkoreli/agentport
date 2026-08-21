@@ -12,7 +12,7 @@
  */
 
 import { component, computed, each, html, signal, when } from '@nisli/core';
-import { randomId, type FormField } from '@agentport/protocol';
+import { isGated, randomId, type FormField } from '@agentport/protocol';
 import { answerFieldsFrom, consentDenial } from './bridge.js';
 import type { AgentRow, ConsentPayload, ConsentToWorker } from './bridge.js';
 
@@ -54,9 +54,10 @@ const selected = signal<string | null>(null);
 const Connect = component('ap-consent-connect', () => {
   const state = payload.value as Extract<ConsentPayload, { kind: 'connect' }>;
   const agents = signal<AgentRow[]>(state.agents);
-  const gatedNames = new Set(state.request.alwaysAsk ?? []);
-  const free = state.request.tools.filter((tool) => !gatedNames.has(tool.name) && !tool.requiresApproval);
-  const gated = state.request.tools.filter((tool) => gatedNames.has(tool.name) || tool.requiresApproval);
+  // The same predicate the daemon gates on, so this window cannot promise a
+  // tool runs freely while the enforcement asks about it (or the reverse).
+  const free = state.request.tools.filter((tool) => !isGated(tool, state.request));
+  const gated = state.request.tools.filter((tool) => isGated(tool, state.request));
   // One online agent means there is nothing to pick; preselect it so the whole
   // flow is literally one tap on Approve.
   const online = state.agents.filter((agent) => agent.online);

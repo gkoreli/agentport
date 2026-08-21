@@ -2,7 +2,7 @@ declare const __AGENTPORT_VERSION__: string | undefined;
 
 import { component, computed, each, html, signal, when } from '@nisli/core';
 import { AgentWallet, type PairOffer } from '@agentport/client';
-import { MAX_DELEGATION_LIFETIME_MS, hashGrant, signDelegation, type AgentCert } from '@agentport/protocol';
+import { MAX_DELEGATION_LIFETIME_MS, hashGrant, isGated, signDelegation, type AgentCert } from '@agentport/protocol';
 import { WALLET_CHANNEL, startWalletHandshake, type BoundWalletRequest } from './handshake.js';
 import { ensureIdentity, loadCerts, saveCert } from './storage.js';
 
@@ -194,11 +194,9 @@ const WalletApp = component('agentport-wallet-app', () => {
     (tool) => {
       const name = computed(() => tool.value.name);
       const description = computed(() => tool.value.description);
-      const gated = computed(
-        () =>
-          tool.value.requiresApproval === true ||
-          (request.value?.request.grant.alwaysAsk.includes(tool.value.name) ?? false),
-      );
+      // The predicate the daemon enforces with, so this screen cannot promise
+      // a tool runs freely while the enforcement asks about it.
+      const gated = computed(() => isGated(tool.value, request.value?.request.grant ?? { alwaysAsk: [] }));
       return html`<li class="tool-row">
         <span><strong>${name}</strong><small>${description}</small></span>
         ${when(gated, () => html`<em>asks every time</em>`)}

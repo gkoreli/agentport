@@ -1436,7 +1436,14 @@ console.log('\n13. delegated sessions');
   // A deliberately dishonest relay clock treats an already-expired statement
   // as live and forwards it over real sockets. The daemon's independent real-
   // time check must still stop the session at the edge.
-  const lyingRelay = new Relay({ port: 0, sink: () => {}, now: () => 0 });
+  //
+  // REWOUND ninety seconds rather than pinned to the epoch, and the difference
+  // is the point: a clock at zero lies in BOTH directions, so every real
+  // `issuedAt` looks future-dated and the relay refuses for `not_yet_valid`
+  // before the daemon — the judge this case exists to exercise — ever sees the
+  // frame. A relay that is merely slow lies only about expiry, which is the
+  // lie under test.
+  const lyingRelay = new Relay({ port: 0, sink: () => {}, now: () => Date.now() - 90_000 });
   await lyingRelay.listening();
   const lyingUrl = `ws://127.0.0.1:${lyingRelay.port}`;
   const edgeDaemon = new AgentDaemon({
@@ -1482,6 +1489,72 @@ console.log('\n13. delegated sessions');
       daemonExpired = err.message;
     });
   check('the daemon independently refuses an expired delegation', daemonExpired.includes('bad_delegation'), daemonExpired);
+
+  // The other end of the same clock: a delegation dated into the FUTURE.
+  //
+  // Why this matters more than it looks. Revocation is a tombstone that refuses
+  // delegations issued at or before the moment of revocation (ADR-022 R2), so a
+  // delegation dated forward walks past every tombstone recorded before its
+  // date — and because the lifetime bound is measured from `issuedAt`, dating
+  // it forward slides the whole live window with it. An authority that is both
+  // unrevocable and effectively permanent used to be well-formed to all three
+  // judges: nobody compared `issuedAt` to a clock at all.
+  //
+  // The relay here is ten minutes FAST rather than slow, which is what makes
+  // this a test of the DAEMON. On its own clock the delegation is merely inside
+  // the skew tolerance, so it forwards it in good faith; the daemon judges on
+  // its own real clock and must refuse anyway.
+  const fastRelay = new Relay({ port: 0, sink: () => {}, now: () => Date.now() + 10 * 60 * 1000 });
+  await fastRelay.listening();
+  const fastUrl = `ws://127.0.0.1:${fastRelay.port}`;
+  const fastDaemon = new AgentDaemon({
+    relayUrl: fastUrl,
+    identity: {
+      secretKey: agentKeys.secretKey,
+      publicKey: agentKeys.publicKey,
+      name: "Goga's Writing Agent",
+      runtime: 'demo-writer',
+      location: 'Personal VPS',
+      cert,
+    },
+    createRuntime: () => new DemoWriterRuntime(),
+  });
+  await fastDaemon.start();
+
+  const postDatedKeys = generateKeyPair();
+  const postDatedWallet = new AgentWallet({ relayUrl: fastUrl, userSecretKey: postDatedKeys.secretKey, socketFactory });
+  await postDatedWallet.connect();
+  const postDatedGrant = buildGrant({ surface: { name: 'Post-dated authority' }, tools: [] });
+  const postDatedIssue = Date.now() + 8 * 60 * 1000;
+  let postDated = '';
+  await postDatedWallet
+    .openSession({
+      agent: agentKeys.publicKey,
+      approved: {
+        grant: postDatedGrant,
+        delegation: signDelegation(user.secretKey, {
+          delegate: postDatedKeys.publicKey,
+          agent: agentKeys.publicKey,
+          origin: 'https://post-dated.test',
+          grantHash: hashGrant(postDatedGrant),
+          // Eight minutes ahead: inside the fast relay's tolerance, outside
+          // the daemon's. A well-formed lifetime, and not expired — the ONLY
+          // thing wrong with it is when it claims to have been signed.
+          issuedAt: postDatedIssue,
+          expiresAt: postDatedIssue + 60 * 60 * 1000,
+        }),
+      },
+      surface: { name: 'Post-dated authority', origin: 'https://post-dated.test' },
+      tools: [],
+    })
+    .catch((err: Error) => {
+      postDated = err.message;
+    });
+  check('the daemon refuses a delegation dated into the future', postDated.includes('bad_delegation'), postDated);
+
+  postDatedWallet.close();
+  await fastDaemon.stop();
+  await fastRelay.close();
 
   // Invariant 6 for the grant: the relay's own hash check is a convenience,
   // not the boundary. A relay that forwards a grant other than the one the

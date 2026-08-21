@@ -10,7 +10,41 @@ they moved.
 
 ## Unreleased
 
-### The widget's state machine became an object its checks can drive
+### Three domain rules own themselves, and one missing clause is closed
+
+Three rules that more than one party judges were copy-pasted wherever they
+were judged, and each set of copies had drifted. They are now one exported
+function each in `@agentport/protocol`, replaced at every call site in the
+same change.
+
+`delegationAuthorizes()` replaces three hand-written validity conjunctions
+(relay: five clauses; daemon: seven, one of them dead; the page: eight, by
+regex). A judge that cannot perform a clause now says so in the context —
+the relay omits `origin` because it cannot authenticate one, the page
+passes `SIGNER_UNKNOWN` (a symbol, so the compiler keeps asking) because a
+delegation deliberately carries no user key. And the clause NO judge had is
+added: `issuedAt` is compared to the clock, because `expiresAt > now` plus
+a bounded span says nothing about when the span starts — a delegation dated
+forward walked past every revocation tombstone already recorded, since
+`isRevoked` refuses only `issuedAt <= tombstone.at`. Skew tolerance is five
+minutes, reasoned in `limits.ts`; no protocol bump, because each judge
+enforces the clause for itself. Found while proving it: e2e's lying-relay
+mock clock sat at the epoch, which lies in both directions and would have
+masked the daemon-side case — it now rewinds 90 seconds and lies only about
+expiry.
+
+`isGated()` replaces seven spellings of "does this tool ask again?", four
+of them on consent surfaces. The drift was already semantic in one file:
+`daemon.ts#callTool` gated on truthiness and logged `browserApprovalRequired`
+from `=== true` two lines below.
+
+`SESSION_DENIAL_REASONS` enumerates all thirteen denial reasons both
+producers emit, every emit site references the registry, and
+`isTerminalResumeDenial()` replaces the two hand-copied string lists that
+invariant 9's "revoked is terminal" rested on. Deleting a registry entry now
+fails the build, not just a harness. The wire schema is untouched —
+narrowing `SessionDenied.reason` is a lockstep change deferred to v7 and
+recorded on the field.
 
 The extension's fallback surface was eleven module-scope variables in
 `content.ts` maintained by convention across ten functions, and every hazard

@@ -101,6 +101,23 @@ fills. And it closes a live hole: today nothing stops a wallet signing a
 delegation that expires in a decade, so a single approval could outlive the
 laptop it was made on.
 
+**Both of those rest on `issuedAt` meaning something, and for a long time
+nothing checked that it did.** Every judge compared `expiresAt` to its clock
+and the span to the bound; none compared `issuedAt` to anything. A delegation
+dated into the future was therefore well-formed to all three — and it defeats
+both halves of this rule at once. R2 admits a delegation issued after the
+tombstone's instant, which is exactly what re-approval looks like, so a
+post-dated one walks past every revocation already recorded; and because the
+span is measured from `issuedAt`, dating it forward slides the live window
+forward with it. Unrevocable and effectively permanent, from one signature.
+
+The clause is `issuedAt <= now + MAX_DELEGATION_CLOCK_SKEW_MS`, and it lives in
+`packages/protocol/src/delegation.ts#delegationAuthorizes` — the single judge
+the relay, the daemon and the page all now call, which is the other half of
+this fix: the rule above had three hand-written copies that had already
+drifted, and a clause nobody had is the failure mode a shared judge exists to
+make impossible.
+
 ### R4. Killing the transport is not an ending
 
 Since the client redials and re-resumes by itself, revocation must make a

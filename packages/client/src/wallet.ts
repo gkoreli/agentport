@@ -14,6 +14,7 @@ import {
   fingerprintWords,
   generateSealKeyPair,
   isSessionFrame,
+  isTerminalResumeDenial,
   openSealed,
   openProofBinding,
   publicKeyOf,
@@ -43,9 +44,8 @@ import { OPEN, defaultSocketFactory, type SocketFactory, type WebSocketLike } fr
 const DEFAULT_SESSION_TTL_MS = 60 * 60 * 1000;
 
 /**
- * A resume refusal with the relay's reason attached, so callers can tell a
- * dead session ('not_resumable', 'grant_expired', 'authorization_expired',
- * 'revoked') from a transient race ('already_attached': the old tab's socket
+ * A resume refusal with the denial's reason attached, so callers can tell a
+ * dead session from a transient race ('already_attached': the old tab's socket
  * close has not reached the relay yet). Deleting a resume record over a
  * transient reason turns a lost race into a permanently lost session — the
  * exact bug this type exists to stop.
@@ -53,6 +53,24 @@ const DEFAULT_SESSION_TTL_MS = 60 * 60 * 1000;
 export class ResumeError extends Error {
   constructor(readonly reason: string) {
     super(`could not resume: ${reason}`);
+  }
+
+  /**
+   * Does this refusal PROVE the stored resume record is dead?
+   *
+   * Derived from `isTerminalResumeDenial`, which lives beside the registry
+   * both producers emit from — so a new terminal reason on the daemon reaches
+   * every consumer at once. It used to be four string literals hand-copied
+   * into `site/src/connect.ts` and `packages/extension/src/sw.ts`, where a
+   * fifth reason would have been classified transient by both and retried
+   * withdrawn authority forever.
+   *
+   * A handshake TIMEOUT also arrives as a ResumeError, and it is transient by
+   * this rule — correctly: a deadline says the peer did not answer, never that
+   * the authority behind the session was withdrawn.
+   */
+  get terminal(): boolean {
+    return isTerminalResumeDenial(this.reason);
   }
 }
 

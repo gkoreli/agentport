@@ -17,7 +17,7 @@ import { pairingControlPath, readPairingControl, writePairingControl } from './p
 import { fileRevocations, revocationsPath } from './revocations.js';
 import { RUNTIMES } from './runtime.js';
 import { McpBridge } from './mcp-bridge.js';
-import { createLogger } from '@agentport/protocol';
+import { createLogger, isGated } from '@agentport/protocol';
 
 const log = createLogger('daemon.cli');
 
@@ -138,12 +138,11 @@ const daemon = new AgentDaemon({
   // because this is where your key is — the website asking is holding an
   // ephemeral keypair with no authority whatsoever.
   onConnectOffer: async ({ surface, grant, verify }) => {
-    const gated = new Set([...grant.alwaysAsk, ...grant.tools.filter((t) => t.requiresApproval).map((t) => t.name)]);
     console.log('');
     console.log(`  ${surface.name} (${surface.origin}${surface.route ?? ''}) wants your agent.`);
     console.log('');
     for (const tool of grant.tools) {
-      console.log(`    ${gated.has(tool.name) ? '!' : '✓'} ${tool.description}`);
+      console.log(`    ${isGated(tool, grant) ? '!' : '✓'} ${tool.description}`);
     }
     console.log('');
     console.log(`    grant expires ${new Date(grant.expiresAt).toLocaleTimeString()}`);
