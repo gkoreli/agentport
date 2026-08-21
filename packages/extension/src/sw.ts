@@ -658,7 +658,7 @@ async function openSession(
     ttlMs: request.ttlMs,
     // Approvals go to extension chrome. The decision window is independent of
     // page DOM and closing it without answering fails shut.
-    decide: (prompt) => consentWindows.askApproval(origin, who, prompt, synthesisedNames(from, request)),
+    decide: (prompt) => consentWindows.askApproval(ref, origin, who, prompt, synthesisedNames(from, request)),
   });
 
   const entry: SessionEntry = {
@@ -755,7 +755,7 @@ async function resumeFromStore(
       agent: record.agent,
       token: record.token,
       tools,
-      decide: (prompt) => consentWindows.askApproval(origin, who, prompt, synthesisedNames(from, request)),
+      decide: (prompt) => consentWindows.askApproval(ref, origin, who, prompt, synthesisedNames(from, request)),
     });
     who.name = session.info.agentName;
     const entry: SessionEntry = {

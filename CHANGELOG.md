@@ -38,10 +38,13 @@ rode along, both watched failing: approval windows finally have a deadline
 desktop parked the agent's turn; expiry now declines and closes the
 window), and the keep-alive alarm is gated on live sessions instead of
 waking the worker every minute forever on an install that attached once.
-Two pre-existing defects found and recorded rather than silently fixed: an
-approval window still outlives its session (questions carry the session
-ref, approvals do not — now capped by the deadline instead of unbounded),
-and a window whose decision settles while creation is in flight leaks.
+Two pre-existing defects found during the split were then fixed in a
+follow-up, each watched failing first: approvals now carry the session ref
+like questions do, so a dying session closes its approval window instead of
+leaving an Approve button that grants a call the session already abandoned;
+and a window whose decision settles while creation is still in flight is
+closed on arrival instead of leaking on screen answering "nothing to
+decide" forever.
 
 `agentport revoke <origin>` wrote a tombstone, logged, and left a live
 extension attachment running and reopenable: every revocation check in the

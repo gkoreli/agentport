@@ -1279,18 +1279,24 @@ const stillPending = async (promise: Promise<unknown>): Promise<boolean> =>
   (await Promise.race([promise.then(() => 'settled'), new Promise((r) => setTimeout(() => r('pending'), 20))])) ===
   'pending';
 
-function consentFixture(options: { askWindowMs?: number; approveWindowMs?: number; refuseToOpen?: boolean } = {}) {
+function consentFixture(
+  options: { askWindowMs?: number; approveWindowMs?: number; refuseToOpen?: boolean; holdOpen?: boolean } = {},
+) {
   const opened: { pendingId: string; windowId: number }[] = [];
   const closed: number[] = [];
   const logs: LogEntry[] = [];
   let nextWindowId = 100;
   let dismissed: ((windowId: number) => void) | undefined;
+  let releaseHeldOpen: (() => void) | undefined;
 
   const host: ConsentWindowHost = {
     open: async (pendingId) => {
       // A browser that refuses to open the window is the case OS notifications
       // taught us about: the surface does not exist and nobody can be asked.
       if (options.refuseToOpen) throw new Error('no window for you');
+      // `holdOpen` models window creation still in flight while the decision
+      // settles — the race behind the late-window leak.
+      if (options.holdOpen) await new Promise<void>((resolve) => (releaseHeldOpen = resolve));
       const windowId = (nextWindowId += 1);
       opened.push({ pendingId, windowId });
       return windowId;
@@ -1321,6 +1327,11 @@ function consentFixture(options: { askWindowMs?: number; approveWindowMs?: numbe
     dismiss: (windowId: number) => {
       assert.ok(dismissed, 'nothing is listening for a consent window being closed, so a dismissal is silence');
       dismissed(windowId);
+    },
+    /** Let a held `host.open` finish, so the race it models can resolve. */
+    releaseOpen: () => {
+      assert.ok(releaseHeldOpen, 'nothing is holding a window open, so there is no race to release');
+      releaseHeldOpen();
     },
     /** The window that this decision opened, asserted to exist first: a
      *  refusal that happened because nothing was ever shown proves nothing. */
@@ -1479,6 +1490,61 @@ const agentRow = { agent: 'a'.repeat(64), name: 'VPS Agent', runtime: 'acp', onl
   // about, arriving from the check's own housekeeping instead of the code's.
   fixture.windows.closeFor('s_other');
   assert.equal(await within(other, 1_000, 'second question'), undefined);
+}
+
+// 5b. `closeFor` reaches approvals too. Both kinds carry the session ref now,
+//     because the two windows fail differently when the session dies under
+//     them: a question fills in for nobody, but an Approve button GRANTS a
+//     call its session already abandoned — and the deadline used to be the
+//     only thing bounding that.
+{
+  const fixture = consentFixture();
+  const decision = fixture.windows.askApproval(
+    's_dying',
+    'https://shop.example',
+    { name: 'VPS Agent' },
+    approvalPrompt,
+    new Set(),
+  );
+  await settle();
+  const window = fixture.onlyWindow('approval for a dying session');
+  fixture.windows.closeFor('s_dying');
+  assert.equal(
+    await within(decision, 1_000, 'approval for a dead session'),
+    false,
+    'the session died and its approval window went on offering a grant',
+  );
+  assert.deepEqual(fixture.closed, [window.windowId], 'a dead session left its approval window on screen');
+}
+
+// 5c. A decision that settles while its window is still being created closes
+//     the late-arriving window instead of leaking it. Before the guard, the
+//     window id was assigned onto the already-deleted pending, so nothing ever
+//     closed it and it sat on screen answering consent.get with "nothing to
+//     decide" forever.
+{
+  const fixture = consentFixture({ holdOpen: true, approveWindowMs: 10 });
+  const decision = fixture.windows.askApproval(
+    's_race',
+    'https://shop.example',
+    { name: 'VPS Agent' },
+    approvalPrompt,
+    new Set(),
+  );
+  assert.equal(
+    await within(decision, 2_000, 'approval that settled before its window arrived'),
+    false,
+    'the deadline should have declined while window creation was still in flight',
+  );
+  assert.deepEqual(fixture.closed, [], 'nothing arrived yet, so nothing can have been closed');
+  fixture.releaseOpen();
+  await settle();
+  assert.equal(fixture.opened.length, 1, 'the held window was never created, so the race never happened');
+  assert.deepEqual(
+    fixture.closed,
+    [fixture.opened[0]!.windowId],
+    'the window that lost its decision was left on screen',
+  );
 }
 
 console.log('consent window check passed');

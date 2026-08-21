@@ -120,10 +120,10 @@ interface PendingUi {
   /**
    * The session this window is asking on behalf of, when there is one.
    *
-   * Only questions carry it, and only so a dying session can close its own
-   * window. Without it the user goes on filling in a form whose agent stopped
-   * listening — the form-shaped version of the stall this whole path exists to
-   * avoid.
+   * Questions and approvals both carry it, and only so a dying session can
+   * close its own window. Without it the user goes on answering a surface
+   * whose agent stopped listening — the form fills in for nobody, the Approve
+   * button grants a call that was already abandoned.
    */
   ref?: string;
   timer?: ReturnType<typeof setTimeout>;
@@ -165,6 +165,7 @@ export class ConsentWindows {
 
   /** A per-call approval in extension chrome. Never the page or OS chrome. */
   askApproval(
+    ref: string,
     origin: string,
     who: { name: string },
     prompt: { domain: AuthorityDomain; summary: string; call?: { name: string; arguments: Record<string, unknown> } },
@@ -193,7 +194,7 @@ export class ConsentWindows {
         summary: prompt.summary,
         ...(prompt.call ? { call: prompt.call } : {}),
       },
-      { deadlineMs: this.#approveWindowMs },
+      { ref, deadlineMs: this.#approveWindowMs },
     ).then((value) => value === true);
   }
 
@@ -229,9 +230,10 @@ export class ConsentWindows {
    * The session that opened these windows is gone; settle each as its own
    * kind's refusal, which also closes it.
    *
-   * The registry's single door into this module. Only questions carry a `ref`
-   * today, so only questions are reachable through it — an approval window is
-   * bounded by its deadline instead.
+   * The registry's single door into this module. Questions AND approvals carry
+   * a `ref`, so a dying session takes both of its windows down with it; the
+   * per-kind deadline remains the backstop for a session that dies without
+   * anyone calling this.
    */
   closeFor(ref: string): void {
     for (const pending of [...this.#pending.values()]) {
@@ -301,7 +303,21 @@ export class ConsentWindows {
 
   async #open(pending: PendingUi): Promise<void> {
     try {
-      pending.windowId = await this.#host.open(pending.id);
+      const windowId = await this.#host.open(pending.id);
+      if (!this.#pending.has(pending.id)) {
+        // The decision settled while the window was still being created — a
+        // deadline, a dying session's closeFor, or a failure path won the
+        // race. The window that just arrived belongs to nobody: assigning its
+        // id onto the deleted pending would leak it on screen forever,
+        // answering consent.get with "nothing to decide".
+        if (windowId !== undefined) {
+          this.#observe(this.#host.close(windowId), 'failed to close a consent window that lost its decision', {
+            data: { pendingId: pending.id, kind: pending.payload.kind },
+          });
+        }
+        return;
+      }
+      pending.windowId = windowId;
     } catch (err) {
       this.#log.error('could not open consent window; denying request', {
         err,
