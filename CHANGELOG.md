@@ -10,6 +10,21 @@ they moved.
 
 ## Unreleased
 
+### Two standards contributions, drafted to be filed
+
+The window the landscape research named is a distribution race, and part of
+distribution is standing where the concrete is being poured.
+`docs/standards/` now holds two filing-ready documents: a comment for
+WebMCP's live agent-allowlist thread (#116) asking that the user-supplied
+remote agent become a named consumer class — three minimal asks, no new API
+surface, grounded in the shipping harvest's force-gating discipline; and a
+review of the ACP remote-transport RFD mapping each Phase-4-deferred
+security item to a mechanism this repo ships and adversarially tests,
+including the resume bug we shipped, repaired, and now offer as the
+cautionary tale, plus the browser-profile case: cookie-mandated affinity is
+not implementable from a cross-origin browser client. Neither has been
+filed — filing is the owner's act.
+
 ### ADR-026: the agent gets a different name at every door — proposed, and gating the store
 
 Every site learns the agent's stable root key today (the relay-stamped
