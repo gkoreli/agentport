@@ -204,7 +204,8 @@ Checks use a **scripted fixture agent** over real stdio, the
 model choosing to ask. And rule 3 applies hardest here of anywhere: this is a
 request/response round trip *through a human*, so the daemon side needs a
 deadline and a decline-on-timeout, or an unanswered question hangs the turn.
-`AgentWallet.revoke`'s `#awaitTimed` is the template.
+`AgentWallet.revoke`'s deadlined round trip
+(`packages/client/src/correlator.ts#expectTimed`) is the template.
 
 ### R8. Four things the code says that the design assumed wrongly
 

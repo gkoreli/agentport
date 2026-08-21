@@ -10,7 +10,33 @@ they moved.
 
 ## Unreleased
 
-### Three domain rules own themselves, and one missing clause is closed
+### An agent's question finally renders, and the adapter can no longer drop an event silently
+
+The AG-UI adapter subscribed to eight of the nine session events by
+hand-picked list; `ask` was the ninth. A direct-key attachment (the inkwell
+demo, or any embedder building its own wallet) that received an agent
+question blocked for the daemon's five-minute ask timeout and decayed to a
+skip, with nothing rendered anywhere. The subscription set is now
+compiler-total over `SessionEvents` — an omitted member is a build error,
+watched failing — and `ask` is an explicit `agentport.ask` CUSTOM event that
+`applyEvent` renders as a question card in the panel (options, free text,
+skip; answers cross the sealed session, proven end-to-end in ui:smoke by
+asserting the sealed `answer` frame carries the user's actual values).
+Inkwell answers asks too. The rendering states its own reachability: none of
+connect.js's three tiers can receive a question today — that is ADR-024's
+routing, not an accident — so the comment at the case says which tiers can.
+
+### The wallet's request/response multiplexer is extracted, and its two recorded bugs are now assertions
+
+`FrameCorrelator` lifts the correlation registry out of `AgentWallet` —
+nothing in it knew about wallets, sockets or keys — and the two defects its
+comments recorded (a deferred registered under two types leaving a stale
+twin that starved later waiters; a refusal frame nobody listed leaving its
+caller hanging) are now direct, socket-free assertions in
+`npm run client:check`, each watched failing by reintroducing the exact
+recorded bug. One deliberate behavior change rides along:
+`AgentWallet#close()` now rejects requests still in flight instead of
+leaving them hanging forever, argued safe by reading every call site.
 
 Three rules that more than one party judges were copy-pasted wherever they
 were judged, and each set of copies had drifted. They are now one exported

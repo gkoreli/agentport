@@ -122,6 +122,7 @@ jobs:
           npm run webmcp:harvest
           npm run agui:check
           npm run wallet:check
+          npm run client:check
           npm run ui:smoke
           npm run check:extension
           "$AGENTPORT_CHROME" --version

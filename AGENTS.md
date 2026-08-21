@@ -181,6 +181,7 @@ npm run wire:check # wire validation: 521 fixture cases across all 45 frames
 npm run agui:check # every emitted AG-UI event parsed by @ag-ui/core's schemas
 npm run source:check # no invisible control characters in source (a NUL got in)
 npm run docs:check   # every code citation in the docs resolves to a real symbol
+npm run client:check # FrameCorrelator direct assertions — its two recorded bugs, socket-free
 npm run snippet:check # the integration snippet from BOTH front doors, extracted and EXECUTED
 npm run deployed:check # deployed front door vs this tree — exit 1 lags, 2 unreachable (release path)
 npm run typecheck  # tsc -b over all packages

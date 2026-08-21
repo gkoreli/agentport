@@ -29,7 +29,6 @@ import {
   type AgentSummary,
   CapabilityGrant,
   type Frame,
-  type FrameType,
   type Hex,
   type Logger,
   type LogSink,
@@ -38,6 +37,7 @@ import {
   type SessionDelegation,
   SurfaceDescriptor,
 } from '@agentport/protocol';
+import { FrameCorrelator } from './correlator.js';
 import { AgentSession, type ApprovalDecider, type SiteTool } from './session.js';
 import { OPEN, defaultSocketFactory, type SocketFactory, type WebSocketLike } from './socket.js';
 
@@ -102,27 +102,6 @@ export interface WalletOptions {
 const RECONNECT_BASE_DELAY_MS = 500;
 const RECONNECT_MAX_DELAY_MS = 15_000;
 const RECONNECT_MAX_ATTEMPTS = 12;
-
-/**
- * Which pending request a refusal answers when no waiter listed it.
- *
- * Keyed by the refusal, valued by the success replies whose requests it can be
- * answering — so a denial always settles something rather than being dropped
- * on the floor while its caller waits.
- *
- * Note what this is: a hand-maintained set, exactly the kind of thing that
- * produced the bug it exists to prevent. A future frame that refuses
- * something and is not listed here drops silently again, and the caller hangs
- * again. It cannot be made total — the thing it is total OVER is "frames that
- * mean refusal", which is a judgement, not a type. So this closes one class,
- * and the general answer is the other one: every machine-speed round trip
- * gets a deadline, which turns silence into a visible failure even for the
- * cases nobody enumerated.
- */
-const DENIAL_ANSWERS: Record<string, readonly string[] | undefined> = {
-  'session.denied': ['session.opened', 'session.resumed'],
-  'connect.denied': ['session.opened'],
-};
 
 const DEFAULT_HANDSHAKE_TIMEOUT_MS = 20_000;
 
@@ -233,7 +212,8 @@ export class AgentWallet extends Emitter<WalletEvents> {
   #options: WalletOptions;
   #socket: WebSocketLike | undefined;
   #sessions = new Map<string, AgentSession>();
-  #waiters = new Map<string, Deferred<Frame>[]>();
+  /** Request/response correlation by frame type — see correlator.ts. */
+  #correlator: FrameCorrelator;
   #resumeTokens = new Map<string, string>();
   /** Per-attachment symmetric keys; the relay never holds these (ADR-003). */
   #sealChannels = new Map<string, SealChannel>();
@@ -255,6 +235,15 @@ export class AgentWallet extends Emitter<WalletEvents> {
     this.#options = options;
     this.publicKey = publicKeyOf(options.userSecretKey);
     this.#log = createLogger('client.wallet', { sink: options.sink });
+    this.#correlator = new FrameCorrelator(this.#log.child('correlator'));
+  }
+
+  /**
+   * How long a machine-speed round trip may wait. One place, because it was
+   * read from options at four call sites and a fifth would have guessed.
+   */
+  #handshakeMs(): number {
+    return this.#options.handshakeTimeoutMs ?? DEFAULT_HANDSHAKE_TIMEOUT_MS;
   }
 
   async connect(): Promise<void> {
@@ -269,7 +258,7 @@ export class AgentWallet extends Emitter<WalletEvents> {
     // A refusal the caller never hears is indistinguishable from a hang; this
     // is the same rule as every other machine-speed round trip here, applied
     // to the first one of all.
-    const ms = this.#options.handshakeTimeoutMs ?? DEFAULT_HANDSHAKE_TIMEOUT_MS;
+    const ms = this.#handshakeMs();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const deadline = new Promise<never>((_, reject) => {
       timer = setTimeout(
@@ -344,6 +333,11 @@ export class AgentWallet extends Emitter<WalletEvents> {
     clearTimeout(this.#reconnectTimer);
     for (const session of this.#sessions.values()) session.close('wallet_closed');
     this.#socket?.close();
+    // Past this point no redial follows and no frame can arrive, so a waiter
+    // still registered is waiting on an answer that provably cannot come.
+    // Failing it loses nothing and ends the hang; leaving it pending is the
+    // silence this whole correlation layer exists to prevent.
+    this.#correlator.close('wallet_closed');
   }
 
   /**
@@ -454,7 +448,7 @@ export class AgentWallet extends Emitter<WalletEvents> {
 
   async listAgents(): Promise<AgentSummary[]> {
     this.#sendRaw({ t: 'agents.list' });
-    const frame = await this.#await('agents');
+    const frame = await this.#correlator.expect('agents');
     return frame.agents;
   }
 
@@ -474,7 +468,7 @@ export class AgentWallet extends Emitter<WalletEvents> {
     // spinner. It is also the shape that makes a check on this path usable —
     // a test that hangs on the bug it targets is not a check, because a hang
     // is indistinguishable from slowness and nobody waits to find out.
-    const frame = await this.#awaitTimed('revoke', 'revoked');
+    const frame = await this.#correlator.expectTimed('revoke', this.#handshakeMs(), 'revoked');
     return frame.sessions;
   }
 
@@ -483,7 +477,7 @@ export class AgentWallet extends Emitter<WalletEvents> {
   /** Step 1: look up a code the user typed or opened. Nothing is signed yet. */
   async claimPairing(code: string): Promise<PairOffer> {
     this.#sendRaw({ t: 'pair.claim', code });
-    const frame = await this.#await('pair.offer');
+    const frame = await this.#correlator.expect('pair.offer');
     return { code: frame.code, agent: frame.agent };
   }
 
@@ -498,7 +492,7 @@ export class AgentWallet extends Emitter<WalletEvents> {
       issuedAt: Date.now(),
     });
     this.#sendRaw({ t: 'pair.complete', code: offer.code, cert });
-    await this.#await('pair.bound');
+    await this.#correlator.expect('pair.bound');
     return cert;
   }
 
@@ -546,7 +540,7 @@ export class AgentWallet extends Emitter<WalletEvents> {
     // The `accepted` wait below is deliberately NOT deadlined: that one waits
     // on a human reading a code aloud, and a deadline there would be a
     // guess about how long a person takes.
-    const pending = await this.#awaitTimed('connect', 'connect.pending');
+    const pending = await this.#correlator.expectTimed('connect', this.#handshakeMs(), 'connect.pending');
 
     const accepted = (async () => {
       // Three ways this ends, and every one of them must settle the promise.
@@ -554,10 +548,10 @@ export class AgentWallet extends Emitter<WalletEvents> {
       // is the daemon refusing the open the relay synthesised after they said
       // yes — an expired approval, a revoked agent, an expired grant. That
       // second one used to be in nobody's waiter list, so the frame arrived,
-      // #resolve found no queue for it, and the page waited forever on a
+      // the correlator found no queue for it, and the page waited forever on a
       // question that had already been answered. A refusal the caller never
       // hears is indistinguishable from a hang.
-      const reply = await this.#await('session.opened', 'connect.denied', 'session.denied');
+      const reply = await this.#correlator.expect('session.opened', 'connect.denied', 'session.denied');
       if (reply.t === 'connect.denied' || reply.t === 'session.denied') {
         throw new Error(`connection declined: ${reply.reason}`);
       }
@@ -632,8 +626,8 @@ export class AgentWallet extends Emitter<WalletEvents> {
     existing?: AgentSession,
   ): Promise<{ session: AgentSession; missed: number }> {
     const sealPair = generateSealKeyPair();
-    const resumedReply = this.#request('session.resumed', 'session.denied');
-    const ms = this.#options.handshakeTimeoutMs ?? DEFAULT_HANDSHAKE_TIMEOUT_MS;
+    const resumedReply = this.#correlator.register('session.resumed', 'session.denied');
+    const ms = this.#handshakeMs();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const deadline = new Promise<never>((_, reject) => {
       timer = setTimeout(() => reject(new ResumeError(`session.resume handshake timed out after ${ms}ms`)), ms);
@@ -725,7 +719,7 @@ export class AgentWallet extends Emitter<WalletEvents> {
         openProofBinding('open', surface, grant, request.agent),
       ),
     });
-    const reply = await this.#awaitTimed('session.open', 'session.opened', 'session.denied');
+    const reply = await this.#correlator.expectTimed('session.open', this.#handshakeMs(), 'session.opened', 'session.denied');
     if (reply.t === 'session.denied') {
       throw new Error(`agent refused the session: ${reply.reason}`);
     }
@@ -935,7 +929,7 @@ export class AgentWallet extends Emitter<WalletEvents> {
       return;
     }
 
-    if (this.#resolve(frame)) return;
+    if (this.#correlator.resolve(frame)) return;
     if (frame.t === 'error') {
       this.#log.error('relay rejected a frame', { data: { code: frame.code, message: frame.message } });
       return;
@@ -948,113 +942,5 @@ export class AgentWallet extends Emitter<WalletEvents> {
     this.#log.warn('dropped a frame this wallet has no handler for', {
       data: { frameType: frame.t },
     });
-  }
-
-  /**
-   * Single-shot request/response correlation by frame type. Always withdraws
-   * BOTH queue entries once settled: a deferred registered under two types
-   * and answered by one used to leave a stale twin that silently consumed the
-   * next frame of the other type — an off-by-one that starved every waiter
-   * behind it. Correlation waiters must never outlive their answer.
-   */
-  async #await<T extends FrameType>(...types: T[]): Promise<Extract<Frame, { t: T }>> {
-    const request = this.#request(...types);
-    try {
-      return await request.promise;
-    } finally {
-      request.cancel();
-    }
-  }
-
-  /**
-   * #await with a deadline, for round-trips that involve no human: relay and
-   * daemon answer at machine speed or something is wrong. The waiter is
-   * withdrawn on timeout so it cannot swallow a late reply meant for a retry.
-   */
-  async #awaitTimed<T extends FrameType>(label: string, ...types: T[]): Promise<Extract<Frame, { t: T }>> {
-    const request = this.#request(...types);
-    const ms = this.#options.handshakeTimeoutMs ?? DEFAULT_HANDSHAKE_TIMEOUT_MS;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const deadline = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error(`${label} handshake timed out after ${ms}ms`)), ms);
-    });
-    try {
-      return await Promise.race([request.promise, deadline]);
-    } finally {
-      clearTimeout(timer);
-      request.cancel();
-    }
-  }
-
-  /** Like #await, but cancellable: a failed attempt must withdraw its waiter
-   * or the leftover deferred swallows the reply meant for the retry. */
-  #request<T extends FrameType>(...types: T[]): { promise: Promise<Extract<Frame, { t: T }>>; cancel: () => void } {
-    const deferred = new Deferred<Frame>();
-    for (const type of types) {
-      const list = this.#waiters.get(type) ?? [];
-      list.push(deferred);
-      this.#waiters.set(type, list);
-    }
-    const cancel = () => {
-      for (const [, list] of this.#waiters) {
-        const index = list.indexOf(deferred);
-        if (index >= 0) list.splice(index, 1);
-      }
-    };
-    // #resolve only settles a waiter with a decodeFrame-validated frame whose
-    // `t` matched the type it was filed under, so this narrowing holds by
-    // construction — it is what lets replies flow typed to every call site.
-    return { promise: deferred.promise as Promise<Extract<Frame, { t: T }>>, cancel };
-  }
-
-  #resolve(frame: Frame): boolean {
-    const list = this.#waiters.get(frame.t);
-    const deferred = list?.shift();
-    if (deferred) {
-      deferred.resolve(frame);
-      return true;
-    }
-
-    // An error frame with no matching waiter still fails the oldest request.
-    if (frame.t === 'error') {
-      for (const [, queue] of this.#waiters) {
-        const pending = queue.shift();
-        if (pending) {
-          pending.reject(new Error(`${frame.code}: ${frame.message}`));
-          return true;
-        }
-      }
-      return false;
-    }
-
-    // A refusal nobody listed still answers the request it refuses.
-    //
-    // This is a backstop, not a second implementation of the waiter list: the
-    // list still routes precisely, which matters when several opens are in
-    // flight, because all this can do is fail the OLDEST request the refusal
-    // could plausibly be answering. It buys liveness, not precision — and it
-    // logs, so a list that needed it says so instead of silently working.
-    //
-    // Every waiter names the reply types it expects, per call — a set no
-    // compiler can check is total, and forgetting the failure type is how a
-    // page ends up waiting forever on a question that was already answered.
-    // So the failure types do not depend on the list: a denial settles the
-    // oldest request it could plausibly be answering, whether or not that
-    // call site remembered to ask for it. The list is now an optimisation
-    // for routing, not the thing standing between a caller and a hang.
-    const refusal = frame.t === 'session.denied' || frame.t === 'connect.denied' ? frame : undefined;
-    if (refusal) {
-      for (const success of DENIAL_ANSWERS[refusal.t] ?? []) {
-        const pending = this.#waiters.get(success)?.shift();
-        if (pending) {
-          this.#log.warn('a refusal was not in its waiter list; failing the request it answers', {
-            data: { refusal: refusal.t, awaiting: success },
-          });
-          pending.reject(new Error(`connection declined: ${refusal.reason}`));
-          return true;
-        }
-      }
-    }
-    return false;
   }
 }

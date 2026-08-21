@@ -1,4 +1,5 @@
 export { AgentWallet, ResumeError, buildGrant, type WalletOptions, type SessionRequest, type PairOffer } from './wallet.js';
+export { FrameCorrelator, type PendingReply } from './correlator.js';
 export {
   AgentSession,
   type SiteTool,

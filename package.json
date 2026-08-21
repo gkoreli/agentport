@@ -26,6 +26,7 @@
     "site:build": "tsx site/build.ts",
     "wallet:build": "tsx wallet/build.ts",
     "wallet:check": "tsx scripts/wallet-popup-check.ts",
+    "client:check": "tsx scripts/client-check.ts",
     "site:dev": "npm run site:build && wrangler dev",
     "deploy": "tsx scripts/deploy.ts",
     "deploy:ci": "tsx scripts/deploy.ts --ci",
