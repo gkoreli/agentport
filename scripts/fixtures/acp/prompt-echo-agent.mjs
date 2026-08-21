@@ -33,6 +33,21 @@ createInterface({ input: process.stdin }).on('line', (line) => {
     });
   } else if (msg.method === 'session/new') {
     write({ jsonrpc: '2.0', id: msg.id, result: { sessionId: SESSION } });
+  } else if (msg.method === 'session/load') {
+    // Only a loadSession agent replays. Advertising-honesty is the subject
+    // under test, so an agent that never advertised it refuses like a real
+    // one would rather than helpfully answering anyway.
+    if (!extraCapabilities.loadSession) {
+      write({ jsonrpc: '2.0', id: msg.id, error: { code: -32601, message: 'load not supported' } });
+      return;
+    }
+    for (const update of [
+      { sessionUpdate: 'user_message_chunk', content: { type: 'text', text: 'earlier question' } },
+      { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'earlier answer' } },
+    ]) {
+      write({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: SESSION, update } });
+    }
+    write({ jsonrpc: '2.0', id: msg.id, result: {} });
   } else if (msg.method === 'session/prompt') {
     const text = msg.params?.prompt?.[0]?.text ?? '';
     write({

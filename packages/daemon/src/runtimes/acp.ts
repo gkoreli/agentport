@@ -200,6 +200,14 @@ export class AcpRuntime implements AgentRuntime {
   #log: Logger;
   /** Whether the agent keeps its own session store we can replay from. */
   #supportsLoad = false;
+  /**
+   * Whether the agent advertises ACP 1.3's `sessionCapabilities.resume` —
+   * continuing a session WITHOUT replaying its messages. Not a substitute for
+   * `loadSession`: by design it cannot answer `history.request`, and reading
+   * it exists so the fallback for resume-only agents is a stated fact rather
+   * than a silent degradation.
+   */
+  #supportsResume = false;
   /** Tool calls the agent has announced, so updates can be labelled. */
   #toolTitles = new Map<string, string>();
   /** Set while `loadSession` is streaming history back at us. */
@@ -305,7 +313,13 @@ export class AcpRuntime implements AgentRuntime {
         ...(context.policy?.mayAsk === true ? { elicitation: { form: {} } } : {}),
       },
     });
+    // SDK 1.3.0 keeps `loadSession` as a top-level boolean; the 1.3 session
+    // unification moved resume/list/delete/close under `sessionCapabilities`
+    // and left load where it was. For every member there, `{}` advertises
+    // support and omitted/null both decline — so the read is `!= null`, and
+    // `=== true` would silently un-advertise every conforming agent.
     this.#supportsLoad = init.agentCapabilities?.loadSession === true;
+    this.#supportsResume = init.agentCapabilities?.sessionCapabilities?.resume != null;
 
     // Register the surface's tools and hand the agent their endpoint.
     await this.#options.bridge.start();
@@ -401,7 +415,21 @@ export class AcpRuntime implements AgentRuntime {
   async replayHistory(): Promise<HistoryEntry[] | null> {
     const connection = this.#connection;
     const sessionId = this.#sessionId;
-    if (!connection || !sessionId || !this.#supportsLoad) return null;
+    if (!connection || !sessionId) return null;
+    if (!this.#supportsLoad) {
+      // `session/resume` continues WITHOUT replaying messages — by design it
+      // cannot answer a history request, so a resume-only agent falls back to
+      // the daemon's observed transcript. Saying so is what makes the
+      // provenance claim true for agents beyond claude-agent-acp: the
+      // fallback is a property of the agent's advertised capabilities, not a
+      // silent failure of ours.
+      if (this.#supportsResume) {
+        this.#log.info('agent resumes without replay; history falls back to the observed transcript', {
+          data: { acpSessionId: sessionId },
+        });
+      }
+      return null;
+    }
 
     const collected: HistoryEntry[] = [];
     this.#replay = collected;

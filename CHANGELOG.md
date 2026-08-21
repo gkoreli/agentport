@@ -10,7 +10,21 @@ they moved.
 
 ## Unreleased
 
-### Page context finally reaches the agent
+### History capability honesty for agents beyond claude-agent-acp
+
+ACP 1.3 moved resume/list/delete/close under `sessionCapabilities` (where
+`{}` advertises and omitted/null decline) and left `loadSession` top-level.
+`AcpRuntime` and `agentport doctor` now read both: a `loadSession` agent
+replays history from its own store as before; a resume-only agent —
+`session/resume` continues WITHOUT replaying messages, by design — falls
+back to the daemon's observed transcript as a stated fact (logged, and
+rendered by doctor as "resumes without replay") rather than a silent
+degradation, and no `session/load` is ever attempted at an agent that never
+advertised it. The provenance table's claim is now true for the other sixty
+ACP agents, not just the one that happens to advertise load. Checked in
+`runtime:check` across all three capability shapes, each watched failing —
+including the wrong-convention read (`=== true` on a `{}`-advertised
+capability), which is the exact bug the SDK's own convention invites.
 
 `SurfaceDescriptor.context` and `Prompt.context` were validated, bounded,
 sealed, routed, delivered — and then dropped on the daemon floor, for as

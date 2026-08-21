@@ -22,7 +22,9 @@
 import { fileURLToPath } from 'node:url';
 import { AcpRuntime } from '../packages/daemon/src/runtimes/acp.js';
 import { McpBridge } from '../packages/daemon/src/mcp-bridge.js';
+import { describeAcpProbe, probeAcpRuntime } from '../packages/daemon/src/acp-preflight.js';
 import type { TurnContext } from '../packages/daemon/src/runtime.js';
+import type { LogEntry } from '@agentport/protocol';
 
 let failures = 0;
 const check = (label: string, ok: boolean, detail?: unknown): void => {
@@ -117,6 +119,69 @@ console.log('\n2. absent context renders nothing, oversized context is truncated
   const line = seen.split('\n').find((entry) => entry.includes('This prompt carries context')) ?? '';
   check('oversized context is truncated', line.includes('…[truncated at 4000 chars]'), line.length);
   check('and the truncated line is actually bounded', line.length < 4_200, line.length);
+}
+
+console.log('\n3. history capability honesty across the ACP 1.3 shapes');
+// `loadSession` stayed a top-level boolean in SDK 1.3.0; resume moved under
+// `sessionCapabilities`, where `{}` advertises and omitted/null decline. The
+// daemon's provenance claim ("history replays from the agent's own store")
+// is only true for agents that advertise load — these cases pin what each
+// shape actually gets.
+async function historyOf(caps: string): Promise<{ replayed: string | null; logs: LogEntry[] }> {
+  const logs: LogEntry[] = [];
+  const bridge = new McpBridge();
+  const runtime = new AcpRuntime({
+    command: process.execPath,
+    args: [fixture, caps],
+    bridge,
+    sink: (entry) => logs.push(entry),
+  });
+  await runtime.openSession({
+    surface: { name: 'History Check', origin: 'https://example.test' },
+    grant,
+    tools,
+    policy: { mayAsk: false, mayUseOwnTools: false },
+  });
+  const entries = await runtime.replayHistory();
+  await runtime.closeSession();
+  await bridge.stop();
+  return { replayed: entries === null ? null : entries.map((entry) => entry.text).join('|'), logs };
+}
+{
+  const load = await historyOf('{"loadSession":true}');
+  check(
+    'a loadSession agent replays from its own store',
+    load.replayed === 'earlier question|earlier answer',
+    load.replayed,
+  );
+}
+{
+  const resume = await historyOf('{"sessionCapabilities":{"resume":{}}}');
+  check('a resume-only agent falls back to the observed transcript', resume.replayed === null, resume.replayed);
+  check(
+    'and the fallback is a stated fact, not a silent degradation',
+    resume.logs.some((entry) => entry.level === 'info' && entry.message.includes('resumes without replay')),
+    resume.logs.map((entry) => entry.message).slice(-5),
+  );
+  check(
+    'no session/load was ever attempted at an agent that never advertised it',
+    !resume.logs.some((entry) => entry.message.includes('history load failed')),
+    resume.logs.map((entry) => entry.message).slice(-5),
+  );
+}
+{
+  // The doctor renders the same distinction: a resume-only agent's report
+  // must not promise a replay the agent cannot perform.
+  const probe = await probeAcpRuntime(
+    { command: process.execPath, args: [fixture, '{"sessionCapabilities":{"resume":{}}}'], cwd: process.cwd(), source: 'env' },
+    { sink: () => {} },
+  );
+  const lines = describeAcpProbe(probe, 'acp').join('\n');
+  check(
+    'doctor tells a resume-only agent the truth about reloads',
+    probe.ok && lines.includes('resumes without replay'),
+    probe.ok ? lines.split('\n').find((line) => line.includes('loadSession')) : probe,
+  );
 }
 
 clearTimeout(timer);

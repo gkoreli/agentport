@@ -157,6 +157,8 @@ export type AcpProbeResult =
       target: AcpSpawnTarget;
       protocolVersion: number;
       loadSession: boolean;
+      /** ACP 1.3 `sessionCapabilities.resume` — continue without replay. */
+      resume: boolean;
       agent?: string;
       authMethods: AcpAuthMethod[];
     }
@@ -326,6 +328,9 @@ export async function probeAcpRuntime(
         target,
         protocolVersion: init.protocolVersion,
         loadSession: init.agentCapabilities?.loadSession === true,
+        // `{}` advertises, omitted/null decline — the 1.3 sessionCapabilities
+        // convention, so `!= null` and never `=== true`.
+        resume: init.agentCapabilities?.sessionCapabilities?.resume != null,
         agent: agentLabel(init),
         authMethods: readAuthMethods(init.authMethods),
       }),
@@ -389,7 +394,13 @@ export function describeAcpProbe(result: AcpProbeResult, runtimeName: string): s
     if (result.agent) lines.push(`  agent        ${result.agent}`);
     lines.push(`  ACP version  ${result.protocolVersion}`);
     lines.push(
-      `  loadSession  ${result.loadSession ? 'yes — history replays from the agent’s own store' : 'no — a reload replays the daemon’s observed transcript instead'}`,
+      `  loadSession  ${
+        result.loadSession
+          ? 'yes — history replays from the agent’s own store'
+          : result.resume
+            ? 'no — it resumes without replay, so a reload shows the daemon’s observed transcript'
+            : 'no — a reload replays the daemon’s observed transcript instead'
+      }`,
     );
     lines.push('');
     lines.push('  The agent starts and speaks ACP.');
