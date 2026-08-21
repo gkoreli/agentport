@@ -10,6 +10,33 @@ they moved.
 
 ## Unreleased
 
+### The WebMCP belief moves to the 2026-08-19 draft, with positions instead of shrugs
+
+Re-verified against the live draft rather than assumed: `exposedTo` is now
+defined — a sequence of origin URLs scoping which DOCUMENTS may access a
+tool, not a roster of agent classes — and agent exposure remains a separate
+implementation-defined "observation" mechanism in which a user-supplied
+remote agent is not a named consumer class. Our harvest is same-document by
+construction (wrapping `registerTool`), which `exposedTo` does not scope,
+so forwarding it verbatim is now a verified position recorded on the field.
+The declarative section is still "entirely a TODO" in the spec's own words
+(the explainer PR is not a spec), so that refusal stands with fresh
+evidence; `executeTool()` gained a real signature, so its entry now refuses
+for the true reason — lending tools whose registration we never saw is its
+own decision, not a default.
+
+Two behaviors ship. A legacy MCP-B `CallToolResult` envelope returned by a
+page's execute callback is unwrapped in the one converter both harvesters
+share — text joins, `structuredContent` wins, `isError` becomes a FAILED
+call instead of a success-shaped blob, and anything with media or unknown
+item types passes through untouched, because normalizing what we do not
+understand is repair. And a `toolchange` after the harvest snapshot is
+surfaced as staleness (only after — registrations during page load are just
+a page loading), with the TODO keyed to the `grant.update` frame the change
+cannot reach a live grant without. Every changed belief has a harvest-check
+case watched failing; the isError sabotage also caught the check itself
+crashing instead of failing, which was the check's bug, not the code's.
+
 ### A lent toolset that never becomes real is now said out loud
 
 The MCP dialect question was answered by verification, not migration: the

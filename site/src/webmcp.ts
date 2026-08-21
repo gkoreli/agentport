@@ -51,8 +51,26 @@ function modelContext(environment: WebMcpEnvironment): ModelContextLike | undefi
   return isRecord(legacy) ? (legacy as ModelContextLike) : undefined;
 }
 
-export function createWebMcpHarvester(environment: WebMcpEnvironment): WebMcpHarvester {
-  const registry = createWebMcpRegistry({ logger: log });
+export function createWebMcpHarvester(
+  environment: WebMcpEnvironment,
+  options: { logger?: ReturnType<typeof createLogger> } = {},
+): WebMcpHarvester {
+  const logger = options.logger ?? log;
+  let harvested = false;
+  const registry = createWebMcpRegistry({
+    logger,
+    onChange: () => {
+      // Registrations while the page loads are ordinary; a change AFTER the
+      // snapshot was taken means the lent set is stale for as long as the
+      // session lives. Surfaced rather than silent — and it can go no
+      // further: the session grant is frozen at attach, until the
+      // `grant.update` frame (protocol v7) gives a change somewhere to go.
+      if (!harvested) return;
+      logger.info('webmcp tools changed after harvest; the session grant is frozen until grant.update lands', {
+        data: { tools: registry.size() },
+      });
+    },
+  });
 
   const observe = (): void => {
     const context = modelContext(environment);
@@ -67,6 +85,7 @@ export function createWebMcpHarvester(environment: WebMcpEnvironment): WebMcpHar
   return {
     harvest(explicit = []) {
       observe();
+      harvested = true;
       const merged = new Map<string, SiteTool>();
       for (const tool of registry.tools()) merged.set(tool.name, tool);
       // The site's own `connect()` tools win a name collision: those came from

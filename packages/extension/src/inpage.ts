@@ -453,6 +453,11 @@ function mergeWebMcpTools(explicit: readonly SiteTool[]): SiteTool[] {
 }
 
 function publishWebMcpTools(): void {
+  // This keeps the WORKER's picture of the page current on every toolchange;
+  // it does not and cannot reach a live session's grant, which is frozen at
+  // attach. TODO(grant.update, protocol v7): when that frame lands, a change
+  // arriving here after attachment is what should drive the narrowing (free)
+  // or the re-consented widening — never a second reconciliation path here.
   send({
     t: 'webmcp.tools',
     tools: webmcp.tools().map(({ handler: _handler, ...definition }) => definition),

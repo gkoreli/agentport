@@ -24,6 +24,7 @@ export {
   WEBMCP,
   WEBMCP_NOT_IMPLEMENTED,
   createWebMcpRegistry,
+  normalizeToolResult,
   readRegistration,
   toSiteTool,
   type ModelContextLike,

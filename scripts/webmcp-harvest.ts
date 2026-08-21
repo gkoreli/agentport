@@ -27,6 +27,7 @@ import {
   WEBMCP,
   WEBMCP_NOT_IMPLEMENTED,
   createWebMcpRegistry,
+  normalizeToolResult,
   readRegistration,
   type ModelContextLike,
 } from '../packages/client/src/webmcp.js';
@@ -449,7 +450,7 @@ console.log('\n10. the recorded gaps are real gaps');
   const harvested = registry.tools();
   await deadline(Promise.resolve(harvested[0]?.handler({})), 'handler through the page');
   check(
-    'executeTool() is never called — Chrome-only, and the draft gives no signature',
+    'executeTool() is never called — specified now, but lending unseen registrations is its own decision',
     executeToolCalls === 0,
     { executeToolCalls },
   );
@@ -460,6 +461,92 @@ console.log('\n10. the recorded gaps are real gaps');
   );
   console.log('  recorded gaps (ADR-006):');
   for (const gap of WEBMCP_NOT_IMPLEMENTED) console.log(`    · ${gap}`);
+}
+
+// ---------------------------------------------------------------------------
+console.log('\n11. a legacy MCP-B envelope is unwrapped, not forwarded as data');
+// ---------------------------------------------------------------------------
+//
+// Sites from the MCP-B era return CallToolResult envelopes from execute();
+// forwarding the envelope made the agent reason about a transport wrapper —
+// a silent degradation on exactly the population that adopted earliest. Only
+// shapes we can normalize without guessing are touched.
+{
+  const registry = createWebMcpRegistry();
+  const shim = registry.shim('https://site.example') as ModelContextLike;
+  const outcomes = new Map<string, unknown>([
+    ['env.text', { content: [{ type: 'text', text: 'plain answer' }] }],
+    ['env.multi', { content: [{ type: 'text', text: 'line one' }, { type: 'text', text: 'line two' }] }],
+    ['env.structured', { content: [{ type: 'text', text: 'shadow' }], structuredContent: { total: 7 } }],
+    ['env.error', { content: [{ type: 'text', text: 'the cart is locked' }], isError: true }],
+    ['env.media', { content: [{ type: 'image', data: 'AAAA', mimeType: 'image/png' }] }],
+    ['env.plain', { text: 'not an envelope' }],
+  ]);
+  for (const [name, outcome] of outcomes) {
+    await deadline(
+      Promise.resolve(shim.registerTool?.(tool({ name, execute: () => outcome }))),
+      `register ${name}`,
+    );
+  }
+  await deadline(settled(), 'envelope registrations');
+  // async, not Promise.resolve(call): a handler that throws SYNCHRONOUSLY is
+  // legitimate (that is what isError normalizes into when execute returned a
+  // plain value), and only an async wrapper turns that into a rejection the
+  // deadline can race instead of a crash before any promise exists.
+  const run = async (name: string) => registry.get(name)?.handler({});
+
+  check('an all-text envelope yields its text', (await deadline(run('env.text'), 'env.text')) === 'plain answer');
+  check('multiple text items join as lines', (await deadline(run('env.multi'), 'env.multi')) === 'line one\nline two');
+  check(
+    'structuredContent wins over the text shadow',
+    JSON.stringify(await deadline(run('env.structured'), 'env.structured')) === '{"total":7}',
+  );
+  let thrown = '';
+  await deadline(run('env.error'), 'env.error').catch((err: unknown) => {
+    thrown = err instanceof Error ? err.message : String(err);
+  });
+  check('isError becomes a FAILED call, not a success-shaped blob', thrown === 'the cart is locked', thrown);
+  const media = await deadline(run('env.media'), 'env.media');
+  check(
+    'a media envelope passes through untouched — normalizing the unknown is repair',
+    JSON.stringify(media) === JSON.stringify(outcomes.get('env.media')),
+    media,
+  );
+  const plain = await deadline(run('env.plain'), 'env.plain');
+  check('a non-envelope result is untouched', JSON.stringify(plain) === '{"text":"not an envelope"}', plain);
+  // The pure function is exported for exactly this direct case: a thrown
+  // error must not depend on the handler plumbing above.
+  check(
+    'normalizeToolResult is identity on arrays',
+    JSON.stringify(normalizeToolResult([1, 2])) === '[1,2]',
+  );
+}
+
+// ---------------------------------------------------------------------------
+console.log('\n12. a change after harvest is surfaced, and goes no further');
+// ---------------------------------------------------------------------------
+//
+// The grant is a snapshot at attach; until the grant.update frame exists a
+// later registration cannot reach a live session. Silent staleness is the
+// invisible-diminishment shape, so the harvester says it out loud — and only
+// AFTER a harvest, because registrations during page load are just a page
+// loading.
+{
+  const { logger, lines } = recorder();
+  const context: ModelContextLike = { registerTool: () => Promise.resolve(undefined) };
+  const harvester = createWebMcpHarvester({ document: { modelContext: context } }, { logger });
+  void context.registerTool?.(tool({ name: 'doc.early' }));
+  await deadline(settled(), 'pre-harvest registration');
+  check(
+    'a registration during page load is not stale-flagged',
+    !lines.some((line) => line.message.includes('frozen until grant.update')),
+    lines.map((line) => line.message),
+  );
+  harvester.harvest();
+  void context.registerTool?.(tool({ name: 'doc.late', description: 'Registered after attach' }));
+  await deadline(settled(), 'post-harvest registration');
+  const stale = lines.find((line) => line.message.includes('frozen until grant.update'));
+  check('a registration after harvest is surfaced as staleness', stale !== undefined && stale.level === 'info', lines.map((line) => line.message));
 }
 
 console.log(failures === 0 ? `\nWebMCP harvest passed (draft ${WEBMCP.draft})` : `\n${failures} failed`);

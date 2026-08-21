@@ -18,7 +18,7 @@
  * wiring.
  *
  * Written against the Web Machine Learning Community Group draft dated
- * **2026-07-28** (https://webmachinelearning.github.io/webmcp/), reviewed in
+ * **2026-08-19** (https://webmachinelearning.github.io/webmcp/), reviewed in
  * `docs/reviews/webmcp-conformance.md`. That document is a Draft Community
  * Group Report: not a W3C Recommendation, not on the standards track, shipped
  * experimentally in Chrome only, WebKit opposed, Mozilla neutral. It moves —
@@ -26,7 +26,14 @@
  * 2026-03-26, `title` + MCP-compatible names 2026-04-09, `untrustedContentHint`
  * 2026-04-23, the getter moved to `Document` 2026-05-27, `registerTool()`
  * became promise-returning 2026-06-08, `ModelContextClient` removed
- * 2026-06-11.
+ * 2026-06-11. Re-verified against the live draft on 2026-08-20: `exposedTo`
+ * is now defined (a sequence of origin URLs scoping which DOCUMENTS may
+ * access a tool, default same-origin — not a roster of agent classes),
+ * `executeTool()` gained a full signature, and the declarative section is
+ * still "entirely a TODO" in the spec's own words, with only an explainer PR
+ * behind it. Notably, tool exposure to AGENTS is a separate
+ * implementation-defined "observation" mechanism, and no consumer class for
+ * a user-supplied remote agent exists anywhere in the document.
  *
  * Read `WEBMCP` below for the machine-readable half of the belief, and
  * `WEBMCP_NOT_IMPLEMENTED` for the parts we knowingly do not do. Nothing in
@@ -48,7 +55,7 @@ import type { SiteTool, ToolHandler } from './session.js';
  */
 export const WEBMCP = Object.freeze({
   /** The draft revision this file was written against. */
-  draft: '2026-07-28',
+  draft: '2026-08-19',
   /** Where the model context lives now. */
   getter: 'document.modelContext',
   /** Where it used to live. Chrome deprecated this in 150; sites still use it. */
@@ -74,14 +81,13 @@ export const WEBMCP = Object.freeze({
  * Kept beside `WEBMCP` so the honest claim in ADR-006 has exactly one source.
  */
 export const WEBMCP_NOT_IMPLEMENTED = Object.freeze([
-  'declarative WebMCP — the draft marks its own section TODO',
-  'executeTool() — Chrome-only, ahead of the CG IDL, and the draft does not give its signature',
-  'getTools() as a source of lendable tools — RegisteredTool carries no execute callback',
-  'exposedTo / fromOrigins / the `tools` Permissions Policy — cross-origin frame trees',
+  'declarative WebMCP — §4.3 is still "entirely a TODO" in the 2026-08-19 draft; the explainer PR is not a spec',
+  'executeTool() — specified as of 2026-08-19, but calling it means lending tools whose registration we never saw; that is its own decision, not a default (see getTools)',
+  'getTools() as a source of lendable tools — RegisteredTool carries no execute callback; native executeTool() now makes lending them expressible, and it is deliberately undecided rather than assumed',
+  'exposedTo / fromOrigins / the `tools` Permissions Policy — exposedTo scopes which DOCUMENTS access a tool (a sequence of origin URLs, default same-origin; verified 2026-08-19); we harvest same-document only, which it does not scope, and cross-origin frame trees remain a consent model we have not built',
   'per-tool owner origin and window in the grant — ToolDefinition has no field for them',
-  'title and untrustedContentHint in the grant — ToolDefinition has no field for them',
-  'live grant reconciliation — a session grant is a snapshot taken at attach time',
-  'MCP CallToolResult normalisation — a legacy MCP-B envelope is forwarded as data',
+  'title and untrustedContentHint in the grant — ToolDefinition has no field for them (protocol v7 candidates; when they land, untrustedContentHint may only RAISE scrutiny, and readOnlyHint stays read by nobody)',
+  'live grant reconciliation — a session grant is a snapshot taken at attach time; toolchange after attach is surfaced, and cannot reach a live grant until the grant.update frame exists',
 ] as const);
 
 /** The two annotations the current draft defines. Recorded; never authorising. */
@@ -107,7 +113,18 @@ export interface WebMcpTool {
  */
 export interface WebMcpRegisterOptions {
   readonly signal?: AbortSignal;
-  /** Forwarded verbatim, never interpreted: see WEBMCP_NOT_IMPLEMENTED. */
+  /**
+   * Forwarded verbatim, never interpreted — and that is now a verified
+   * position rather than a shrug. The 2026-08-19 draft defines `exposedTo`
+   * as a sequence of origin URLs scoping which DOCUMENTS may access the
+   * tool (default: same-origin only). It does not address agents at all:
+   * tool exposure to an agent is a separate, implementation-defined
+   * "observation" mechanism, and a user-supplied remote agent reached
+   * through an extension is not a consumer class the spec names. We harvest
+   * from inside the SAME document by wrapping `registerTool`, so nothing we
+   * lend crosses the boundary `exposedTo` scopes — and interpreting it here
+   * would be inventing semantics the page aimed at other documents.
+   */
   readonly exposedTo?: unknown;
 }
 
@@ -264,8 +281,51 @@ export function toSiteTool(registration: WebMcpRegistration): SiteTool {
     description: registration.description,
     inputSchema: registration.inputSchema,
     requiresApproval: true,
-    handler: registration.execute,
+    handler: (input) => {
+      const outcome = registration.execute(input);
+      return isThenable(outcome)
+        ? Promise.resolve(outcome).then(normalizeToolResult)
+        : normalizeToolResult(outcome);
+    },
   };
+}
+
+/**
+ * Unwrap a legacy MCP-B `CallToolResult` envelope, when a handler returns one.
+ *
+ * Sites written against MCP-B (the pre-WebMCP extension polyfill era) return
+ * `{content: [{type:'text', text}], structuredContent?, isError?}` from their
+ * execute callbacks, because that is what MCP servers return. Forwarding the
+ * envelope as data meant the agent reasoned about a transport wrapper instead
+ * of the answer — those sites silently degraded rather than failing. This
+ * lives HERE, on the one converter both harvesters share, so the belief has
+ * one home (the drift that motivated this file).
+ *
+ * Deliberately narrow: only a shape we can normalize without guessing is
+ * touched. `structuredContent` wins when present (it is the machine half),
+ * an all-text `content` list joins to its text, and `isError: true` becomes
+ * a THROWN error so the agent sees a failed call rather than a success-shaped
+ * blob. Anything else — media entries, unknown item types — passes through
+ * unchanged, because normalizing what we do not understand is repair, and
+ * this file refuses rather than repairs.
+ */
+export function normalizeToolResult(result: unknown): unknown {
+  if (!isRecord(result)) return result;
+  const content = result['content'];
+  if (!Array.isArray(content)) return result;
+  const texts: string[] = [];
+  for (const entry of content) {
+    if (!isRecord(entry) || entry['type'] !== 'text' || typeof entry['text'] !== 'string') return result;
+    texts.push(entry['text']);
+  }
+  const text = texts.join('\n');
+  if (result['isError'] === true) {
+    // Page-authored text on the same footing as any site tool's own error.
+    throw new Error(text.length > 0 ? text : 'the tool reported an error');
+  }
+  const structured = result['structuredContent'];
+  if (isRecord(structured)) return structured;
+  return text;
 }
 
 // ---------------------------------------------------------------------------
