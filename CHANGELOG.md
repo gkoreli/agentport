@@ -10,6 +10,32 @@ they moved.
 
 ## Unreleased
 
+### A live grant can be reconciled — narrowing freely, widening only with fresh authority
+
+The capability grant froze at attach time: a WebMCP `toolchange` had no
+channel to the agent, and a same-origin navigation left the daemon believing
+the OLD document's toolset. `grant.update`/`grant.updated` (sealed, v7)
+carry a replacement grant with snapshot semantics, and ONE asymmetry is the
+entire boundary: a pure narrowing — fewer tools, more gates, earlier expiry
+— needs nothing beyond being the session's authenticated client, while
+anything `grantWiderThan` cannot prove is a narrowing needs fresh authority.
+A delegated page must present a fresh user-signed delegation whose
+`grantHash` covers exactly the new grant (the same replay-proofing the open
+path uses); the connect tier is refused outright; the user's own key answers
+for itself. A changed description or input schema under an approved name
+counts as WIDER, because the model reads both and a mutation is a new
+capability wearing an approved name. The daemon rebuilds
+`AttachmentAuthority` (same `openedAt` — the attachment identity continues,
+so tombstones still bind) and the runtime adopts the new set BEFORE anything
+commits: `McpBridge#update` swaps the tool list under the same URL and
+bearer token and notifies via `listChanged`, and a runtime that cannot adopt
+refuses the whole update so enforcement and the agent's view never disagree.
+The client commits its own table only on the ack. Watched failing: judging
+every update as a narrowing lets a page and a connect widget widen their own
+grants — exactly the three e2e checks that exist to refuse it. The
+compiler-total AG-UI subscription guard from the previous batch fired on
+this change's new session event, which is that guard earning its keep.
+
 ### A prompt can carry images — upload direction only, and bounded as one budget
 
 "Look at this" is the first thing a user tries, and until v7 the entire

@@ -20,6 +20,7 @@ import {
   jsonValue,
   randomId,
   toErr,
+  CapabilityGrant as CapabilityGrantSchema,
   type ApprovalRequest,
   type AuthorityDomain,
   type FormField,
@@ -29,6 +30,7 @@ import {
   type Logger,
   type PlanStep,
   type PromptImage,
+  type SessionDelegation,
   type SessionFrame,
   type SurfaceDescriptor,
   type ToolDefinition,
@@ -129,6 +131,8 @@ export type SessionEvents = {
   done: { promptId: string; stopReason: string; error?: string };
   tool: { name: string; arguments: Record<string, unknown>; ok: boolean; result?: unknown; error?: string };
   approval: ApprovalPrompt & { granted: boolean };
+  /** The attachment's grant was replaced by an accepted `grant.update` (v7). */
+  grant: { grant: CapabilityGrant };
   closed: { reason: string };
 };
 
@@ -204,7 +208,11 @@ export interface AgentSessionHandle {
 export class AgentSession extends Emitter<SessionEvents> implements AgentSessionHandle {
   readonly id: string;
   readonly surface: SurfaceDescriptor;
-  readonly grant: CapabilityGrant;
+
+  /** Follows the live attachment: an accepted `grant.update` replaces it. */
+  get grant(): CapabilityGrant {
+    return this.#grant;
+  }
 
   /** The page holds this handle across a reconnect, so what it reports must
    *  follow the live attachment rather than the one that died. */
@@ -212,8 +220,10 @@ export class AgentSession extends Emitter<SessionEvents> implements AgentSession
     return this.#info;
   }
 
+  #grant: CapabilityGrant;
   #tools: Map<string, SiteTool>;
   #decide: ApprovalDecider;
+  #grantUpdates = new Map<string, { deferred: Deferred<void>; grant: CapabilityGrant; tools: SiteTool[] }>();
   #log: Logger;
   #send: (frame: SessionFrame) => void;
   #transcripts = new Map<string, { text: string; deferred: Deferred<string> }>();
@@ -236,7 +246,7 @@ export class AgentSession extends Emitter<SessionEvents> implements AgentSession
     super();
     this.id = init.id;
     this.surface = init.surface;
-    this.grant = init.grant;
+    this.#grant = init.grant;
     this.#info = init.info;
     this.#tools = new Map(init.tools.map((tool) => [tool.name, tool]));
     this.#decide = init.decide;
@@ -317,6 +327,61 @@ export class AgentSession extends Emitter<SessionEvents> implements AgentSession
   }
 
   /**
+   * Reconcile this attachment's grant with what the page NOW declares (v7).
+   *
+   * Snapshot semantics: the built grant replaces the session's. The daemon
+   * judges the asymmetry — a pure narrowing needs nothing, a widening needs
+   * `delegation` (a fresh user-signed authority covering the new grant) on
+   * the delegated tier and is refused outright on the connect tier. Resolves
+   * when the agent side has adopted the new set; rejects with the daemon's
+   * closed refusal reason, or after the deadline — an unanswered update must
+   * surface as a failure, never hang, and never half-apply: the local tool
+   * table only changes on the ack.
+   */
+  updateGrant(request: {
+    tools: SiteTool[];
+    alwaysAsk?: string[];
+    expiresAt?: number;
+    delegation?: SessionDelegation;
+  }): Promise<void> {
+    if (this.#closed) return Promise.reject(new Error('session is closed'));
+    // Validated with the wire's own schema BEFORE sealing (a sealed frame the
+    // daemon rejects is session-fatal), handlers stripped exactly as the open
+    // path strips them.
+    let grant: CapabilityGrant;
+    try {
+      grant = CapabilityGrantSchema(
+        {
+          tools: request.tools.map(({ handler: _handler, ...definition }) => definition),
+          alwaysAsk: request.alwaysAsk ?? [],
+          expiresAt: request.expiresAt ?? this.#grant.expiresAt,
+        },
+        'grant',
+      ) as CapabilityGrant;
+    } catch (err) {
+      const code = err instanceof WireViolation ? `${err.code} at ${err.path}` : 'invalid';
+      return Promise.reject(new Error(`updated grant is not valid (${code})`));
+    }
+    const id = randomId('gu_');
+    const deferred = new Deferred<void>();
+    this.#grantUpdates.set(id, { deferred, grant, tools: request.tools });
+    // The round trip includes the runtime re-registering tools with a live
+    // agent, so this is generous — but bounded, because a lost ack otherwise
+    // parks the page's reconciliation forever (never hang).
+    const timer = setTimeout(() => {
+      if (this.#grantUpdates.delete(id)) deferred.reject(new Error('grant update timed out'));
+    }, 30_000);
+    this.#send({
+      t: 'grant.update',
+      s: this.id,
+      id,
+      grant,
+      ...(request.delegation ? { delegation: request.delegation } : {}),
+    });
+    return deferred.promise.finally(() => clearTimeout(timer));
+  }
+
+  /**
    * Ask the agent for the conversation it already has.
    *
    * The site deliberately keeps no transcript of its own across reloads: the
@@ -391,6 +456,10 @@ export class AgentSession extends Emitter<SessionEvents> implements AgentSession
       waiter.reject(new Error('session reconnected: history request lost its answer'));
     }
     this.#historyWaiters = [];
+    for (const pending of this.#grantUpdates.values()) {
+      pending.deferred.reject(new Error('session reconnected: grant update lost its answer; retry it'));
+    }
+    this.#grantUpdates.clear();
     this.emit('reattached', { verify: info.verify });
   }
 
@@ -441,6 +510,24 @@ export class AgentSession extends Emitter<SessionEvents> implements AgentSession
         this.#historyWaiters.shift()?.resolve(frame.entries);
         return;
       }
+      case 'grant.updated': {
+        const pending = this.#grantUpdates.get(frame.id);
+        // Delete-before-resolve: the same single-winner interlock as the
+        // daemon's consent maps, so a replayed ack or a timeout race cannot
+        // settle twice.
+        if (!pending || !this.#grantUpdates.delete(frame.id)) return;
+        if (!frame.ok) {
+          pending.deferred.reject(new Error(`grant update refused: ${frame.reason ?? 'unspecified'}`));
+          return;
+        }
+        // Commit ONLY on the ack, so this table and the daemon's enforcement
+        // change together or not at all.
+        this.#grant = pending.grant;
+        this.#tools = new Map(pending.tools.map((tool) => [tool.name, tool]));
+        this.emit('grant', { grant: pending.grant });
+        pending.deferred.resolve();
+        return;
+      }
       case 'tool.call':
         return this.#onToolCall(frame);
       case 'approval.request':
@@ -451,7 +538,7 @@ export class AgentSession extends Emitter<SessionEvents> implements AgentSession
       default:
         /* A frame that reached here and matched nothing is DROPPED, and this
        * is the only place that can say so. Not a `never` default: these routers
-       * are deliberately partial over the 45-frame union — an endpoint receives
+       * are deliberately partial over the 47-frame union — an endpoint receives
        * a subset, and AGENTS.md warns against making the origination sets total
        * because partial is what makes them fail-closed. So the guard is
        * visibility, not exhaustiveness.
@@ -591,6 +678,8 @@ export class AgentSession extends Emitter<SessionEvents> implements AgentSession
     this.#transcripts.clear();
     for (const waiter of this.#historyWaiters) waiter.reject(new Error(`session closed: ${reason}`));
     this.#historyWaiters = [];
+    for (const pending of this.#grantUpdates.values()) pending.deferred.reject(new Error(`session closed: ${reason}`));
+    this.#grantUpdates.clear();
     this.emit('closed', { reason });
   }
 }

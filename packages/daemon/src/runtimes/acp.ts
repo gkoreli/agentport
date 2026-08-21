@@ -13,7 +13,7 @@ import {
   type McpServer,
   type SessionNotification,
 } from '@agentclientprotocol/sdk';
-import { createLogger, type HistoryEntry, type Logger, type LogSink } from '@agentport/protocol';
+import { createLogger, type HistoryEntry, type Logger, type LogSink, type ToolDefinition } from '@agentport/protocol';
 import type { AgentRuntime, AttachmentPolicy, TurnContext } from '../runtime.js';
 import type { FormField } from '@agentport/protocol';
 import { McpBridge, mcpToolName } from '../mcp-bridge.js';
@@ -477,6 +477,18 @@ export class AcpRuntime implements AgentRuntime {
     } finally {
       this.#replay = undefined;
     }
+  }
+
+  /**
+   * The daemon accepted a `grant.update`; adopt it. The bridge swap is
+   * token- and URL-preserving, so the agent keeps the endpoint it was handed
+   * and merely re-lists. A throw here refuses the whole update upstream —
+   * the daemon keeps the old grant, so enforcement and the agent's view
+   * cannot disagree.
+   */
+  updateTools(context: { tools: ToolDefinition[] }): void {
+    if (!this.#bridgeSessionId) throw new Error('ACP session was never opened');
+    this.#options.bridge.update(this.#bridgeSessionId, context.tools);
   }
 
   async closeSession(): Promise<void> {

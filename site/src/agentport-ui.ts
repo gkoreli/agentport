@@ -295,6 +295,12 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
               ...pendingAsks.value,
               { id: ++askCardSeq, question: event.value, picked: signal(new Map<string, string[]>()) },
             ];
+          } else if (event.name === 'agentport.grant') {
+            // The attachment's toolset changed under the session (v7). Said
+            // out loud for the same reason ownTools is rendered: a grant that
+            // silently shrank is the invisible diminishment this repo keeps
+            // re-learning, and the user is the only party who can act on it.
+            notice.value = `grant updated · ${event.value.toolNames.length} tool${event.value.toolNames.length === 1 ? '' : 's'} lent`;
           } else if (event.name === 'agentport.reattached') {
             // Say it out loud. The connection dropped and came back on FRESH
             // sealing keys, so anyone who compared fingerprint words has new

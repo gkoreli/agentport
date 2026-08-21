@@ -3665,6 +3665,120 @@ console.log('\n24. page context reaches the runtime turn');
   await r24.close();
 }
 
+// 25. grant.update (v7): a live grant reconciles under the session, and the
+// asymmetry is the boundary — NARROWING is the client tidying up after its
+// own page and needs nothing; WIDENING is new authority and has an owner.
+// A page that could widen its own grant mid-session would have repealed
+// invariant 2 with a frame.
+{
+  const gOrigin = 'https://reconcile.test';
+  const gKeys = generateKeyPair();
+  const gWallet = new AgentWallet({ relayUrl, userSecretKey: gKeys.secretKey, socketFactory });
+  await gWallet.connect();
+  const bothTools = inkwellTools();
+  const readOnly = bothTools.filter((tool) => tool.name === 'inkwell.document.read');
+  const gGrant = buildGrant({ surface: { name: 'Reconcile' }, tools: bothTools });
+  const gDelegation = signDelegation(user.secretKey, {
+    delegate: gKeys.publicKey,
+    agent: agentKeys.publicKey,
+    origin: gOrigin,
+    grantHash: hashGrant(gGrant),
+    issuedAt: Date.now(),
+    expiresAt: Date.now() + 8 * 60 * 60 * 1000,
+  });
+  const gSession = await gWallet.openSession({
+    agent: agentKeys.publicKey,
+    approved: { delegation: gDelegation, grant: gGrant },
+    surface: { name: 'Reconcile', origin: gOrigin },
+    tools: bothTools,
+    decide: () => true,
+  });
+
+  // NARROW: drop the write tool. No new signature, and the very next turn
+  // sees the smaller toolset — the agent has no way to write and says so.
+  await gSession.updateGrant({ tools: readOnly });
+  check('a narrowing update needs no fresh authority', gSession.grant.tools.length === 1, gSession.grant.tools);
+  doc.text = 'Untouchable.';
+  await gSession.prompt('Add a line.');
+  check(
+    'the narrowed grant binds the very next turn',
+    doc.text === 'Untouchable.',
+    doc.text,
+  );
+
+  // WIDEN without authority: refused with the closed reason, and nothing
+  // about the session changes.
+  const refused = await gSession
+    .updateGrant({ tools: bothTools })
+    .then(() => 'accepted', (err: Error) => err.message);
+  check('a widening update without a delegation is refused', refused.includes('authorization_required'), refused);
+  check('and the refused widen left the grant untouched', gSession.grant.tools.length === 1, gSession.grant.tools);
+
+  // WIDEN with a FRESH user-signed delegation covering exactly the new
+  // grant: this is re-consent, the same shape as the original approval.
+  const widened = buildGrant({ surface: { name: 'Reconcile' }, tools: bothTools });
+  const freshDelegation = signDelegation(user.secretKey, {
+    delegate: gKeys.publicKey,
+    agent: agentKeys.publicKey,
+    origin: gOrigin,
+    grantHash: hashGrant(widened),
+    issuedAt: Date.now(),
+    expiresAt: Date.now() + 8 * 60 * 60 * 1000,
+  });
+  await gSession.updateGrant({ tools: bothTools, expiresAt: widened.expiresAt, delegation: freshDelegation });
+  check('a widening update under a covering delegation is accepted', gSession.grant.tools.length === 2, gSession.grant.tools);
+  await gSession.prompt('Write it back.');
+  check('the widened grant is live on the next turn', doc.text.endsWith('Write it back.'), doc.text);
+  gSession.close();
+  gWallet.close();
+
+  // The DIRECT tier: the client IS the user's key, so widening is the user
+  // answering for themselves — same self-referential argument as consent.
+  const directSession = await wallet.openSession({
+    agent: agentKeys.publicKey,
+    surface: { name: 'Direct Reconcile', origin: 'https://direct-reconcile.test' },
+    tools: readOnly,
+    decide: () => true,
+  });
+  await directSession.updateGrant({ tools: inkwellTools() });
+  check('the user own key may widen without a delegation', directSession.grant.tools.length === 2, directSession.grant.tools);
+  directSession.close();
+
+  // The CONNECT tier: an authority-free page key may narrow, never widen —
+  // there is no re-consent surface mid-session, so the refusal is outright.
+  const c25 = generateKeyPair();
+  const connectDaemon25 = new AgentDaemon({
+    relayUrl,
+    identity: { publicKey: c25.publicKey, secretKey: c25.secretKey, name: 'Reconcile Terminal', runtime: 'demo-writer' },
+    createRuntime: () => new DemoWriterRuntime(),
+    onConnectOffer: async () => true,
+    sink: () => {},
+  });
+  await connectDaemon25.start();
+  const connectWallet25 = new AgentWallet({ relayUrl, userSecretKey: generateKeyPair().secretKey, socketFactory });
+  await connectWallet25.connect();
+  const offer25 = await connectWallet25.beginConnect({
+    surface: { name: 'Reconcile Widget', origin: gOrigin },
+    tools: readOnly,
+    decide: () => true,
+  });
+  connectDaemon25.claimConnect(offer25.code);
+  const connectSession25 = await offer25.accepted;
+  const connectRefused = await connectSession25
+    .updateGrant({ tools: inkwellTools() })
+    .then(() => 'accepted', (err: Error) => err.message);
+  check(
+    'a connect-tier page can never widen its own grant',
+    connectRefused.includes('authorization_required'),
+    connectRefused,
+  );
+  await connectSession25.updateGrant({ tools: [] });
+  check('but it may still narrow', connectSession25.grant.tools.length === 0, connectSession25.grant.tools);
+  connectSession25.close();
+  connectWallet25.close();
+  await connectDaemon25.stop();
+}
+
 // --- teardown ---------------------------------------------------------------
 
 session.close();

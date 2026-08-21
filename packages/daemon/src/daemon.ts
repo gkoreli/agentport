@@ -37,6 +37,7 @@ import {
   createLogger,
   deriveSealChannel,
   delegationAuthorizes,
+  grantWiderThan,
   fingerprintWords,
   generateSealKeyPair,
   hashCall,
@@ -58,6 +59,7 @@ import {
   type AuthorityDomain,
   type CapabilityGrant,
   type Frame,
+  type GrantUpdateDenial,
   type HistoryEntry,
   type KeyPair,
   type Logger,
@@ -149,8 +151,12 @@ interface SessionState {
    * spellings. Built once at open and NOT rebuilt on resume: a resume is the
    * same attachment returning, so its grant, its delegation and the instant
    * its authority began are all unchanged.
+   *
+   * Mutable for exactly one writer: an accepted `grant.update` replaces the
+   * boundary object wholesale (same `openedAt` — the attachment identity
+   * continues; new grant, and a new delegation when one authorised a widen).
    */
-  readonly authority: AttachmentAuthority;
+  authority: AttachmentAuthority;
   /** Where this attachment's consent actually lands (ADR-024 R12). */
   readonly routing: ConsentRouting;
   runtime: AgentRuntime;
@@ -824,6 +830,9 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
         return;
       }
 
+      case 'grant.update':
+        return this.#onGrantUpdate(frame);
+
       case 'prompt':
         return this.#onPrompt(frame);
 
@@ -1311,6 +1320,111 @@ export class AgentDaemon extends Emitter<DaemonEvents> {
       sessionId: frame.s,
       data: { surface: frame.surface.name, origin: frame.surface.origin, toolCount: session.tools.length },
     });
+  }
+
+  /**
+   * The client reconciles this attachment's grant (v7). Snapshot semantics —
+   * the carried grant replaces the session's — judged by ONE asymmetry:
+   *
+   *   NARROWING is the client tidying up after its own page (a WebMCP
+   *   `toolchange`, a navigation) and needs nothing beyond being the
+   *   session's authenticated client.
+   *
+   *   WIDENING is new authority, and authority has an owner. The delegated
+   *   tier must present a fresh user-signed delegation whose `grantHash`
+   *   covers exactly this grant — the same replay-proofing the open path
+   *   uses (ADR-022 R1). The connect tier is refused outright: its client is
+   *   an authority-free page key, and the terminal consent that opened it
+   *   has no mid-session re-consent surface. The direct tier is the user's
+   *   own key answering for itself — the same self-referential argument as
+   *   `#consentRouting`, and the same trust the original open extended.
+   *
+   * Nothing commits until everything holds: the candidate authority is
+   * judged (which re-reads the tombstones) and the RUNTIME adopts the new
+   * tool set BEFORE session state changes, because the enforced boundary and
+   * the agent's view must never disagree about which grant is live. A
+   * runtime that cannot adopt refuses the whole update and keeps the old
+   * grant on both sides.
+   */
+  async #onGrantUpdate(frame: Extract<Frame, { t: 'grant.update' }>): Promise<void> {
+    const session = this.#sessions.get(frame.s);
+    if (!session) return;
+    const refuse = (reason: GrantUpdateDenial): void => {
+      this.#log.warn('refused a grant update', { sessionId: frame.s, data: { reason } });
+      this.#sendSession(session, { t: 'grant.updated', s: frame.s, id: frame.id, ok: false, reason });
+    };
+    const now = this.#now();
+    // An attachment must still BE an authority before it may reshape one.
+    const current = this.#authorityError(session);
+    if (current) return refuse(current.reason);
+    if (frame.grant.expiresAt <= now) return refuse(SESSION_DENIAL_REASONS.grant_expired);
+
+    let nextDelegation = session.delegation;
+    if (grantWiderThan(frame.grant, session.grant)) {
+      if (session.viaConnect) return refuse('authorization_required');
+      if (session.delegation) {
+        const cert = this.#options.identity.cert;
+        const delegation = frame.delegation;
+        if (!delegation) return refuse('authorization_required');
+        // The same judge as the open path, same clauses, fresh clock — and
+        // the grant it must commit to is the NEW one.
+        const denial = cert
+          ? delegationAuthorizes(delegation, {
+              owner: cert.user,
+              agent: this.#options.identity.publicKey,
+              delegate: session.clientKey,
+              origin: session.surface.origin,
+              grant: frame.grant,
+              now,
+            })
+          : 'sig';
+        if (denial) {
+          this.#log.warn('refused a widening grant update', { sessionId: frame.s, data: { denial } });
+          return refuse('bad_delegation');
+        }
+        nextDelegation = delegation;
+      } else if (frame.delegation) {
+        // A direct-key session needs no delegation and gets no judgement of
+        // one — silently honouring it would let an unjudged object become
+        // session state later.
+        this.#log.debug('ignoring a delegation on a direct-key grant update', { sessionId: frame.s });
+      }
+    }
+
+    // The candidate boundary, judged before anything commits. Same openedAt:
+    // the attachment identity continues, so a tombstone written since the
+    // open still kills a direct-key attachment; a delegated widen carries the
+    // fresh delegation's own instant, which is exactly how re-approval after
+    // a revocation is supposed to work (no un-revoke verb).
+    const authority = new AttachmentAuthority({
+      grant: frame.grant,
+      ...(nextDelegation ? { delegation: nextDelegation } : {}),
+      origin: session.surface.origin,
+      openedAt: session.openedAt,
+      revocations: this.#revocations,
+    });
+    const denied = authority.error(now);
+    if (denied) return refuse(denied.reason);
+
+    try {
+      await session.runtime.updateTools?.({ grant: frame.grant, tools: frame.grant.tools });
+    } catch (err) {
+      this.#log.error('runtime could not adopt the updated grant; keeping the old one', {
+        sessionId: frame.s,
+        err,
+      });
+      return refuse('runtime_failed');
+    }
+
+    session.grant = frame.grant;
+    session.tools = frame.grant.tools;
+    if (nextDelegation) session.delegation = nextDelegation;
+    session.authority = authority;
+    this.#log.info('grant updated', {
+      sessionId: frame.s,
+      data: { tools: frame.grant.tools.length, expiresAt: frame.grant.expiresAt },
+    });
+    this.#sendSession(session, { t: 'grant.updated', s: frame.s, id: frame.id, ok: true });
   }
 
   async #onPrompt(frame: Extract<Frame, { t: 'prompt' }>): Promise<void> {

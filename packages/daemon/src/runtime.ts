@@ -179,6 +179,16 @@ export interface AgentRuntime {
     },
   ): Promise<void> | void;
   closeSession?(): Promise<void> | void;
+  /**
+   * The attachment's grant changed mid-session (v7, `grant.update`) — the
+   * DAEMON has already judged the change; this call is the runtime adopting
+   * it (re-registering the lent tool set with its agent). Called BEFORE the
+   * daemon commits the new grant: a throw refuses the whole update and keeps
+   * the old grant live on both sides, because the enforced boundary and the
+   * agent's view must never disagree. Runtimes without a live registration
+   * simply omit this — TurnContext.tools already follows the session.
+   */
+  updateTools?(context: { grant: CapabilityGrant; tools: ToolDefinition[] }): Promise<void> | void;
   prompt(text: string, context: TurnContext): Promise<void>;
 }
 

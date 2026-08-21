@@ -131,7 +131,10 @@ export class McpBridge {
     const names = new Map(tools.map((tool) => [mcpToolName(tool.name), tool.name]));
     const mcp = new McpServer(
       { name: 'agentport-surface', version: '0.0.1' },
-      { capabilities: { tools: {} } },
+      // listChanged is what makes a live `grant.update` visible to the agent:
+      // update() below swaps the tool set in place and notifies, so the agent
+      // re-lists against the same URL and the same token.
+      { capabilities: { tools: { listChanged: true } } },
     );
     const transport = new StreamableHTTPServerTransport({
       // One MCP client belongs to one token-scoped AgentPort attachment. Its
@@ -172,6 +175,26 @@ export class McpBridge {
     // index needed. #handle looks registrations up by the hex form.
     const path = Buffer.from(sessionId, 'utf8').toString('hex');
     return { url: `http://127.0.0.1:${this.#port}/mcp/${path}`, token };
+  }
+
+  /**
+   * Replace one attachment's tool set in place (v7, `grant.update`).
+   *
+   * TOKEN-PRESERVING on purpose: the agent was handed this registration's URL
+   * and bearer at `session/new`, so the update must happen underneath that
+   * endpoint rather than minting a fresh one the agent has never heard of.
+   * The list handler reads `registration.tools` live; `sendToolListChanged`
+   * is how the agent learns to re-list. Throws when the session was never
+   * registered or the notification cannot be delivered — the caller treats
+   * that as the runtime failing to adopt the grant, and keeps the old one.
+   */
+  update(sessionId: string, tools: ToolDefinition[]): void {
+    const registration = this.#sessions.get(sessionId);
+    if (!registration) throw new Error('no MCP registration for this session');
+    registration.tools = tools;
+    registration.names = new Map(tools.map((tool) => [mcpToolName(tool.name), tool.name]));
+    registration.mcp.sendToolListChanged();
+    this.#log.info('MCP tool set updated', { sessionId, data: { toolCount: tools.length } });
   }
 
   async unregister(sessionId: string): Promise<void> {

@@ -39,7 +39,7 @@ import {
   type DelegationDenial,
 } from '../packages/protocol/src/delegation.js';
 import { SESSION_DENIAL_REASONS, isTerminalResumeDenial } from '../packages/protocol/src/denials.js';
-import { isGated } from '../packages/protocol/src/grant.js';
+import { grantWiderThan, isGated } from '../packages/protocol/src/grant.js';
 import {
   MAX_CIPHERTEXT_BYTES,
   MAX_DELEGATION_CLOCK_SKEW_MS,
@@ -759,6 +759,59 @@ console.log('\n8. isGated');
   check('alwaysAsk naming another tool does not gate this one', isGated(plain, { alwaysAsk: ['site.write'] }) === false);
   check('an absent alwaysAsk gates nothing by itself', isGated(plain, {}) === false);
   check('requiresApproval: false is not gated', isGated({ ...plain, requiresApproval: false }, {}) === false);
+}
+
+// --- 8b. grantWiderThan --------------------------------------------------------
+//
+// The entire boundary between "the page tidied up after a toolchange" and
+// "the page grew its own grant mid-session" (v7 grant.update). Clause-level,
+// like the delegation judge: every way an update can widen has a case that
+// fires on exactly that clause, and every pure narrowing has a case proving
+// it needs no signature.
+
+console.log('\n8b. grantWiderThan');
+{
+  const read = { name: 'doc.read', description: 'Read', inputSchema: { type: 'object' } };
+  const write = { name: 'doc.write', description: 'Write', inputSchema: { type: 'object' }, requiresApproval: true };
+  const base = { tools: [read, write], alwaysAsk: ['doc.write'], expiresAt: 1_800_000_000_000 };
+
+  check('the identical grant is not wider', grantWiderThan(base, base) === false);
+  check(
+    'dropping a tool is narrowing',
+    grantWiderThan({ ...base, tools: [read], alwaysAsk: [] }, base) === false,
+  );
+  check(
+    'gating a previously free tool is narrowing',
+    grantWiderThan({ ...base, alwaysAsk: ['doc.read', 'doc.write'] }, base) === false,
+  );
+  check(
+    'an earlier expiry is narrowing',
+    grantWiderThan({ ...base, expiresAt: base.expiresAt - 1 }, base) === false,
+  );
+  check(
+    'a tool the old grant never held is wider',
+    grantWiderThan({ ...base, tools: [...base.tools, { name: 'doc.delete', description: 'Delete', inputSchema: {} }] }, base) === true,
+  );
+  check(
+    'a later expiry is wider',
+    grantWiderThan({ ...base, expiresAt: base.expiresAt + 1 }, base) === true,
+  );
+  check(
+    'a changed description under an approved name is wider',
+    grantWiderThan({ ...base, tools: [{ ...read, description: 'Read, then exfiltrate' }, write] }, base) === true,
+  );
+  check(
+    'a changed input schema under an approved name is wider',
+    grantWiderThan({ ...base, tools: [{ ...read, inputSchema: { type: 'object', properties: { url: {} } } }, write] }, base) === true,
+  );
+  check(
+    'removing a gate from a gated tool is wider',
+    grantWiderThan({ ...base, tools: [read, { ...write, requiresApproval: false }], alwaysAsk: [] }, base) === true,
+  );
+  check(
+    'moving a gate between requiresApproval and alwaysAsk stays gated, not wider',
+    grantWiderThan({ ...base, tools: [read, { ...write, requiresApproval: false }], alwaysAsk: ['doc.write'] }, base) === false,
+  );
 }
 
 // --- 9. session denial reasons -------------------------------------------------

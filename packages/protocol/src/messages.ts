@@ -105,7 +105,7 @@ export function wireFingerprint(): string {
  * commit as the version, deliberately by hand — but unlike the version, a
  * stale value here CANNOT pass, because the check recomputes it.
  */
-export const WIRE_FINGERPRINT = '185741c0e5d61adcd4fc0b7c';
+export const WIRE_FINGERPRINT = 'e291eeb4c8635ae5313f0551';
 
 /**
  * The wire dialect both ends must agree on, checked at `hello` before
@@ -908,6 +908,66 @@ export const Answer = refined(
 );
 export type Answer = Infer<typeof Answer>;
 
+/**
+ * The client reconciles a live attachment's grant (v7): the page's toolset
+ * changed under the session — a WebMCP `toolchange`, a same-origin navigation
+ * to a document that declares differently — and the grant must follow it
+ * instead of freezing at attach time.
+ *
+ * Snapshot semantics, like `plan`: the carried grant REPLACES the session's,
+ * it does not patch it. The security design is asymmetric on purpose and the
+ * daemon enforces it (`grantWiderThan`): NARROWING needs nothing beyond
+ * being a session participant, WIDENING needs fresh authority — a delegation
+ * whose `grantHash` covers this exact grant for the delegated tier, the
+ * user's own key for the direct tier, and is refused outright on the
+ * connect tier. A page must never grow its own authority mid-session
+ * (invariant 2).
+ */
+export const GrantUpdate = obj({
+  t: lit('grant.update'),
+  s: idField,
+  id: idField,
+  grant: CapabilityGrant,
+  /** Fresh user-signed authority covering the NEW grant; required to widen a
+   *  delegated attachment, meaningless on the other tiers. */
+  delegation: opt(SessionDelegation),
+});
+export type GrantUpdate = Infer<typeof GrantUpdate>;
+
+/**
+ * Why a grant update was refused. `authorization_required` is the asymmetry
+ * itself (a widening arrived with no authority to widen); the middle four are
+ * the same words the session vocabulary already uses for the same facts; and
+ * `runtime_failed` means the daemon kept the OLD grant because the runtime
+ * could not adopt the new one — the enforced boundary and the agent's view
+ * must never disagree about which grant is live.
+ */
+export const GRANT_UPDATE_DENIALS = [
+  'authorization_required',
+  'bad_delegation',
+  'grant_expired',
+  'authorization_expired',
+  'revoked',
+  'runtime_failed',
+] as const;
+export type GrantUpdateDenial = (typeof GRANT_UPDATE_DENIALS)[number];
+
+export const GrantUpdated = refined(
+  obj({
+    t: lit('grant.updated'),
+    s: idField,
+    id: idField,
+    ok: bool(),
+    /** Why the update was refused. A closed set, present exactly when !ok. */
+    reason: opt(en(...GRANT_UPDATE_DENIALS)),
+  }),
+  (frame) => {
+    if (frame.ok === (frame.reason !== undefined)) return 'mismatch';
+    return null;
+  },
+);
+export type GrantUpdated = Infer<typeof GrantUpdated>;
+
 export const Done = obj({
   t: lit('done'),
   s: idField,
@@ -1072,6 +1132,8 @@ export type SessionFrame =
   | Plan
   | Ask
   | Answer
+  | GrantUpdate
+  | GrantUpdated
   | Done
   | ToolCall
   | ToolResult
@@ -1128,6 +1190,8 @@ export const FRAME_SCHEMAS: { readonly [K in FrameType]: Schema<Frame> } = {
   'plan': Plan,
   'ask': Ask,
   'answer': Answer,
+  'grant.update': GrantUpdate,
+  'grant.updated': GrantUpdated,
   'done': Done,
   'tool.call': ToolCall,
   'tool.result': ToolResult,
@@ -1162,6 +1226,8 @@ const SESSION_FRAME_MEMBERS = {
   'plan': true,
   'ask': true,
   'answer': true,
+  'grant.update': true,
+  'grant.updated': true,
   'done': true,
   'tool.call': true,
   'tool.result': true,
@@ -1234,6 +1300,7 @@ export function mayOriginate(role: Role, type: string): boolean {
  */
 const CLIENT_SEALABLE_MEMBERS = {
   'answer': true,
+  'grant.update': true,
   'prompt': true,
   'prompt.cancel': true,
   'tool.result': true,
@@ -1243,6 +1310,7 @@ const CLIENT_SEALABLE_MEMBERS = {
 
 const AGENT_SEALABLE_MEMBERS = {
   'ask': true,
+  'grant.updated': true,
   'delta': true,
   'thought': true,
   'plan': true,

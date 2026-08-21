@@ -14,6 +14,8 @@
  * not a side effect of consolidating this predicate.
  */
 
+import { canonicalJson } from './crypto.js';
+
 /**
  * Does this tool require an approval round-trip on every invocation?
  *
@@ -39,4 +41,53 @@ export function isGated(
   grant: { alwaysAsk?: readonly string[] | undefined },
 ): boolean {
   return Boolean(tool.requiresApproval) || (grant.alwaysAsk?.includes(tool.name) ?? false);
+}
+
+/**
+ * Would replacing `prev` with `next` give the attachment ANY authority it
+ * does not already hold? (v7, the `grant.update` judge.)
+ *
+ * The asymmetry this decides: a narrowing update needs nothing beyond being
+ * the session's own client, a widening one needs fresh user-signed authority
+ * — so this predicate is the entire boundary between "the page tidied up
+ * after a toolchange" and "the page grew its own grant mid-session"
+ * (invariant 2). It errs WIDE on purpose: anything it cannot prove is a pure
+ * narrowing is treated as widening, because the cost of a false "wider" is
+ * one extra signature, and the cost of a false "narrower" is an authority
+ * nobody approved.
+ *
+ * Wider means any of:
+ *  - a tool name `prev` does not grant;
+ *  - a surviving tool whose description or input schema CHANGED — the model
+ *    reads both, so a mutation is a new capability wearing an approved name
+ *    (and, mid-session, an instruction-injection channel);
+ *  - a surviving tool that was gated in `prev` and is not gated in `next`;
+ *  - a later `expiresAt`.
+ *
+ * Everything else — dropped tools, added gates, an earlier expiry — is
+ * narrowing.
+ */
+export function grantWiderThan(
+  next: {
+    tools: readonly { name: string; description: string; inputSchema: Record<string, unknown>; requiresApproval?: boolean | undefined }[];
+    alwaysAsk: readonly string[];
+    expiresAt: number;
+  },
+  prev: {
+    tools: readonly { name: string; description: string; inputSchema: Record<string, unknown>; requiresApproval?: boolean | undefined }[];
+    alwaysAsk: readonly string[];
+    expiresAt: number;
+  },
+): boolean {
+  if (next.expiresAt > prev.expiresAt) return true;
+  const previous = new Map(prev.tools.map((tool) => [tool.name, tool]));
+  for (const tool of next.tools) {
+    const held = previous.get(tool.name);
+    if (!held) return true;
+    if (tool.description !== held.description) return true;
+
+    if (canonicalJson(tool.inputSchema) !== canonicalJson(held.inputSchema)) return true;
+    if (isGated(held, prev) && !isGated(tool, next)) return true;
+  }
+  return false;
 }

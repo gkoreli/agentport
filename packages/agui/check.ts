@@ -143,6 +143,21 @@ await session.handle({
     { key: 'note', label: 'Anything else I should know?' },
   ],
 });
+// The attachment's grant reconciled mid-session (v7). Driven through the real
+// updateGrant round-trip — the ack only settles a registered pending, so a
+// bare `grant.updated` frame would prove nothing.
+const grantUpdate = session.updateGrant({
+  tools: [{ name: 'site.save', description: 'Save the draft', inputSchema: {}, handler: () => ({ ok: true }) }],
+});
+const updateFrame = [...sent].reverse().find(
+  (frame): frame is { t: 'grant.update'; id: string } =>
+    typeof frame === 'object' && frame !== null && 't' in frame && frame.t === 'grant.update',
+);
+assert.ok(updateFrame, 'updateGrant never sent a grant.update frame');
+await session.handle({ t: 'grant.updated', s: session.id, id: updateFrame.id, ok: true });
+await grantUpdate;
+assert.deepEqual(session.grant.tools.map((entry) => entry.name), ['site.save']);
+
 await session.handle({ t: 'done', s: session.id, promptId: firstPrompt, stopReason: 'end_turn' });
 assert.equal(await successfulRun, 'Saved it.');
 
@@ -186,6 +201,7 @@ assert.deepEqual(
     'TOOL_CALL_RESULT',
     'CUSTOM:agentport.approval',
     'CUSTOM:agentport.ask',
+    'CUSTOM:agentport.grant',
     'TEXT_MESSAGE_END',
     'REASONING_MESSAGE_END',
     'REASONING_END',

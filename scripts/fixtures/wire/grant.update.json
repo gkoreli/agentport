@@ -1,0 +1,90 @@
+{
+  "type": "grant.update",
+  "cases": [
+    {
+      "name": "minimal valid narrowing update",
+      "expect": "ok",
+      "frame": {
+        "t": "grant.update",
+        "s": "sess_0123456789abcdef01234567",
+        "id": "gu_1",
+        "grant": {
+          "tools": [
+            {
+              "name": "inkwell.document.read",
+              "description": "Read the current document",
+              "inputSchema": { "type": "object" }
+            }
+          ],
+          "alwaysAsk": [],
+          "expiresAt": 1800000000000
+        }
+      }
+    },
+    {
+      "name": "maximal valid: widening update carrying a fresh delegation",
+      "expect": "ok",
+      "frame": {
+        "t": "grant.update",
+        "s": "sess_0123456789abcdef01234567",
+        "id": "gu_2",
+        "grant": {
+          "tools": [
+            {
+              "name": "inkwell.document.replace",
+              "description": "Replace the document",
+              "inputSchema": { "type": "object" },
+              "requiresApproval": true
+            }
+          ],
+          "alwaysAsk": ["inkwell.document.replace"],
+          "expiresAt": 1800000000000
+        },
+        "delegation": {
+          "delegate": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "agent": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "origin": "https://inkwell.test",
+          "grantHash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "issuedAt": 1750000000000,
+          "expiresAt": 1750003600000,
+          "sig": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        }
+      }
+    },
+    {
+      "name": "missing grant",
+      "expect": "missing_key",
+      "frame": {
+        "t": "grant.update",
+        "s": "sess_0123456789abcdef01234567",
+        "id": "gu_1"
+      }
+    },
+    {
+      "name": "unknown extra key",
+      "expect": "unexpected_key",
+      "frame": {
+        "t": "grant.update",
+        "s": "sess_0123456789abcdef01234567",
+        "id": "gu_1",
+        "grant": { "tools": [], "alwaysAsk": [], "expiresAt": 1800000000000 },
+        "force": true
+      }
+    },
+    {
+      "name": "grant whose alwaysAsk names an absent tool",
+      "expect": "mismatch",
+      "frame": {
+        "t": "grant.update",
+        "s": "sess_0123456789abcdef01234567",
+        "id": "gu_1",
+        "grant": { "tools": [], "alwaysAsk": ["ghost.tool"], "expiresAt": 1800000000000 }
+      }
+    },
+    {
+      "name": "raw: __proto__ key smuggle",
+      "expect": "unexpected_key",
+      "raw": "{\"__proto__\":{},\"grant\":{\"alwaysAsk\":[],\"expiresAt\":1800000000000,\"tools\":[]},\"id\":\"gu_1\",\"s\":\"sess_0123456789abcdef01234567\",\"t\":\"grant.update\"}"
+    }
+  ]
+}

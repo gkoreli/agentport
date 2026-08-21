@@ -175,9 +175,9 @@ Open the demo, hit **Pair a new agent**, paste the code, then **Connect
 agent**. The daemon's pairing link (`/pair#code=…`) auto-fills the dialog.
 
 ```bash
-npm run e2e        # full loop over real sockets, no browser, 200 checks
+npm run e2e        # full loop over real sockets, no browser, 218 checks
 npm run webmcp:harvest # our belief about the WebMCP draft, checked
-npm run wire:check # wire validation: 521 fixture cases across all 45 frames
+npm run wire:check # wire validation: 547 fixture cases across all 47 frames
 npm run agui:check # every emitted AG-UI event parsed by @ag-ui/core's schemas
 npm run source:check # no invisible control characters in source (a NUL got in)
 npm run docs:check   # every code citation in the docs resolves to a real symbol
@@ -489,7 +489,7 @@ check has already been wrong at least once:
 delivers a new content frame to a `switch` in the daemon or the client session
 — and if nobody added a `case`, it is dropped there, having decoded, unsealed
 and routed correctly. A `never` default is the WRONG fix and `wire:check` does
-not ask for one: those routers are partial over the 45-frame union on purpose,
+not ask for one: those routers are partial over the 47-frame union on purpose,
 because partial is what makes the origination sets fail-closed. What must be
 total is narrower, and is now asserted — **every frame the peer may seal
 toward you is one you handle** (`CLIENT_SEALABLE` → the daemon,
@@ -556,7 +556,7 @@ Working: pairing, cert issuance and verification, directory + presence,
 capability grants with TTL, prompt streaming, plan reporting, tool-call
 round-trip, approval round-trip, cancellation, reconnect with in-place session
 resume, session teardown, revocation, authority-tagged approvals, the agent
-asking its own user a question, and the full demo UI. 200 e2e checks and 521
+asking its own user a question, and the full demo UI. 218 e2e checks and 547
 wire-validation cases pass.
 
 Not built yet, in rough priority order:

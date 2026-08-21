@@ -1,0 +1,67 @@
+{
+  "type": "grant.updated",
+  "cases": [
+    {
+      "name": "minimal valid acceptance",
+      "expect": "ok",
+      "frame": {
+        "t": "grant.updated",
+        "s": "sess_0123456789abcdef01234567",
+        "id": "gu_1",
+        "ok": true
+      }
+    },
+    {
+      "name": "valid refusal with its closed reason",
+      "expect": "ok",
+      "frame": {
+        "t": "grant.updated",
+        "s": "sess_0123456789abcdef01234567",
+        "id": "gu_1",
+        "ok": false,
+        "reason": "authorization_required"
+      }
+    },
+    {
+      "name": "missing ok",
+      "expect": "missing_key",
+      "frame": {
+        "t": "grant.updated",
+        "s": "sess_0123456789abcdef01234567",
+        "id": "gu_1"
+      }
+    },
+    {
+      "name": "an acceptance may not carry a refusal reason",
+      "expect": "mismatch",
+      "frame": {
+        "t": "grant.updated",
+        "s": "sess_0123456789abcdef01234567",
+        "id": "gu_1",
+        "ok": true,
+        "reason": "bad_delegation"
+      }
+    },
+    {
+      "name": "a refusal must name its reason",
+      "expect": "mismatch",
+      "frame": {
+        "t": "grant.updated",
+        "s": "sess_0123456789abcdef01234567",
+        "id": "gu_1",
+        "ok": false
+      }
+    },
+    {
+      "name": "a reason outside the closed set",
+      "expect": "bad_format",
+      "frame": {
+        "t": "grant.updated",
+        "s": "sess_0123456789abcdef01234567",
+        "id": "gu_1",
+        "ok": false,
+        "reason": "because"
+      }
+    }
+  ]
+}

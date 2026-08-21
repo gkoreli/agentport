@@ -104,6 +104,17 @@ export type AgentPortAskEvent = BaseEvent & {
   value: SessionEvents['ask'];
 };
 
+/**
+ * The attachment's grant was replaced by an accepted `grant.update` (v7).
+ * Lean on purpose: a consumer needing the whole grant reads the session
+ * handle it already holds; this is what a status line renders.
+ */
+export type AgentPortGrantEvent = BaseEvent & {
+  type: EventType.CUSTOM;
+  name: 'agentport.grant';
+  value: { toolNames: string[]; expiresAt: number };
+};
+
 /** The subset of the AG-UI event union this adapter can produce. */
 export type AguiEvent =
   | RunStartedEvent
@@ -124,6 +135,7 @@ export type AguiEvent =
   | ActivitySnapshotEvent
   | AgentPortApprovalEvent
   | AgentPortAskEvent
+  | AgentPortGrantEvent
   | AgentPortReattachedEvent
   | AgentPortClosedEvent;
 
@@ -221,6 +233,17 @@ class Translator {
       approval: () =>
         session.on('approval', (event) =>
           this.#emit({ type: EventType.CUSTOM, name: 'agentport.approval', value: event }),
+        ),
+      // Lean on purpose: a consumer that needs the full grant reads it off
+      // the session handle it already holds; the event says THAT it changed
+      // and what a status line renders.
+      grant: () =>
+        session.on('grant', (event) =>
+          this.#emit({
+            type: EventType.CUSTOM,
+            name: 'agentport.grant',
+            value: { toolNames: event.grant.tools.map((tool) => tool.name), expiresAt: event.grant.expiresAt },
+          }),
         ),
       closed: () => session.on('closed', (event) => this.#onClosed(event)),
     };
