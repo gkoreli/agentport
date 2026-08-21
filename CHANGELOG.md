@@ -10,6 +10,32 @@ they moved.
 
 ## Unreleased
 
+### The front door works without the extension, and is executed by checks
+
+The two paths a stranger actually walks were both broken, in the
+requirement-6 class the north star documents twice. The pairing link the
+published CLI prints landed on a `/pair` page that only the unlisted
+extension could advance — a dead end for everyone else. And the landing
+page's hero snippet threw before it reached the network: its `alwaysAsk`
+named a tool absent from `tools` (which `buildGrant` rejects), it omitted
+`data-relay`/`data-wallet` (so a third-party page dialled its own `/relay`),
+and its top-level `await` was a SyntaxError under the classic script tag it
+sits beside.
+
+`/pair` now names the extension-free route — the hosted wallet, which
+already accepts the same code — without gaining a script; the page still
+cannot sign or approve anything. Both pairing prints state both routes. The
+landing snippet is the README's working form, and the two are now held
+together and RUN by `npm run snippet:check`: it extracts the snippet from
+both front doors, asserts they agree, executes it against the built
+`connect.js` in a real page, and requires a live relay to receive the
+socket and decode the `hello` frame. `npm run deployed:check` closes the
+other half — "landed is not shipped" is now one command that compares the
+deployed `connect.js` byte-for-byte against this tree's build and asserts
+`/pair` still names the wallet route, with distinct exits for "deploy lags"
+and "unreachable". The release workflow runs it between the Cloudflare
+deploy and the npm publish, so a stale front door now blocks a release.
+
 ## 0.0.13
 
 Deployed as the coordinated `agentport/6` hard cutover. The hosted Worker,

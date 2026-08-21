@@ -2,6 +2,9 @@
 
 **Bring your own agent to any website.**
 
+<!-- snippet:integration — extracted and EXECUTED by `npm run snippet:check`,
+     which also holds the landing page's copy of this instruction to it. -->
+
 ```html
 <script
   src="https://agentport.gogakoreli.workers.dev/connect.js"
@@ -48,6 +51,8 @@ document.querySelector("#connect-agent").addEventListener("click", async () => {
   await session.prompt("Tighten the opening paragraph.");
 });
 ```
+
+<!-- /snippet:integration -->
 
 Call `AgentPort.connect()` from a user gesture: the hosted wallet opens on its
 own origin, and browsers only permit that popup while the click is live. An

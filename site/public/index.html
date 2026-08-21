@@ -10,20 +10,32 @@
 <div class="hero">
 <h1>Bring your own agent to any website.</h1>
 <p class="lede">Today every app ships its own chatbot and pays for its own inference. AgentPort inverts that: you own one agent — on your machine, your subscription, your memory — and carry it between applications. The site lends it a few tools for one session and never learns anything else about it.</p>
-<pre>&lt;script src="https://agentport.gogakoreli.workers.dev/connect.js"&gt;&lt;/script&gt;
+<!-- snippet:integration — extracted and EXECUTED by `npm run snippet:check`,
+     which also holds it to the README's copy of the same instruction. Edit
+     both or neither: a landing page and a README that disagree about the
+     first step is a defect this project has already shipped once. -->
+<pre>&lt;script
+  src="https://agentport.gogakoreli.workers.dev/connect.js"
+  data-relay="wss://agentport.gogakoreli.workers.dev/relay"
+  data-wallet="https://agentport-wallet.gogakoreli.workers.dev"
+&gt;&lt;/script&gt;
 
-const session = await AgentPort.connect({
-  name: 'Inkwell',
-  tools: [{
-    name: 'inkwell.document.read',
-    description: 'Read the current document',
-    inputSchema: { type: 'object', properties: {} },
-    handler: () =&gt; ({ text: editor.value }),
-  }],
-  alwaysAsk: ['inkwell.document.replaceSelection'],
-});
+const editor = document.querySelector('#editor');
 
-await session.prompt('Tighten the opening paragraph.');</pre>
+document.querySelector('#connect-agent').addEventListener('click', async () =&gt; {
+  const session = await AgentPort.connect({
+    name: 'Inkwell',
+    tools: [{
+      name: 'inkwell.document.read',
+      description: 'Read the current document',
+      inputSchema: { type: 'object', properties: {} },
+      handler: () =&gt; ({ text: editor.value }),
+    }],
+  });
+
+  await session.prompt('Tighten the opening paragraph.');
+});</pre>
+<!-- /snippet:integration -->
 <p class="lede" style="margin-top:24px;font-size:15px">That is the whole integration — one script tag, like adding a payment button. No API key, no model choice, no inference bill, and no SDK to ship — your users arrive with an agent they already run.</p>
 </div>
 

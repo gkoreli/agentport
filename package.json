@@ -34,6 +34,8 @@
     "ui:extension-smoke": "tsx scripts/extension-ui-smoke.ts",
     "integration": "tsx scripts/integration.ts",
     "docs:check": "tsx scripts/docs-check.ts",
+    "snippet:check": "tsx scripts/snippet-check.ts",
+    "deployed:check": "tsx scripts/deployed-check.ts",
     "source:check": "tsx scripts/source-check.ts"
   },
   "devDependencies": {

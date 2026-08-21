@@ -104,6 +104,9 @@ const daemon = new AgentDaemon({
     console.log('');
     console.log(`  Code: ${code}`);
     console.log('');
+    console.log('  With the AgentPort extension, the link pairs in one tap. Without it,');
+    console.log('  the page links a hosted wallet where the same code works in any browser.');
+    console.log('');
   },
   // The consent moment for drop-in sites. It happens here, in your terminal,
   // because this is where your key is — the website asking is holding an

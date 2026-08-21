@@ -30,9 +30,12 @@ it:
 6. deploys the matching Worker, relay, and hosted wallet to Cloudflare unless
    the protected environment certifies that this exact commit was already
    deployed manually;
-7. extracts the saved npm tarball and runs its bundled, deadline-bounded remote
+7. runs `npm run deployed:check` against the deployment it just made — the
+   served `connect.js` must be this build byte for byte, and `/pair` must still
+   name the extension-free wallet route;
+8. extracts the saved npm tarball and runs its bundled, deadline-bounded remote
    pairing and prompt while an old Durable Object instance drains;
-8. only after that exact-artifact smoke passes, publishes the saved tarball to npm
+9. only after that exact-artifact smoke passes, publishes the saved tarball to npm
    through OIDC trusted publishing with provenance.
 
 Hosted-only changes deploy without minting an npm version. If a push contains a
@@ -84,7 +87,9 @@ For a wire-changing release, use this order:
 2. Run every release gate.
 3. Run `npm run deploy`; this deploys the matching relay, browser bundle, and
    hosted wallet, then creates the root-version commit.
-4. Run `npx tsx scripts/remote-check.ts` against the deployed relay.
+4. Run `npx tsx scripts/remote-check.ts` against the deployed relay, then
+   `npm run deployed:check` — it exits non-zero until the deployment carries
+   this build, which is the whole point of running it here.
 5. Certify the successful manual deployment without copying the expiring
    Wrangler credential into GitHub:
 

@@ -128,6 +128,7 @@ jobs:
           npm run ui:extension-smoke
           npm run source:check
           npm run docs:check
+          npm run snippet:check
           npm run e2e
           npm run site:build
           npm run wallet:build
@@ -213,6 +214,26 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
         run: npm run deploy:ci
+
+      # The front door, checked from outside it. Nothing else in this workflow
+      # ever loads the artifact a stranger's page loads: the verify job bundles
+      # `connect.ts` from source, and the relay smoke below speaks the protocol
+      # rather than fetching `/connect.js`. This runs after the deploy step so
+      # it verifies what was just published, and it fails the release before
+      # npm if the deployment is not this commit's build.
+      - name: Prove the deployed front door is this build
+        run: |
+          for attempt in 1 2 3; do
+            if timeout 120s npm run deployed:check; then
+              exit 0
+            fi
+            if [[ "$attempt" -lt 3 ]]; then
+              echo "The edge may still be serving the previous assets; retrying in 10 seconds"
+              sleep 10
+            fi
+          done
+          echo "::error::The deployed site is not this commit's build (see the LAGS lines above)"
+          exit 1
 
       - uses: actions/download-artifact@v4
         with:

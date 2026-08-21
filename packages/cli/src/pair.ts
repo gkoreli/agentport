@@ -24,10 +24,12 @@ while (Date.now() - startedAt < 15_000) {
 
 if (!pending) throw new Error('the AgentPort service did not produce a pairing offer');
 
-console.log('\nPair this agent in Chrome:\n');
+console.log('\nYour agent is ready to pair:\n');
 console.log(`  ${pending.url}\n`);
 console.log(`Code: ${pending.code}`);
-console.log('Waiting for approval in the AgentPort extension…\n');
+console.log('With the AgentPort extension, the link pairs in one tap. Without it, the');
+console.log('page links a hosted wallet where the same code works in any browser.');
+console.log('Waiting for approval…\n');
 
 let paired = false;
 while (Date.now() <= pending.expiresAt) {
