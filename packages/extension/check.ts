@@ -607,7 +607,7 @@ console.log('extension elicitation round-trip check passed');
 
 {
   const pageWin = new Window({ url: 'https://harness.test/' });
-  for (const key of ['window', 'document', 'location', 'getSelection', 'getComputedStyle', 'NodeFilter', 'HTMLElement', 'SVGElement', 'HTMLInputElement', 'HTMLTextAreaElement', 'CSS']) {
+  for (const key of ['window', 'document', 'location', 'getSelection', 'getComputedStyle', 'NodeFilter', 'HTMLElement', 'SVGElement', 'HTMLInputElement', 'HTMLTextAreaElement', 'HTMLSelectElement', 'KeyboardEvent', 'CSS']) {
     installGlobal(key, (pageWin as unknown as Record<string, unknown>)[key]);
   }
   // happy-dom has no layout engine: every getBoundingClientRect is 0x0, which
@@ -735,6 +735,235 @@ console.log('extension elicitation round-trip check passed');
     /disabled/,
     'a click on a disabled control reported success',
   );
+
+  // --- honest blindness: shadow DOM and iframes -----------------------------
+  // A web-components page used to read as EMPTY (`{text:'', truncated:false}`)
+  // rather than unreadable, and the agent concluded the page had nothing on
+  // it. Open roots are now entered; closed roots and iframes are counted so
+  // the agent knows what it could not see.
+  {
+    const host = pageWin.document.createElement('div');
+    host.id = 'shadow-host';
+    pageWin.document.body.appendChild(host);
+    const openRoot = (host as unknown as HTMLElement).attachShadow({ mode: 'open' });
+    openRoot.innerHTML = '<p>Inside the open root.</p><button>Shadow button</button>';
+
+    const closedHost = pageWin.document.createElement('div');
+    pageWin.document.body.appendChild(closedHost);
+    const closedRoot = (closedHost as unknown as HTMLElement).attachShadow({ mode: 'closed' });
+    closedRoot.innerHTML = '<p>Sealed away.</p>';
+
+    const frame = pageWin.document.createElement('iframe');
+    pageWin.document.body.appendChild(frame);
+
+    // `chrome.dom.openOrClosedShadowRoot` is an isolated-world API happy-dom
+    // does not have; stub the exact surface the guard reads so the CLOSED
+    // count is exercised here and not only in real Chrome.
+    installGlobal('chrome', {
+      dom: {
+        openOrClosedShadowRoot: (el: HTMLElement) => ((el as unknown) === (closedHost as unknown) ? closedRoot : (el.shadowRoot ?? null)),
+      },
+    });
+
+    const read = (await tools.get('page.readText')!.handler({})) as {
+      text: string;
+      shadowRoots: number;
+      frames: number;
+    };
+    assert.ok(read.text.includes('Inside the open root'), 'open-shadow text is invisible to the harness');
+    assert.ok(!read.text.includes('Sealed away'), 'a closed shadow root was entered');
+    assert.equal(read.shadowRoots, 1, 'a closed shadow root was not counted as a blind spot');
+    assert.equal(read.frames, 1, 'an iframe was not counted as a blind spot');
+
+    const listed = (await tools.get('page.listElements')!.handler({})) as {
+      elements: { handle: string; label: string }[];
+      shadowRoots: number;
+      frames: number;
+    };
+    assert.ok(
+      listed.elements.some((row) => row.label === 'Shadow button'),
+      'an interactive element inside an open shadow root was not listed',
+    );
+    assert.equal(listed.shadowRoots, 1, 'the listing did not report the closed root it could not enter');
+
+    // Without the isolated-world API the count degrades to honest-but-lower,
+    // never to a guess.
+    installGlobal('chrome', undefined);
+    const blind = (await tools.get('page.readText')!.handler({})) as { shadowRoots: number };
+    assert.equal(blind.shadowRoots, 0, 'a closed root was "counted" by an API this environment does not have');
+  }
+
+  // --- page.find: an aimed question, not a re-listing -----------------------
+  {
+    const listed = (await tools.get('page.listElements')!.handler({})) as {
+      elements: { handle: string; label: string }[];
+    };
+    const held = listed.elements[0]!.handle;
+    const found = (await tools.get('page.find')!.handler({ text: 'shadow button' })) as {
+      elements: { handle: string; label: string }[];
+      matched: number;
+    };
+    assert.equal(found.matched, 1, 'find did not match the shadow-root button by label');
+    assert.ok(resolveHandle(found.elements[0]!.handle), 'a handle minted by find does not resolve');
+    // The property that distinguishes find from listElements: the handles the
+    // agent already holds survive, because a find refines a listing.
+    // `doesNotThrow`, not `ok`: resolveHandle REFUSES by throwing, so a plain
+    // truthiness assert would report the raw throw instead of this label.
+    assert.doesNotThrow(() => resolveHandle(held), 'a find invalidated the handles the agent was already holding');
+    await assert.rejects(async () => tools.get('page.find')!.handler({ text: '   ' }), /some text/);
+  }
+
+  // --- page.waitFor: a truthful wait, never a hang ---------------------------
+  {
+    const now = (await tools.get('page.waitFor')!.handler({ text: 'inside the open root' })) as {
+      found: boolean;
+      timedOut: boolean;
+    };
+    assert.equal(now.found, true, 'text already on the page was not found immediately');
+
+    const later = tools.get('page.waitFor')!.handler({ text: 'freshly arrived', timeoutMs: 3_000 });
+    setTimeout(() => {
+      const p = pageWin.document.createElement('p');
+      p.textContent = 'Freshly arrived content.';
+      pageWin.document.body.appendChild(p);
+    }, 60);
+    const arrived = (await later) as { found: boolean; timedOut: boolean; elapsedMs: number };
+    assert.equal(arrived.found, true, 'content that arrived during the wait was not seen');
+
+    const gone = (await tools.get('page.waitFor')!.handler({ text: 'will never exist', timeoutMs: 150 })) as {
+      found: boolean;
+      timedOut: boolean;
+    };
+    assert.equal(gone.found, false, 'a timeout reported the thing as found');
+    assert.equal(gone.timedOut, true, 'a timeout did not say it timed out');
+    await assert.rejects(async () => tools.get('page.waitFor')!.handler({}), /some text or an element handle/);
+    // An unknown handle can never appear by waiting; failing fast is the
+    // truthful answer and the deadline is not a substitute for it.
+    await assert.rejects(async () => tools.get('page.waitFor')!.handler({ element: 'g1e999999' }), /listing/);
+  }
+
+  // --- three-state obstruction, on the path that decides whether a click a
+  // --- person could not have made gets made anyway ---------------------------
+  {
+    const target = pageWin.document.createElement('button');
+    target.textContent = 'Pay now';
+    pageWin.document.body.appendChild(target);
+    const overlay = pageWin.document.createElement('div');
+    overlay.id = 'consent-banner';
+    pageWin.document.body.appendChild(overlay);
+
+    const listed = (await tools.get('page.listElements')!.handler({})) as {
+      elements: { handle: string; label: string }[];
+    };
+    const payHandle = listed.elements.find((row) => row.label === 'Pay now')!.handle;
+
+    // Covered: every hit-test lands on the overlay. The refusal must NAME it —
+    // "covered by <div #consent-banner>" is a fact the agent can act on.
+    (pageWin.document as unknown as Record<string, unknown>)['elementFromPoint'] = () => overlay;
+    await assert.rejects(
+      async () => tools.get('page.click')!.handler({ element: payHandle }),
+      /covered by <div #consent-banner>/,
+      'a click on a covered element proceeded, or refused without naming the coverer',
+    );
+
+    // Clear: hit-tests land on the element itself.
+    (pageWin.document as unknown as Record<string, unknown>)['elementFromPoint'] = () => target;
+    const clicked = (await tools.get('page.click')!.handler({ element: payHandle })) as { ok: boolean; coverCheck?: string };
+    assert.equal(clicked.ok, true);
+    assert.equal(clicked.coverCheck, undefined, 'a fully checked click still reported an unknown cover state');
+
+    // Unknown: the browser cannot hit-test at all. The old code converted this
+    // silence into permission with nothing in the result; now the click still
+    // proceeds (a person could scroll to it) but SAYS the check never ran.
+    (pageWin.document as unknown as Record<string, unknown>)['elementFromPoint'] = undefined;
+    const blind = (await tools.get('page.click')!.handler({ element: payHandle })) as {
+      ok: boolean;
+      coverCheck?: string;
+      why?: string;
+    };
+    assert.equal(blind.coverCheck, 'unknown', 'an unhittestable click did not disclose that nothing checked it');
+    assert.ok(blind.why, 'an unknown cover state came with no reason');
+
+    // describeHandle: what the approval card will say. Role and name, never a
+    // value; and a page that changed under the request must surface as a
+    // REFUSAL, not as a silent absence of description.
+    (pageWin.document as unknown as Record<string, unknown>)['elementFromPoint'] = () => target;
+    const { describeHandle } = await import('./src/pagetools.js');
+    const described = describeHandle(payHandle) as { role: string; name: string; obstruction: { state: string } };
+    assert.equal(described.name, 'Pay now', 'the description does not name the element');
+    assert.equal(described.obstruction.state, 'clear');
+    target.textContent = 'Cancel order';
+    assert.throws(
+      () => describeHandle(payHandle),
+      /changed since you listed it/,
+      'a page that moved under the approval described the OLD element instead of refusing',
+    );
+    target.textContent = 'Pay now';
+  }
+
+  // --- the gated mutation verbs ----------------------------------------------
+  {
+    pageWin.document.body.insertAdjacentHTML(
+      'beforeend',
+      `<form id="verb-form">
+         <select id="pick" aria-label="Draft"><option value="a">First draft</option><option value="b">Second draft</option></select>
+         <input id="agree" type="checkbox" aria-label="Agree">
+         <input id="one" type="radio" name="grp" aria-label="One" checked>
+         <input id="q" type="text" aria-label="Query">
+       </form>`,
+    );
+    const listed = (await tools.get('page.listElements')!.handler({})) as {
+      elements: { handle: string; kind: string; label: string }[];
+    };
+    const byLabel = (labelText: string) => listed.elements.find((row) => row.label === labelText)!.handle;
+
+    const picked = (await tools.get('page.select')!.handler({ element: byLabel('Draft'), option: 'Second draft' })) as {
+      applied: boolean;
+    };
+    assert.equal(picked.applied, true, 'select did not verify the option landed');
+    assert.equal((pageWin.document.getElementById('pick') as unknown as HTMLSelectElement).value, 'b');
+    await assert.rejects(
+      async () => tools.get('page.select')!.handler({ element: byLabel('Draft'), option: 'Nonexistent' }),
+      /the choices are: First draft, Second draft/,
+      'a missed option did not name the actual choices',
+    );
+    await assert.rejects(async () => tools.get('page.select')!.handler({ element: byLabel('Agree'), option: 'a' }), /not a <select>/);
+
+    const checked = (await tools.get('page.setChecked')!.handler({ element: byLabel('Agree'), checked: true })) as {
+      applied: boolean;
+      changed: boolean;
+    };
+    assert.equal(checked.applied, true);
+    assert.equal(checked.changed, true);
+    const again = (await tools.get('page.setChecked')!.handler({ element: byLabel('Agree'), checked: true })) as {
+      changed: boolean;
+    };
+    assert.equal(again.changed, false, 'an already-satisfied setChecked pretended to act');
+    await assert.rejects(
+      async () => tools.get('page.setChecked')!.handler({ element: byLabel('One'), checked: false }),
+      /cannot be unchecked/,
+      'unchecking a radio — which a person cannot do — was performed anyway',
+    );
+
+    let submitted = 0;
+    const form = pageWin.document.getElementById('verb-form') as unknown as HTMLFormElement;
+    form.addEventListener('submit', (event) => {
+      event.preventDefault();
+      submitted++;
+    });
+    if (typeof form.requestSubmit !== 'function') {
+      // happy-dom lacks requestSubmit; the stub preserves the submit-event
+      // semantics the handler relies on.
+      form.requestSubmit = () => form.dispatchEvent(new pageWin.Event('submit', { bubbles: true, cancelable: true }) as unknown as SubmitEvent);
+    }
+    await tools.get('page.pressKey')!.handler({ element: byLabel('Query'), key: 'Enter' });
+    assert.equal(submitted, 1, 'Enter in a form field did not submit the form the way a real Enter does');
+    await assert.rejects(
+      async () => tools.get('page.pressKey')!.handler({ element: byLabel('Query'), key: 'F13' }),
+      /page.fill/,
+      'an arbitrary key name was pressed instead of being refused toward page.fill',
+    );
+  }
 }
 
 // The domain the consent window shows, which is the whole reason the third
@@ -1356,7 +1585,7 @@ const agentRow = { agent: 'a'.repeat(64), name: 'VPS Agent', runtime: 'acp', onl
 {
   const fixture = consentFixture();
   const decision = fixture.windows.askApproval(
-    's_check',
+    's_approval',
     'https://shop.example',
     { name: 'VPS Agent' },
     approvalPrompt,
@@ -1398,7 +1627,7 @@ const agentRow = { agent: 'a'.repeat(64), name: 'VPS Agent', runtime: 'acp', onl
 {
   const fixture = consentFixture({ refuseToOpen: true });
   const decision = fixture.windows.askApproval(
-    's_check',
+    's_approval',
     'https://shop.example',
     { name: 'VPS Agent' },
     approvalPrompt,
@@ -1424,7 +1653,7 @@ const agentRow = { agent: 'a'.repeat(64), name: 'VPS Agent', runtime: 'acp', onl
 {
   const fixture = consentFixture({ approveWindowMs: 10 });
   const decision = fixture.windows.askApproval(
-    's_check',
+    's_approval',
     'https://shop.example',
     { name: 'VPS Agent' },
     approvalPrompt,

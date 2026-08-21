@@ -199,10 +199,23 @@ as an open wish-list:
   `packages/extension/src/pagetools.ts#MAX_TEXT`, and both readers return
   `truncated` — an agent that reads an excerpt and does not know it was an
   excerpt draws conclusions the page never supported.
-- **Waiting.** Still open, and still the one that matters most. `#settle`
-  exists but answers "has the DOM stopped moving", which is not the question:
-  real flows need *wait until this appears*, and without it the agent's only
-  tool for a slow page is to read it again and hope.
+- ~~**Waiting.**~~ **Done.**
+  `packages/extension/src/pagetools.ts#waitForCondition` is *wait until this
+  appears* — visible text or a listed handle, hard deadline, truthful
+  `{found:false, timedOut:true}`, never a hang. `#settle` remains what it was:
+  the "did anything happen" half, now also awaited by `page.scroll`.
+
+Since then the list grew the rest of its shape: `page.find` (an aimed
+question instead of a 200-row listing), open shadow roots are read and
+CLOSED shadow roots plus iframes are **counted** — a web-components page now
+reads as unreadable-in-part instead of empty — and `#obstruction` answers in
+three states (`clear`/`blocked`/`unknown`), because its old `undefined`
+collapsed "clear" with "could not look" and the caller turned that silence
+into permission. The real-engine smoke (`scripts/extension-ui-smoke.ts`)
+executes all of it in Chrome, which is how the viewport-coordinate
+off-canvas rule was caught silently dropping every element above the scroll
+position. §2's `page.navigate` remains unbuilt: it needs the cross-origin
+decision and an authority domain, which are protocol territory.
 
 ### 6. Prompt injection is the hard problem here, and it gets worse
 

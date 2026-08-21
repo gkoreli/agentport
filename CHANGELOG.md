@@ -10,6 +10,40 @@ they moved.
 
 ## Unreleased
 
+### The generic harness reads honestly, checks covers in three states, and gained its missing verbs
+
+A web-components page used to read as EMPTY — `{text:'', truncated:false}` —
+rather than unreadable. `page.readText` and `page.listElements` now enter
+open shadow roots and COUNT what they cannot enter (closed roots via the
+isolated world's `chrome.dom`, iframes always), so blindness is reported
+beside truncation instead of impersonating absence. `page.find` asks an
+aimed question instead of re-listing 200 rows of nav; `page.waitFor` is the
+waiting verb ADR-021 called "the one that matters most" — visible text or a
+handle, hard deadline, truthful timeout, never a hang; `page.scroll` stops
+using smooth scrolling and awaits settle, so scroll-then-read stops
+returning the pre-scroll DOM. Three gated mutations complete the set —
+`page.select`, `page.setChecked` (a native click, and a radio cannot be
+unchecked because a person cannot), `page.pressKey` (a closed allowlist;
+typing belongs to `page.fill`).
+
+`obstruction()` answers in three states now. Its old `undefined` meant
+"clear", "cannot hit-test", AND "outside the viewport", and the caller
+turned all three into permission — on the code path deciding whether a
+click a person could not have made gets made. `blocked` names the coverer,
+samples corners as well as the centre; `unknown` makes `page.click` scroll
+the target into view, settle, and look again, and whatever stays unknown is
+disclosed in the result rather than swallowed.
+
+The real-engine smoke now executes the actual `pagetools.ts` in Chrome —
+the `checkVisibility` branch, real rects, real `elementFromPoint`, real
+scrolling had never run anywhere — and it caught a real one immediately:
+the off-canvas rule tested VIEWPORT coordinates, so after any scroll
+everything above the fold was dropped as "hidden"; it now tests document
+coordinates (unreachable-by-scroll), with the white-on-white contrast gap
+pinned in the smoke as a recorded gap rather than papered over. Every new
+assertion, happy-dom and Chrome alike, was watched failing for its intended
+reason.
+
 ### The WebMCP belief moves to the 2026-08-19 draft, with positions instead of shrugs
 
 Re-verified against the live draft rather than assumed: `exposedTo` is now
