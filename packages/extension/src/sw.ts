@@ -62,6 +62,7 @@ import { AgentWallet, ResumeError, type AgentSession, type SiteTool } from '@age
 import {
   createLogger,
   Deferred,
+  isGated,
   toErr,
   type AuthorityDomain,
   type LogContext,
@@ -172,6 +173,8 @@ interface SessionEntry {
   /** The surface name from the connect request. Page-supplied: for logs and the
    *  consent card, never for addressing — see `reclaimKey`. */
   name: string;
+  /** The agent's device pubkey — what the popup's revoke addresses. */
+  agent: string;
   /**
    * The one identity a parked session is reclaimed by, in the worker's table
    * and in the durable resume record alike. Null means this surface cannot
@@ -672,6 +675,7 @@ async function openSession(
     tabId: port.sender?.tab?.id,
     frameId: port.sender?.frameId,
     name: request.name,
+    agent: chosen.agent,
     reclaimKey: reclaimKeyFor({
       from,
       origin,
@@ -769,6 +773,7 @@ async function resumeFromStore(
       tabId: port.sender?.tab?.id,
       frameId: port.sender?.frameId,
       name: request.name,
+      agent: record.agent,
       reclaimKey: key,
       session,
       token: record.token,
@@ -1196,8 +1201,12 @@ const popupApi = new PopupApi({
       ref: entry.ref,
       origin: entry.origin,
       from: entry.from,
+      agent: entry.agent,
       agentName: entry.session.info.agentName,
       tools: [...entry.toolNames],
+      // The same predicate the enforcement gates on, so the popup cannot
+      // promise a tool runs freely while the daemon asks about it.
+      gated: entry.session.grant.tools.filter((tool) => isGated(tool, entry.session.grant)).length,
       expiresAt: entry.session.grant.expiresAt,
     })),
 });

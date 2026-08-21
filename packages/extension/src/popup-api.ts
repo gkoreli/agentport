@@ -25,16 +25,86 @@ import type { AgentWallet } from '@agentport/client';
 import { createLogger, toErr, type Logger } from '@agentport/protocol';
 
 import { isRecord, toAgentRow, type Origin, type PopupToWorker } from './bridge.js';
-import { DEFAULT_RELAY_URL, ensureUserKey, importUserKey, loadCerts, relayUrl, saveCert, setRelayUrl, userPublicKey } from './storage.js';
+import {
+  DEFAULT_RELAY_URL,
+  clearResumesFor,
+  ensureUserKey,
+  importUserKey,
+  listResumes,
+  loadCerts,
+  relayUrl,
+  saveCert,
+  setRelayUrl,
+  userPublicKey,
+  type StoredResume,
+} from './storage.js';
 
 /** One live attachment, as the popup renders it. */
 export interface PopupSessionRow {
   ref: string;
   origin: string;
   from: Origin;
+  /** The agent's device pubkey — what a revoke frame addresses. */
+  agent: string;
   agentName: string;
   tools: string[];
+  /** How many of those tools ask again on every call. */
+  gated: number;
   expiresAt: number;
+}
+
+/**
+ * One row of "origins holding your agent": a live attachment, or a stored
+ * resume record with no live session behind it right now. The second kind is
+ * the reason this list cannot just be the session table — a record that can
+ * re-attach IS standing authority, whether or not the worker's in-memory
+ * table survived the last eviction.
+ */
+export interface StandingRow {
+  origin: string;
+  agent: string;
+  agentName: string;
+  surface: string;
+  live: boolean;
+  tools: number;
+  gated: number;
+  expiresAt: number;
+}
+
+/**
+ * Merge live sessions with stored resume records, deduped by (origin, agent):
+ * a live attachment already covers its own record. Pure, and exported for the
+ * check — the dedup rule is the part that silently rots (a duplicate row with
+ * one Revoke button working and one doing nothing).
+ */
+export function standingAuthority(live: PopupSessionRow[], stored: StoredResume[]): StandingRow[] {
+  const rows: StandingRow[] = live.map((session) => ({
+    origin: session.origin,
+    agent: session.agent,
+    agentName: session.agentName,
+    surface: session.from === 'widget' ? 'this extension' : session.origin,
+    live: true,
+    tools: session.tools.length,
+    gated: session.gated,
+    expiresAt: session.expiresAt,
+  }));
+  const covered = new Set(rows.map((row) => `${row.origin}\n${row.agent}`));
+  for (const record of stored) {
+    const key = `${record.origin}\n${record.agent}`;
+    if (covered.has(key)) continue;
+    covered.add(key);
+    rows.push({
+      origin: record.origin,
+      agent: record.agent,
+      agentName: record.name,
+      surface: record.name,
+      live: false,
+      tools: 0,
+      gated: 0,
+      expiresAt: record.expiresAt,
+    });
+  }
+  return rows;
 }
 
 export interface PopupApiOptions {
@@ -140,7 +210,32 @@ export class PopupApi {
         return { cert: { agent: cert.agent, name: cert.name, runtime: cert.runtime } };
       }
       case 'sessions':
-        return { sessions: this.#options.sessions() };
+        return { sessions: standingAuthority(this.#options.sessions(), await listResumes()) };
+      case 'revoke': {
+        // The whole grant for the origin, not a tool subset — ADR-022's
+        // vocabulary argument: the action-class words that would make partial
+        // revocation honest do not exist yet, so the honest offer is all of
+        // it, with re-approval one consent screen away.
+        const wallet = await this.#options.wallet();
+        const closed = await wallet.revoke(message.agent, message.origin);
+        // Proactive, not just the invariant-9 cleanup on the next denial: a
+        // record the user just revoked must not sit in the list as standing
+        // authority until something happens to retry it.
+        await clearResumesFor(message.origin, message.agent);
+        this.#log.info('origin revoked from the popup', { data: { origin: message.origin, closed } });
+        return { closed };
+      }
+      case 'revoke.all': {
+        const rows = standingAuthority(this.#options.sessions(), await listResumes());
+        const wallet = await this.#options.wallet();
+        let closed = 0;
+        for (const row of rows) {
+          closed += await wallet.revoke(row.agent, row.origin);
+          await clearResumesFor(row.origin, row.agent);
+        }
+        this.#log.info('every origin revoked from the popup', { data: { origins: rows.length, closed } });
+        return { origins: rows.length, closed };
+      }
       default:
         throw new Error('unknown request');
     }

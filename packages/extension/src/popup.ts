@@ -42,12 +42,16 @@ function ask<T>(message: PopupToWorker): Promise<T> {
   });
 }
 
+/** One origin holding standing authority over an agent — live, or resumable.
+ *  Mirrors `StandingRow` in popup-api.ts, which is the shape's owner. */
 interface SessionRow {
-  ref: string;
   origin: string;
-  from: string;
+  agent: string;
   agentName: string;
-  tools: string[];
+  surface: string;
+  live: boolean;
+  tools: number;
+  gated: number;
   expiresAt: number;
 }
 
@@ -98,14 +102,44 @@ const Agents = component('ap-agents', () => html`
     })}
   </section>`);
 
+/**
+ * The list ADR-014 called the missing trust surface: what currently holds
+ * your agent, and the button that takes it back. Revoking withdraws the
+ * origin's WHOLE grant (ADR-022: no per-tool vocabulary exists yet, so all
+ * of it is the honest offer) and genuinely ends extension attachments —
+ * tombstones are judged per-origin across tiers now. Approving again later
+ * works; a revocation is a tombstone, not a denylist.
+ */
 const Sessions = component('ap-sessions', () => html`
   <section>
-    <h2>In use right now</h2>
-    ${each(sessions, (session) => session.ref, (session) => {
+    <h2>Origins holding your agent</h2>
+    ${each(sessions, (session) => `${session.origin}\n${session.agent}`, (session) => {
       const origin = computed(() => session.value.origin);
-      const detail = computed(() => `${session.value.agentName} · ${session.value.tools.length} tools`);
-      return html`<div class="card"><b>${origin}</b><small>${detail}</small></div>`;
+      const detail = computed(() => {
+        const row = session.value;
+        const state = row.live
+          ? `${row.tools} tools${row.gated > 0 ? ` (${row.gated} ask every time)` : ''}`
+          : 'not attached right now, but may re-attach';
+        return `${row.agentName} · ${state} · until ${new Date(row.expiresAt).toLocaleTimeString()}`;
+      });
+      return html`
+        <div class="card row-card">
+          <div class="grow"><b>${origin}</b><small>${detail}</small></div>
+          <button @click=${() => void run('revoking…', async () => {
+            const row = session.value;
+            await ask({ t: 'revoke', agent: row.agent, origin: row.origin });
+            await refresh();
+          })}>Revoke</button>
+        </div>`;
     })}
+    ${when(computed(() => sessions.value.length > 1), () => html`
+      <div class="row">
+        <button class="ghost" @click=${() => void run('revoking every origin…', async () => {
+          await ask({ t: 'revoke.all' });
+          await refresh();
+        })}>Revoke all</button>
+      </div>`)}
+    <p class="hint">Revoking withdraws the whole grant for that origin and ends its attachment now. Approving again later works — nothing is blacklisted.</p>
   </section>`);
 
 const Pairing = component('ap-pairing', () => {

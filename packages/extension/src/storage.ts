@@ -144,6 +144,31 @@ export async function clearResume(origin: string, name: string, sessionId: strin
   await chrome.storage.session.set({ [KEY_RESUME]: bag });
 }
 
+/** Every resume record — the standing authority the popup must SHOW, because
+ *  a record that can re-attach is authority whether or not the worker's
+ *  in-memory table currently knows a live session for it. */
+export async function listResumes(): Promise<StoredResume[]> {
+  return Object.values(await resumeBag());
+}
+
+/**
+ * Erase every record for one (origin, agent) pair — the REVOKE eraser, which
+ * is why it deliberately does not take a session id: revocation withdraws the
+ * standing authority itself, heirs included. `clearResume` above stays the
+ * lifecycle eraser with its stale-close guard; the two answer different
+ * questions and must not be merged into one function with a flag.
+ */
+export async function clearResumesFor(origin: string, agent: string): Promise<void> {
+  const bag = await resumeBag();
+  let changed = false;
+  for (const [key, record] of Object.entries(bag)) {
+    if (record.origin !== origin || record.agent !== agent) continue;
+    delete bag[key];
+    changed = true;
+  }
+  if (changed) await chrome.storage.session.set({ [KEY_RESUME]: bag });
+}
+
 // --- the durable agent directory (ADR-016) ---------------------------------
 // The relay is stateless and can only say who is online RIGHT NOW. The wallet
 // signed the ownership certs, so the wallet is where the list of your agents

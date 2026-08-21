@@ -10,6 +10,24 @@ they moved.
 
 ## Unreleased
 
+### Revocation gets a surface: the popup lists what holds your agent, with the button that takes it back
+
+ADR-014's open problem 3 — revocation existed and was unreachable, CLI-only,
+with no surface listing standing authority. The popup now shows "origins
+holding your agent": live attachments AND stored resume records (a record
+that can re-attach IS standing authority, whether or not the worker's
+in-memory table survived the last eviction), each with the agent, tool
+count, how many tools ask every time, and expiry. Per-row Revoke and a
+Revoke-all send the owner-key `revoke` frame — which genuinely ends
+extension attachments now that tombstones are judged per-origin across
+tiers — and proactively erase the matching resume records, so withdrawn
+authority does not sit in the list until something retries it. The UI says
+what revocation IS: the whole grant for the origin (ADR-022's vocabulary
+argument — per-tool words do not exist yet, so all of it is the honest
+offer), with re-approval one consent screen away, nothing blacklisted. The
+merge rule and both verbs are asserted through the popup's own port
+surface, watched failing.
+
 ### The approval card names what the agent is about to click
 
 A per-call approval used to read `Run page.click` over `{"element":"g3e12"}`

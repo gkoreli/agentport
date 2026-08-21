@@ -354,7 +354,13 @@ export type PopupToWorker =
   | { t: 'pair.claim'; code: string }
   | { t: 'pair.approve'; code: string; name?: string }
   | { t: 'relay.set'; url: string }
-  | { t: 'sessions' };
+  | { t: 'sessions' }
+  /** Withdraw one origin's standing authority over one agent. Owner-key only
+   *  by construction: the worker holds the user key and the relay refuses a
+   *  revoke frame from anything else. Re-approving afterwards works — a
+   *  revocation is a tombstone, not a denylist (ADR-022). */
+  | { t: 'revoke'; agent: string; origin: string }
+  | { t: 'revoke.all' };
 
 // ---------------------------------------------------------------------------
 // Validation

@@ -1831,6 +1831,92 @@ const agentRow = { agent: 'a'.repeat(64), name: 'VPS Agent', runtime: 'acp', onl
 
 console.log('consent window check passed');
 
+// --- the popup's revocation surface ------------------------------------------
+//
+// ADR-014 open problem 3: revocation existed and was unreachable — CLI-only,
+// with no surface listing what holds your agent. The popup now shows standing
+// authority (live sessions AND stored resume records, because a record that
+// can re-attach IS authority) and wires per-row revoke plus revoke-all to the
+// owner-key revoke frame. What is assertable here without Chrome: the merge
+// rule, and the verb wiring through a stubbed port.
+{
+  const { PopupApi, standingAuthority } = await import('./src/popup-api.js');
+  const { saveResume, listResumes } = await import('./src/storage.js');
+
+  // 1. The merge rule. A live session covers its own record (no duplicate row
+  //    with one working Revoke button and one dead one); a stored-only record
+  //    still shows, as not-live; a different agent on the same origin is a
+  //    different row.
+  const live = [
+    { ref: 's1', origin: 'https://shop.example', from: 'page' as const, agent: 'a'.repeat(64), agentName: 'VPS Agent', tools: ['t1', 't2'], gated: 1, expiresAt: 90_000 },
+  ];
+  const stored = [
+    { id: 's1', agent: 'a'.repeat(64), token: 'tok', origin: 'https://shop.example', name: 'Shop', expiresAt: 90_000 },
+    { id: 's2', agent: 'b'.repeat(64), token: 'tok', origin: 'https://shop.example', name: 'Shop', expiresAt: 91_000 },
+    { id: 's3', agent: 'a'.repeat(64), token: 'tok', origin: 'https://docs.example', name: 'Docs', expiresAt: 92_000 },
+  ];
+  const rows = standingAuthority(live, stored);
+  assert.equal(rows.length, 3, 'the merge produced duplicate or missing standing-authority rows');
+  assert.equal(rows.filter((row) => row.origin === 'https://shop.example').length, 2, 'a second agent on the same origin is a separate authority and needs its own row');
+  const resumable = rows.find((row) => row.origin === 'https://docs.example');
+  assert.equal(resumable?.live, false, 'a stored-only record was shown as a live attachment');
+
+  // 2. The verbs, through the same port surface the real popup uses. The
+  //    chrome.storage.session stub makes listResumes/clearResumesFor real.
+  let bag: Record<string, unknown> = {};
+  installGlobal('chrome', {
+    storage: {
+      session: {
+        get: async (key: string) => ({ [key]: bag[key] }),
+        set: async (value: Record<string, unknown>) => { Object.assign(bag, value); },
+      },
+    },
+  });
+  bag = {};
+  await saveResume(stored[2]!);
+  assert.equal((await listResumes()).length, 1, 'the storage stub is not holding records, so nothing below can fail honestly');
+
+  const revoked: { agent: string; origin: string }[] = [];
+  const api = new PopupApi({
+    wallet: async () => ({ revoke: async (agent: string, origin: string) => { revoked.push({ agent, origin }); return 1; } }) as never,
+    forgetWallet: () => {},
+    sessions: () => live,
+    log: createLogger('check.popup', { level: 'debug', sink: () => {} }),
+  });
+  const replies: { t?: string; rid?: string; value?: unknown }[] = [];
+  let deliver: ((raw: unknown) => void) | undefined;
+  api.handlePort({
+    onMessage: { addListener: (fn: (raw: unknown) => void) => { deliver = fn; } },
+    postMessage: (reply: never) => replies.push(reply),
+  } as unknown as chrome.runtime.Port);
+  assert.ok(deliver, 'the popup api never listened on its port');
+
+  deliver!({ t: 'revoke', rid: 'r1', agent: 'a'.repeat(64), origin: 'https://docs.example' });
+  await within(
+    (async () => { while (!replies.some((r) => r.rid === 'r1')) await new Promise((r) => setTimeout(r, 10)); })(),
+    1_000,
+    'revoke verb reply',
+  );
+  assert.deepEqual(revoked, [{ agent: 'a'.repeat(64), origin: 'https://docs.example' }], 'the revoke verb did not send the owner-key revoke for the row the user clicked');
+  assert.equal((await listResumes()).length, 0, 'a revoked origin kept its resume record — standing authority the list would keep showing');
+
+  // 3. revoke.all reaches the stored-only rows too, not just the live table.
+  await saveResume(stored[2]!);
+  revoked.length = 0;
+  deliver!({ t: 'revoke.all', rid: 'r2' });
+  await within(
+    (async () => { while (!replies.some((r) => r.rid === 'r2')) await new Promise((r) => setTimeout(r, 10)); })(),
+    1_000,
+    'revoke.all reply',
+  );
+  assert.equal(revoked.length, 2, 'revoke.all missed a standing authority (live and stored-only are both authority)');
+  assert.ok(revoked.some((r) => r.origin === 'https://docs.example'), 'revoke.all never reached the stored-only origin');
+  assert.equal((await listResumes()).length, 0, 'revoke.all left a resume record standing');
+  installGlobal('chrome', undefined);
+}
+
+console.log('popup revocation check passed');
+
 // --- the worker keep-alive: awake while attached, asleep otherwise ----------
 //
 // `chrome.alarms` OUTLIVES the service worker, which is what makes the gate
