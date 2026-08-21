@@ -1779,6 +1779,56 @@ const agentRow = { agent: 'a'.repeat(64), name: 'VPS Agent', runtime: 'acp', onl
   );
 }
 
+// 6. The approval card's target line. The classification is the failure
+//    policy: silence (timeout, dead port) and a refusal from the page BOTH
+//    fail toward the alarmed line, never toward a quiet card that looks like
+//    nothing needed saying — the recorded flaw of the deleted describeCall().
+{
+  const { describeOutcome } = await import('./src/bridge.js');
+  const silent = describeOutcome(undefined);
+  assert.equal(silent.kind, 'refused', 'a page that never answered produced a quiet card instead of the alarmed line');
+  const refused = describeOutcome({ t: 'describe.result', rid: 'r', refusal: 'that element changed since you listed it' });
+  assert.ok(
+    refused.kind === 'refused' && refused.reason.includes('changed since you listed it'),
+    'the page-moved-under-the-request refusal did not reach the card as a refusal',
+  );
+  const described = describeOutcome({
+    t: 'describe.result',
+    rid: 'r',
+    target: { role: 'button', name: 'Confirm purchase', obstruction: 'clear' },
+  });
+  assert.ok(
+    described.kind === 'described' && described.element.name === 'Confirm purchase',
+    'a described element did not survive classification',
+  );
+
+  // And the window actually receives it: the target rides the approve payload
+  // to the consent surface, or the card renders blind again with everything
+  // upstream still green.
+  const fixture = consentFixture();
+  const decision = fixture.windows.askApproval(
+    's_target',
+    'https://shop.example',
+    { name: 'VPS Agent' },
+    { ...approvalPrompt, target: described },
+    new Set(),
+  );
+  await settle();
+  const shown = await new Promise<unknown>((resolve) => {
+    const port = {
+      onMessage: { addListener: (fn: (raw: unknown) => void) => setTimeout(() => fn({ t: 'consent.get', rid: 'r1', id: fixture.opened[0]!.pendingId }), 0) },
+      postMessage: (reply: { t: string; value?: unknown }) => {
+        if (reply.t === 'ok') resolve(reply.value);
+      },
+    };
+    fixture.windows.handlePort(port as unknown as chrome.runtime.Port);
+  });
+  const payload = shown as { target?: { kind: string } };
+  assert.equal(payload.target?.kind, 'described', 'the target line never reached the consent window payload');
+  fixture.windows.closeFor('s_target');
+  await within(decision, 1_000, 'target-carrying approval settles');
+}
+
 console.log('consent window check passed');
 
 // --- the worker keep-alive: awake while attached, asleep otherwise ----------

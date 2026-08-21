@@ -10,6 +10,24 @@ they moved.
 
 ## Unreleased
 
+### The approval card names what the agent is about to click
+
+A per-call approval used to read `Run page.click` over `{"element":"g3e12"}`
+— the user authorised an irreversible action against a token they cannot
+evaluate, which trains the reflexive-approval habit ADR-021 calls the worst
+outcome. For synthesized page tools acting on an element handle, the worker
+now asks the page's own document to name the target (a bounded describe
+round-trip, computed where the DOM is, rendered in extension chrome) and the
+card says `Target: button "Confirm purchase"` — with a covered or
+uncheckable target called out on the line. The failure policy is the point:
+silence, a dead document, and `resolveHandle`'s the-page-changed refusal all
+fail toward an ALARMED line telling the user this element cannot be named —
+never toward a quiet card, because the page having moved under the request
+is the moment naming matters most (the recorded flaw of the deleted
+`describeCall`). Site-declared tools get no describe: their arguments are
+not element handles, and a confident-looking refusal about a tool the page
+itself owns would mislead.
+
 ### The generic harness reads honestly, checks covers in three states, and gained its missing verbs
 
 A web-components page used to read as EMPTY — `{text:'', truncated:false}` —

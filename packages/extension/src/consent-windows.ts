@@ -46,6 +46,7 @@ import {
   mintId,
   type AgentRow,
   type AnswerField,
+  type ApprovalTarget,
   type ConsentPayload,
   type ConsentToWorker,
   type PageConnectRequest,
@@ -168,7 +169,14 @@ export class ConsentWindows {
     ref: string,
     origin: string,
     who: { name: string },
-    prompt: { domain: AuthorityDomain; summary: string; call?: { name: string; arguments: Record<string, unknown> } },
+    prompt: {
+      domain: AuthorityDomain;
+      summary: string;
+      call?: { name: string; arguments: Record<string, unknown> };
+      /** What the card may truthfully say about the element a synthesized
+       *  page tool targets — computed by the page's own document, upstream. */
+      target?: ApprovalTarget;
+    },
     synthesised: ReadonlySet<string>,
   ): Promise<boolean> {
     // The extension stamps this one, because the extension is the only party
@@ -193,6 +201,7 @@ export class ConsentWindows {
         domain,
         summary: prompt.summary,
         ...(prompt.call ? { call: prompt.call } : {}),
+        ...(prompt.target ? { target: prompt.target } : {}),
       },
       { ref, deadlineMs: this.#approveWindowMs },
     ).then((value) => value === true);

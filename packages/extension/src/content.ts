@@ -48,7 +48,7 @@ import {
   type WorkerToContent,
 } from './bridge.js';
 import type { OverlayAction, OverlayCommand } from './overlay.js';
-import { genericPageTools } from './pagetools.js';
+import { describeHandle, genericPageTools } from './pagetools.js';
 import { AGENTPORT_VERSION } from './version.js';
 import {
   WidgetSurface,
@@ -416,6 +416,32 @@ function onWorkerMessage(message: WorkerToContent): void {
     }
     case 'tool.call': {
       void runToolCall(message);
+      return;
+    }
+    case 'describe': {
+      // The approval card's target line, computed where the DOM is. A throw
+      // from describeHandle IS the answer — the page changed under the
+      // request, or the handle never existed — and it crosses as a refusal
+      // the card renders in its own alarmed words, never as silence.
+      try {
+        const described = describeHandle(message.element);
+        tell({
+          t: 'describe.result',
+          rid: message.rid,
+          target: {
+            role: described.role,
+            name: described.name,
+            obstruction: described.obstruction.state,
+            ...(described.obstruction.state === 'blocked'
+              ? { detail: described.obstruction.by }
+              : described.obstruction.state === 'unknown'
+                ? { detail: described.obstruction.why }
+                : {}),
+          },
+        });
+      } catch (err) {
+        tell({ t: 'describe.result', rid: message.rid, refusal: err instanceof Error ? err.message : String(err) });
+      }
       return;
     }
     case 'event': {

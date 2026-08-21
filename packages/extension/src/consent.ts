@@ -151,6 +151,26 @@ const Approve = component('ap-consent-approve', () => {
     }
   })();
 
+  // What the card can truthfully say about the ELEMENT a synthesized page
+  // tool is about to act on. `{"element":"g3e12"}` alone is an approval made
+  // blind; this line names the target in the words a person recognises — and
+  // when the page changed under the request, the refusal IS the message, on
+  // the alarmed styling, because that is the moment naming matters most.
+  const target = ((): { text: string; alarmed: boolean } | undefined => {
+    if (!state.target) return undefined;
+    if (state.target.kind === 'refused') {
+      return { alarmed: true, text: `This element cannot be named: ${state.target.reason}. Decline unless you expected that.` };
+    }
+    const el = state.target.element;
+    const caveat =
+      el.obstruction === 'blocked'
+        ? ` — but it is covered right now${el.detail ? ` (${el.detail})` : ''}`
+        : el.obstruction === 'unknown'
+          ? ` — the cover check could not run${el.detail ? ` (${el.detail})` : ''}`
+          : '';
+    return { alarmed: el.obstruction === 'blocked', text: `Target: ${el.role} “${el.name}”${caveat}` };
+  })();
+
   return html`
     <main>
       <header><b>AgentPort</b><span>approval</span></header>
@@ -161,6 +181,7 @@ const Approve = component('ap-consent-approve', () => {
         </div>
         <p class="authority">${authority}</p>
         <p class="surface">${state.agentName} asks: ${state.summary}</p>
+        ${target ? html`<p class=${target.alarmed ? 'target alarmed' : 'target'}>${target.text}</p>` : html``}
         ${when(computed(() => Boolean(args)), () => html`<pre>${args}</pre>`)}
       </section>
       <footer>

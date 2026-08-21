@@ -63,13 +63,16 @@ import {
   createLogger,
   Deferred,
   toErr,
+  type AuthorityDomain,
   type LogContext,
   type PlanStep,
   type ToolDefinition,
 } from '@agentport/protocol';
 import {
   LIMITS,
+  describeOutcome,
   type AnswerField,
+  type ApprovalTarget,
   mintId,
   sanitizeConnectRequest,
   isRecord,
@@ -658,7 +661,7 @@ async function openSession(
     ttlMs: request.ttlMs,
     // Approvals go to extension chrome. The decision window is independent of
     // page DOM and closing it without answering fails shut.
-    decide: (prompt) => consentWindows.askApproval(ref, origin, who, prompt, synthesisedNames(from, request)),
+    decide: approvalDecider(ref, origin, who, from, request),
   });
 
   const entry: SessionEntry = {
@@ -755,7 +758,7 @@ async function resumeFromStore(
       agent: record.agent,
       token: record.token,
       tools,
-      decide: (prompt) => consentWindows.askApproval(ref, origin, who, prompt, synthesisedNames(from, request)),
+      decide: approvalDecider(ref, origin, who, from, request),
     });
     who.name = session.info.agentName;
     const entry: SessionEntry = {
@@ -859,6 +862,81 @@ class Rejected extends Error {
     super(message);
     this.name = 'Rejected';
   }
+}
+
+// --- the approval card's target line ----------------------------------------
+
+/**
+ * How long the card waits for the page to name the element a synthesized tool
+ * is about to act on. Bounded and SHORT: this wait sits between the agent
+ * asking and the user being shown anything, so a slow page must degrade to
+ * the refused line on the card, never delay the card itself past noticing.
+ * The content-side computation is synchronous DOM reads; one second is
+ * generous for a live document and instantly distinguishes a dead one.
+ */
+const DESCRIBE_DEADLINE_MS = 1_000;
+
+const pendingDescribes = new Map<string, (reply?: Extract<ContentToWorker, { t: 'describe.result' }>) => void>();
+
+/**
+ * Ask the session's document what an element handle currently IS. Every
+ * failure path — no bound document, timeout, a refusal from `resolveHandle` —
+ * flows through `describeOutcome` and reaches the card as the alarmed line,
+ * because "this element cannot be named" is exactly what the user must see
+ * before deciding (the page having changed under the request is the case that
+ * matters most). The rid is minted here and unguessable, so only the document
+ * we asked can answer it.
+ */
+async function describeTarget(ref: string, element: string): Promise<ApprovalTarget> {
+  const entry = sessions.get(ref);
+  const port = entry?.port;
+  if (!port) return { kind: 'refused', reason: 'the page that owns this element is not attached right now' };
+  const rid = mintId('d_');
+  const reply = await new Promise<Extract<ContentToWorker, { t: 'describe.result' }> | undefined>((resolve) => {
+    const timer = setTimeout(() => {
+      if (pendingDescribes.delete(rid)) resolve(undefined);
+    }, DESCRIBE_DEADLINE_MS);
+    pendingDescribes.set(rid, (value) => {
+      clearTimeout(timer);
+      pendingDescribes.delete(rid);
+      resolve(value);
+    });
+    post(port, { t: 'describe', rid, ref, element });
+  });
+  return describeOutcome(reply);
+}
+
+/**
+ * The decide callback both the open and resume paths hand the wallet: fetch
+ * the target line for a synthesized page tool acting on an element handle,
+ * then put the decision to extension chrome. Site-declared tools get no
+ * describe round-trip — their arguments are not element handles, and asking
+ * the page to describe one would render a confident-looking refusal about a
+ * tool the page itself owns.
+ */
+function approvalDecider(
+  ref: string,
+  origin: string,
+  who: { name: string },
+  from: Origin,
+  request: PageConnectRequest,
+): (prompt: {
+  domain: AuthorityDomain;
+  summary: string;
+  call?: { name: string; arguments: Record<string, unknown> };
+}) => Promise<boolean> {
+  return async (prompt) => {
+    const synthesised = synthesisedNames(from, request);
+    const element = prompt.call && synthesised.has(prompt.call.name) ? prompt.call.arguments['element'] : undefined;
+    const target = typeof element === 'string' ? await describeTarget(ref, element) : undefined;
+    return consentWindows.askApproval(
+      ref,
+      origin,
+      who,
+      { ...prompt, ...(target ? { target } : {}) },
+      synthesised,
+    );
+  };
 }
 
 // --- content script port ---------------------------------------------------
@@ -1058,6 +1136,17 @@ async function onContentMessage(port: chrome.runtime.Port, message: ContentReque
     }
     case 'prompt.cancel': {
       lookup(port, message.ref)?.session.cancel(message.promptId);
+      return;
+    }
+    case 'describe.result': {
+      const settle = pendingDescribes.get(message.rid);
+      if (!settle) {
+        // Late (past the deadline) or unsolicited. Either way the decision it
+        // was for has already been composed; drop it, but say so.
+        log.info('a describe reply arrived for no pending approval', { data: { rid: message.rid } });
+        return;
+      }
+      settle(message);
       return;
     }
     case 'tool.result': {

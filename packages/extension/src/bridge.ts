@@ -182,6 +182,8 @@ export type ContentToWorker =
   | { t: 'prompt'; rid: string; ref: string; promptId: string; text: string; context?: Record<string, unknown> }
   | { t: 'prompt.cancel'; ref: string; promptId: string }
   | { t: 'tool.result'; ref: string; callId: string; ok: boolean; result?: unknown; error?: string }
+  /** The content script's answer to a `describe` request (see ApprovalTarget). */
+  | { t: 'describe.result'; rid: string; target?: DescribedElement; refusal?: string }
   | { t: 'close'; ref: string; reason?: string }
   | { t: 'status'; rid: string };
 
@@ -190,7 +192,47 @@ export type WorkerToContent =
   | { t: 'ok'; rid: string; value?: unknown }
   | { t: 'err'; rid: string; reason: ExtensionProviderErrorReason; message: string }
   | { t: 'tool.call'; ref: string; callId: string; name: string; arguments: Record<string, unknown> }
+  /** Name the element a synthesized page tool is about to act on, for the
+   *  approval card. Computed where the DOM is; rendered in extension chrome. */
+  | { t: 'describe'; rid: string; ref: string; element: string }
   | { t: 'event'; ref: string; event: string; payload: unknown };
+
+/** What `describeHandle` said about the element, as it crosses to the worker. */
+export interface DescribedElement {
+  role: string;
+  name: string;
+  obstruction: 'clear' | 'blocked' | 'unknown';
+  /** The blocked coverer or the unknown reason, when there is one. */
+  detail?: string;
+}
+
+/**
+ * What the approval card says about the element a page tool targets (ADR-023
+ * R4: the card must say true things in words a human recognises — an approval
+ * that reads `{"element":"g3e12"}` is approved blind, which trains the
+ * reflexive-approval habit ADR-021 names as the worst outcome).
+ *
+ * `refused` is the load-bearing half: `resolveHandle` refuses when the element
+ * changed since it was listed, and THAT — the page moved under the request —
+ * is the most important thing the card can say. A silent absence of
+ * description at exactly that moment was the recorded flaw of the deleted
+ * `describeCall()`.
+ */
+export type ApprovalTarget =
+  | { kind: 'described'; element: DescribedElement }
+  | { kind: 'refused'; reason: string };
+
+/**
+ * Classify a describe reply into what the card renders. Pure, and here rather
+ * than in the worker, because the mapping IS the failure policy: no reply
+ * (timeout, dead port) and a refusal both fail toward the alarmed line, never
+ * toward a quiet card that looks like nothing needed saying.
+ */
+export function describeOutcome(reply?: Extract<ContentToWorker, { t: 'describe.result' }>): ApprovalTarget {
+  if (!reply) return { kind: 'refused', reason: 'the page did not answer in time, so this element cannot be named' };
+  if (reply.target) return { kind: 'described', element: reply.target };
+  return { kind: 'refused', reason: reply.refusal ?? 'the page could not name this element' };
+}
 
 // ---------------------------------------------------------------------------
 // Consent window ⇄ service worker
@@ -219,6 +261,9 @@ export type ConsentPayload =
       domain: AuthorityDomain;
       summary: string;
       call?: { name: string; arguments: Record<string, unknown> };
+      /** For synthesized page tools acting on an element handle: what the
+       *  card can truthfully say about the target, or why it cannot. */
+      target?: ApprovalTarget;
     }
   /**
    * The agent asking its own user a question (ADR-024 R12).
