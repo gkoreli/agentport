@@ -32,6 +32,30 @@
  * Crossing an origin is not a navigation the attachment follows: the origin is
  * the unit of consent, so a top-level document arriving on a different origin
  * closes what the tab was holding instead of parking it.
+ *
+ * WHAT LIVES HERE, NOW THAT THREE SERVICES DO NOT. Consent windows
+ * (`consent-windows.ts`), the popup's own verbs (`popup-api.ts`) and the
+ * worker's keep-alive (`keepalive.ts`) have moved out. Each held state nothing
+ * else reads, each had a failure discipline of its own, and none of them could
+ * be reached from a check while it lived in a module that touches `self` at
+ * load — which is the whole reason they are objects taking their browser-shaped
+ * dependencies now. This file keeps the socket, the key custody and the table.
+ *
+ * THE SESSION REGISTRY STAYS WHOLE, and that is a decision rather than an
+ * omission. `orphanSession`, `reclaimSession`, `dropSession`, `noteDocument`
+ * and the `wireSession` listeners are not five independent functions; they are
+ * both halves of two invariants — a parked session is reclaimed by exactly one
+ * identity, and every drop settles everything that was waiting on it (pending
+ * calls, parked tool calls, the orphan timer, the durable resume record, the
+ * consent windows it opened). Every one of those cross-checks is currently
+ * within reading distance of the others. Splitting the table from the rules
+ * that maintain it would scatter them into different files and leave the next
+ * reader to discover by absence that some `sessions.delete` elsewhere forgot an
+ * orphan timer. Line count is not a reason to move them; if they ever move,
+ * they move TOGETHER, as one object that owns the table.
+ *
+ * `rememberSession` and `forgetSession` are the only ways that table changes,
+ * so bookkeeping tied to its SIZE cannot be forgotten by a sixth path.
  */
 
 import { AgentWallet, ResumeError, type AgentSession, type SiteTool } from '@agentport/client';
@@ -39,42 +63,33 @@ import {
   createLogger,
   Deferred,
   toErr,
-  type AgentSummary,
   type LogContext,
   type PlanStep,
   type ToolDefinition,
-  type AuthorityDomain,
-  type FormField,
 } from '@agentport/protocol';
 import {
   LIMITS,
-  consentDenial,
   type AnswerField,
   mintId,
   sanitizeConnectRequest,
   isRecord,
-  type AgentRow,
-  type ConsentPayload,
-  type ConsentToWorker,
+  toAgentRow,
   type ContentToWorker,
   type ExtensionProviderErrorReason,
   type Origin,
   type PageConnectRequest,
-  type PopupToWorker,
-  type WorkerToConsent,
   type WorkerToContent,
 } from './bridge.js';
+import { ConsentWindows } from './consent-windows.js';
+import { KeepAlive } from './keepalive.js';
 import { leftBehindByNavigation, mayReclaim, reclaimKeyFor, synthesisedNames } from './lifecycle.js';
-import { loadCerts, saveCert,
-  DEFAULT_RELAY_URL,
+import { PopupApi } from './popup-api.js';
+import { saveCert,
   clearResume,
-  ensureUserKey,
-  importUserKey,
   loadResume,
   originAlias,
   relayUrl,
   saveResume,
-  setRelayUrl,
   userPublicKey,
   userSecretKey,
 } from './storage.js';
@@ -137,31 +152,6 @@ async function getWallet(): Promise<AgentWallet> {
   });
   return walletPromise;
 }
-
-/**
- * Chrome stops an idle MV3 worker after 30s. Socket traffic resets that timer
- * (Chrome 116+), but a session that is merely *open* and quiet would not — so
- * touch storage while any session exists, which keeps alive the worker, its
- * socket, and the wallet's own redial timers along with them.
- *
- * Waking the worker is all this can do. An eviction takes the session table
- * with it — it is in memory deliberately, because the transcript is the
- * user's — so a woken worker has no attachment left to redial FOR. Recovering
- * from an eviction is `resumeFromStore`, driven by the next document that
- * connects carrying a matching resume record.
- */
-function keepAlive(): void {
-  observe(chrome.storage.local.get('agentport.keepalive'), 'service-worker keepalive storage touch failed');
-}
-setInterval(() => {
-  if (sessions.size > 0) keepAlive();
-}, 20_000);
-
-observe(chrome.alarms?.create('agentport.keepalive', { periodInMinutes: 1 }), 'failed to create keepalive alarm');
-chrome.alarms?.onAlarm.addListener((alarm) => {
-  if (alarm.name !== 'agentport.keepalive') return;
-  keepAlive();
-});
 
 // --- session registry ------------------------------------------------------
 
@@ -229,16 +219,6 @@ interface SessionEntry {
 const ORPHAN_GRACE_MS = 2 * 60 * 1000;
 
 /**
- * How long a question window may sit unanswered.
- *
- * Strictly inside the daemon's own `ASK_TIMEOUT_MS` (5 minutes), because past
- * that the daemon has already decayed the question to a skip and treats a late
- * answer as a silent no-op — so a longer window here would let someone fill in
- * a form that goes nowhere and never says so.
- */
-const ASK_WINDOW_MS = 4 * 60 * 1000;
-
-/**
  * How long a tool call waits for the next document to bind before failing.
  * The agent clicks a link and immediately reads the page it landed on; that
  * call must wait for the navigation rather than error out mid-turn. It must
@@ -249,6 +229,50 @@ const NAV_SETTLE_MS = 10_000;
 
 const sessions = new Map<string, SessionEntry>();
 const portSessions = new WeakMap<chrome.runtime.Port, Set<string>>();
+
+/**
+ * The worker stays awake exactly while this table is non-empty — the rule, and
+ * the reasoning behind it, are in `keepalive.ts`. Only the chrome half is here.
+ *
+ * The alarm and the interval are both periodic wake-ups and both go through
+ * `wake()`, because they answer the same question ("is there anything left to
+ * keep awake?") and answering it in two places is how the alarm came to fire
+ * unconditionally while the interval beside it was gated.
+ *
+ * One name serves both halves: the alarm that wakes the worker, and the storage
+ * key whose read is the touch that resets Chrome's idle timer.
+ */
+const KEEPALIVE_NAME = 'agentport.keepalive';
+const keepAlive = new KeepAlive({
+  live: () => sessions.size,
+  host: {
+    touch: () =>
+      observe(chrome.storage.local.get(KEEPALIVE_NAME), 'service-worker keepalive storage touch failed'),
+    arm: () =>
+      observe(chrome.alarms?.create(KEEPALIVE_NAME, { periodInMinutes: 1 }), 'failed to create keepalive alarm'),
+    clear: () => observe(chrome.alarms?.clear(KEEPALIVE_NAME), 'failed to clear keepalive alarm'),
+  },
+});
+setInterval(() => keepAlive.wake(), 20_000);
+chrome.alarms?.onAlarm.addListener((alarm) => {
+  if (alarm.name !== KEEPALIVE_NAME) return;
+  keepAlive.wake();
+});
+// A fresh worker starts with an empty table and may have inherited an alarm
+// from the generation that was evicted holding a session. Reconciling once at
+// load is the only moment that one is ever cleared.
+keepAlive.sync();
+
+/** The two ways the table changes, so nothing keyed on its size is forgotten. */
+function rememberSession(entry: SessionEntry): void {
+  sessions.set(entry.ref, entry);
+  keepAlive.sync();
+}
+
+function forgetSession(ref: string): void {
+  sessions.delete(ref);
+  keepAlive.sync();
+}
 
 function refsOf(port: chrome.runtime.Port): Set<string> {
   let set = portSessions.get(port);
@@ -346,13 +370,11 @@ function reclaimSession(
 }
 
 function dropSession(entry: SessionEntry, reason: string): void {
-  sessions.delete(entry.ref);
+  forgetSession(entry.ref);
   // A question window outliving its session is a form the user fills in for
   // an agent that has stopped listening. Settle it as a skip, which also
   // closes the window.
-  for (const pending of [...pendingUi.values()]) {
-    if (pending.ref === entry.ref) settleUi(pending.id, consentDenial('ask'));
-  }
+  consentWindows.closeFor(entry.ref);
   clearTimeout(entry.orphanTimer);
   if (entry.port) refsOf(entry.port).delete(entry.ref);
   for (const deferred of entry.pending.values()) deferred.resolve({ ok: false, error: `session closed: ${reason}` });
@@ -410,209 +432,32 @@ function post(port: chrome.runtime.Port, message: WorkerToContent): void {
 
 // --- extension-chrome consent (ADR-009) ------------------------------------
 //
-// The question and the answer never touch page DOM. A pending question is a
-// payload the consent window fetches by id and answers over its own port, and
-// every per-call approval uses that same extension-origin window. OS
-// notifications are not a decision surface: platforms may suppress them
-// after Chrome reports successful creation, leaving the tool call unanswered.
+// The question and the answer never touch page DOM. Every consent surface this
+// worker raises — the connect picker, a pairing confirmation, a per-call
+// approval, a question from the agent — is a window on the extension origin,
+// and the service is `consent-windows.ts`. Only the chrome plumbing is here.
 //
-// What a NON-answer means per kind lives in `CONSENT_DENIAL`, not in a ternary
-// at each of these call sites.
-
-interface PendingUi {
-  id: string;
-  payload: ConsentPayload;
-  deferred: Deferred<unknown>;
-  windowId?: number;
-  /**
-   * The session this window is asking on behalf of, when there is one.
-   *
-   * Only questions carry it, and only so a dying session can close its own
-   * window. Without it the user goes on filling in a form whose agent stopped
-   * listening — the form-shaped version of the stall this whole path exists to
-   * avoid.
-   */
-  ref?: string;
-}
-
-const pendingUi = new Map<string, PendingUi>();
-
-function settleUi(id: string, value: unknown): void {
-  const pending = pendingUi.get(id);
-  if (!pending) return;
-  pendingUi.delete(id);
-  pending.deferred.resolve(value);
-  if (pending.windowId !== undefined) {
-    observe(chrome.windows.remove(pending.windowId), 'failed to close consent window', { data: { pendingId: id } });
-  }
-}
-
-async function openUiWindow(pending: PendingUi): Promise<void> {
-  try {
-    const win = await chrome.windows.create({
-      url: chrome.runtime.getURL(`consent.html#${pending.id}`),
-      type: 'popup',
-      width: 400,
-      height: 620,
-      focused: true,
-    });
-    pending.windowId = win.id;
-  } catch (err) {
-    log.error('could not open consent window; denying request', {
-      err,
-      data: { pendingId: pending.id, kind: pending.payload.kind },
-    });
-    // No window means no consent surface, and a missing answer is a denial.
-    settleUi(pending.id, consentDenial(pending.payload.kind));
-  }
-}
-
-chrome.windows.onRemoved.addListener((windowId) => {
-  for (const pending of [...pendingUi.values()]) {
-    if (pending.windowId !== windowId) continue;
-    // Closing the window without answering is a denial, never a default grant.
-    settleUi(pending.id, consentDenial(pending.payload.kind));
-  }
+// OS notifications are deliberately not a decision surface: platforms may
+// suppress them after Chrome reports successful creation, leaving the tool call
+// unanswered with nobody able to see that it was never asked.
+const consentWindows = new ConsentWindows({
+  host: {
+    open: async (pendingId) => {
+      const win = await chrome.windows.create({
+        url: chrome.runtime.getURL(`consent.html#${pendingId}`),
+        type: 'popup',
+        width: 400,
+        height: 620,
+        focused: true,
+      });
+      return win.id;
+    },
+    close: (windowId) => chrome.windows.remove(windowId),
+    onRemoved: (listener) => chrome.windows.onRemoved.addListener(listener),
+  },
 });
 
-/** The connect consent: verified origin, agent picker, tool list. Resolves
- *  with the chosen agent's pubkey, or null for a decline. */
-function askConnect(origin: string, agents: AgentRow[], request: PageConnectRequest): Promise<string | null> {
-  const pending: PendingUi = {
-    id: mintId('ui_'),
-    payload: { kind: 'connect', origin, request, agents },
-    deferred: new Deferred<unknown>(),
-  };
-  pendingUi.set(pending.id, pending);
-  observe(openUiWindow(pending), 'connect consent window flow failed', { data: { pendingId: pending.id } });
-  return pending.deferred.promise.then((value) => (typeof value === 'string' ? value : null));
-}
-
-function askPair(agent: { name: string; runtime: string; location?: string }): Promise<boolean> {
-  const pending: PendingUi = {
-    id: mintId('ui_'),
-    payload: { kind: 'pair', agent },
-    deferred: new Deferred<unknown>(),
-  };
-  pendingUi.set(pending.id, pending);
-  observe(openUiWindow(pending), 'pairing consent window flow failed', { data: { pendingId: pending.id } });
-  return pending.deferred.promise.then((value) => value === true);
-}
-
-/** A per-call approval in extension chrome. Never the page or OS chrome. */
-function askApproval(
-  origin: string,
-  who: { name: string },
-  prompt: { domain: AuthorityDomain; summary: string; call?: { name: string; arguments: Record<string, unknown> } },
-  synthesised: ReadonlySet<string>,
-): Promise<boolean> {
-  // The extension stamps this one, because the extension is the only party
-  // that knows. The client sees a tool in a grant and calls it `site_tool`;
-  // it cannot tell a tool the SITE declared from one WE synthesised over a
-  // page that declared nothing. Same rule as ADR-023 R2 — the side that knows
-  // the truth decides — applied one hop further out.
-  //
-  // This is a DISPLAY correction, not a routing one. A generic page tool
-  // routes exactly as a site tool does, because a page can already click its
-  // own buttons; what was wrong is telling the user a site lent a capability
-  // the site has never heard of.
-  const domain: AuthorityDomain =
-    prompt.domain === 'site_tool' && prompt.call && synthesised.has(prompt.call.name)
-      ? 'generic_page_tool'
-      : prompt.domain;
-  const pending: PendingUi = {
-    id: mintId('ui_'),
-    payload: {
-      kind: 'approve',
-      origin,
-      agentName: who.name,
-      domain,
-      summary: prompt.summary,
-      ...(prompt.call ? { call: prompt.call } : {}),
-    },
-    deferred: new Deferred<unknown>(),
-  };
-  pendingUi.set(pending.id, pending);
-  observe(openUiWindow(pending), 'approval consent window flow failed', { data: { pendingId: pending.id } });
-
-  return pending.deferred.promise.then((value) => value === true);
-}
-
-/**
- * The agent asking its own user a question, in extension chrome (ADR-024 R12).
- *
- * The daemon grants this tier `mayAsk` because the CLIENT holds the user key —
- * and the client is this worker, not the document. So the question never
- * reaches page world at all: it opens the same extension-origin window every
- * approval uses, and only the answer travels back.
- *
- * Resolves the fields the user filled, or `undefined` for a SKIP. A skip is a
- * real answer meaning "proceed without one", which is why every failure path
- * here produces one rather than leaving the agent waiting.
- */
-function askQuestion(
-  ref: string,
-  origin: string,
-  who: { name: string },
-  question: { message: string; fields: FormField[] },
-): Promise<AnswerField[] | undefined> {
-  const pending: PendingUi = {
-    id: mintId('ui_'),
-    payload: { kind: 'ask', origin, agentName: who.name, message: question.message, fields: question.fields },
-    deferred: new Deferred<unknown>(),
-    ref,
-  };
-  pendingUi.set(pending.id, pending);
-  // Our own deadline, strictly inside the daemon's ASK_TIMEOUT_MS. Past that
-  // the daemon has already decayed the question to a skip and treats a late
-  // answer as a silent no-op — so without this the user fills in a form that
-  // goes nowhere and is never told. AGENTS.md rule 3 applied to a surface
-  // rather than to a check.
-  const timer = setTimeout(() => {
-    if (!pendingUi.has(pending.id)) return;
-    log.warn('closing an unanswered question before the agent stops listening', {
-      data: { pendingId: pending.id, origin },
-    });
-    settleUi(pending.id, consentDenial('ask'));
-  }, ASK_WINDOW_MS);
-  observe(openUiWindow(pending), 'question consent window flow failed', { data: { pendingId: pending.id } });
-
-  return pending.deferred.promise.then((value) => {
-    clearTimeout(timer);
-    // Anything that is not a list of fields is a skip: the denial value, a
-    // dismissed window, a worker that restarted. Never coerced into an answer.
-    return Array.isArray(value) ? (value as AnswerField[]) : undefined;
-  });
-}
-
-function handleConsent(port: chrome.runtime.Port): void {
-  const reply = (message: WorkerToConsent) => {
-    try {
-      port.postMessage(message);
-    } catch {
-      // window already gone
-    }
-  };
-  port.onMessage.addListener((raw: unknown) => {
-    if (!isRecord(raw)) return;
-    const message = raw as ConsentToWorker;
-    if (message.t === 'consent.get') {
-      const pending = typeof message.id === 'string' ? pendingUi.get(message.id) : undefined;
-      if (pending) reply({ t: 'ok', rid: message.rid, value: pending.payload });
-      else reply({ t: 'err', rid: message.rid, message: 'nothing to decide — this question was already answered' });
-      return;
-    }
-    if (message.t === 'consent.answer' && typeof message.id === 'string') {
-      settleUi(message.id, message.value);
-    }
-  });
-}
-
 // --- connection flow -------------------------------------------------------
-
-function toRow(agent: AgentSummary): AgentRow {
-  return { agent: agent.agent, name: agent.name, runtime: agent.runtime, location: agent.location, online: agent.online };
-}
 
 /**
  * What a PAGE may learn about the session (ADR-009): a generic label and a
@@ -701,7 +546,7 @@ function wireSession(entry: SessionEntry): void {
     void (async () => {
       let values: AnswerField[] | undefined;
       try {
-        values = await askQuestion(ref, entry.origin, { name: session.info.agentName }, question);
+        values = await consentWindows.askQuestion(ref, entry.origin, { name: session.info.agentName }, question);
       } catch (err) {
         log.error('the question surface failed; skipping so the turn continues', { err, data: { ref } });
         values = undefined;
@@ -756,7 +601,7 @@ function wireSession(entry: SessionEntry): void {
     // A socket-level resume swapped the session object; the old one going
     // quiet must not tear down its replacement.
     if (current && current.session !== session) return;
-    sessions.delete(ref);
+    forgetSession(ref);
     clearTimeout(current?.orphanTimer);
     if (current) {
       for (const settle of [...current.parked]) settle({ error: 'session closed' });
@@ -790,7 +635,7 @@ async function openSession(
 
   // Picker + consent are ONE extension-chrome window: verified origin, agent
   // rows, the tools with gated ones marked, Approve/Decline.
-  const picked = await askConnect(origin, agents.map(toRow), request);
+  const picked = await consentWindows.askConnect(origin, agents.map(toAgentRow), request);
   const chosen = agents.find((agent) => agent.agent === picked);
   if (!chosen) throw new Rejected('cancelled', 'the user declined the connection');
 
@@ -813,7 +658,7 @@ async function openSession(
     ttlMs: request.ttlMs,
     // Approvals go to extension chrome. The decision window is independent of
     // page DOM and closing it without answering fails shut.
-    decide: (prompt) => askApproval(origin, who, prompt, synthesisedNames(from, request)),
+    decide: (prompt) => consentWindows.askApproval(origin, who, prompt, synthesisedNames(from, request)),
   });
 
   const entry: SessionEntry = {
@@ -840,7 +685,7 @@ async function openSession(
     parked: new Set(),
     missedEvents: 0,
   };
-  sessions.set(ref, entry);
+  rememberSession(entry);
   refsOf(port).add(ref);
   wireSession(entry);
 
@@ -910,7 +755,7 @@ async function resumeFromStore(
       agent: record.agent,
       token: record.token,
       tools,
-      decide: (prompt) => askApproval(origin, who, prompt, synthesisedNames(from, request)),
+      decide: (prompt) => consentWindows.askApproval(origin, who, prompt, synthesisedNames(from, request)),
     });
     who.name = session.info.agentName;
     const entry: SessionEntry = {
@@ -931,7 +776,7 @@ async function resumeFromStore(
       parked: new Set(),
       missedEvents: 0,
     };
-    sessions.set(ref, entry);
+    rememberSession(entry);
     refsOf(port).add(ref);
     wireSession(entry);
     return entry;
@@ -1095,7 +940,7 @@ async function onContentMessage(port: chrome.runtime.Port, message: ContentReque
       }
       const wallet = await getWallet();
       const offer = await wallet.claimPairing(code);
-      const approved = await askPair(offer.agent);
+      const approved = await consentWindows.askPair(offer.agent);
       if (!approved) {
         post(port, { t: 'err', rid: message.rid, reason: 'cancelled', message: 'pairing declined' });
         return;
@@ -1243,93 +1088,30 @@ async function onContentMessage(port: chrome.runtime.Port, message: ContentReque
 }
 
 // --- popup port ------------------------------------------------------------
+//
+// Extension origin on both ends, and none of these verbs opens or drives a
+// session — the service is `popup-api.ts`. What it cannot have is this table:
+// the popup shows what currently holds the user's agent, so the registry hands
+// it a read-only view rather than the map itself.
 
-function handlePopup(port: chrome.runtime.Port): void {
-  port.onMessage.addListener((raw: unknown) => {
-    if (!isRecord(raw) || typeof raw['rid'] !== 'string') return;
-    const rid = raw['rid'];
-    const reply = (message: unknown) => {
-      try {
-        port.postMessage(message);
-      } catch {
-        // The popup was closed; there is no remaining user-visible surface to update.
-      }
-    };
-    void onPopupMessage(raw as unknown as PopupToWorker)
-      .then((value) => reply({ t: 'ok', rid, value }))
-      .catch((err: unknown) => {
-        log.error('popup request failed', { err, data: { messageType: raw['t'] } });
-        reply({ t: 'err', rid, message: toErr(err).message });
-      });
-  });
-}
-
-const pairOffers = new Map<string, { code: string; agent: { pubkey: string; name: string; runtime: string; location?: string } }>();
-
-async function onPopupMessage(message: PopupToWorker): Promise<unknown> {
-  switch (message.t) {
-    case 'identity':
-      return { pubkey: await userPublicKey(), relay: await relayUrl(), defaultRelay: DEFAULT_RELAY_URL };
-    case 'identity.create': {
-      await ensureUserKey();
-      walletPromise = undefined;
-      return { pubkey: await userPublicKey() };
-    }
-    case 'identity.import': {
-      await importUserKey(String(message.secretKey ?? '').trim());
-      walletPromise = undefined;
-      return { pubkey: await userPublicKey() };
-    }
-    case 'relay.set': {
-      const url = await setRelayUrl(String(message.url ?? '').trim());
-      walletPromise = undefined;
-      return { relay: url };
-    }
-    case 'agents': {
-      // Durable list from our own cert store; liveness from the relay.
-      const wallet = await getWallet();
-      const [owned, live] = await Promise.all([loadCerts(), wallet.listAgents()]);
-      const online = new Set(live.map((agent) => agent.agent));
-      const rows = owned.map((cert) => ({ ...cert, online: online.has(cert.agent) }));
-      for (const agent of live) {
-        if (!rows.some((row) => row.agent === agent.agent)) rows.push(toRow(agent));
-      }
-      return { agents: rows };
-    }
-    case 'pair.claim': {
-      const wallet = await getWallet();
-      const offer = await wallet.claimPairing(String(message.code ?? '').trim().toUpperCase());
-      pairOffers.set(offer.code, offer);
-      return offer;
-    }
-    case 'pair.approve': {
-      const offer = pairOffers.get(String(message.code ?? ''));
-      if (!offer) throw new Error('claim the pairing code first');
-      const wallet = await getWallet();
-      // The cert is signed here, inside the worker, from a key that never left
-      // it. This is the one moment the user key is used for anything but auth.
-      const cert = await wallet.approvePairing(offer, message.name ? { name: message.name } : {});
-      pairOffers.delete(offer.code);
-      // The wallet is the durable directory (ADR-016): the stateless relay
-      // will only ever report live agents, so remember what we own here.
-      await saveCert({ agent: cert.agent, name: cert.name, runtime: cert.runtime, location: cert.location });
-      return { cert: { agent: cert.agent, name: cert.name, runtime: cert.runtime } };
-    }
-    case 'sessions':
-      return {
-        sessions: [...sessions.values()].map((entry) => ({
-          ref: entry.ref,
-          origin: entry.origin,
-          from: entry.from,
-          agentName: entry.session.info.agentName,
-          tools: [...entry.toolNames],
-          expiresAt: entry.session.grant.expiresAt,
-        })),
-      };
-    default:
-      throw new Error('unknown request');
-  }
-}
+const popupApi = new PopupApi({
+  wallet: getWallet,
+  forgetWallet: () => {
+    // A new identity or a new relay invalidates the socket this worker dialled:
+    // an AgentWallet is bound to the key it authenticated with and the host it
+    // authenticated against, so the next caller must dial a fresh one.
+    walletPromise = undefined;
+  },
+  sessions: () =>
+    [...sessions.values()].map((entry) => ({
+      ref: entry.ref,
+      origin: entry.origin,
+      from: entry.from,
+      agentName: entry.session.info.agentName,
+      tools: [...entry.toolNames],
+      expiresAt: entry.session.grant.expiresAt,
+    })),
+});
 
 // --- entry -----------------------------------------------------------------
 
@@ -1343,8 +1125,8 @@ chrome.runtime.onConnect.addListener((port) => {
     return;
   }
   if (port.name === 'agentport.content' && port.sender.tab) handleContent(port);
-  else if (port.name === 'agentport.popup' && !port.sender.tab) handlePopup(port);
+  else if (port.name === 'agentport.popup' && !port.sender.tab) popupApi.handlePort(port);
   else if (port.name === 'agentport.consent' && port.sender.url?.startsWith(chrome.runtime.getURL('consent.html')))
-    handleConsent(port);
+    consentWindows.handlePort(port);
   else port.disconnect();
 });

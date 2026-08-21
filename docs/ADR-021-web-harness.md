@@ -49,7 +49,7 @@ Page-declared surfaces got the orphan-and-reclaim path with a two-minute
 grace; the widget did not. So the one surface whose entire purpose is driving
 multi-page flows was the one surface that could not survive succeeding.
 
-**Every call re-asks.** `askApproval` (`packages/extension/src/sw.ts#askApproval`,
+**Every call re-asks.** `askApproval` (`packages/extension/src/consent-windows.ts#askApproval`,
 now `(origin, who, prompt, synthesised)`) opens an extension-chrome window per
 call, and nothing is remembered between them. On a declared site with a handful of gated tools that
 is proportionate. On a generic harness where the agent clicks, reads, clicks

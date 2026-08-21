@@ -32,6 +32,7 @@ import {
   MAX_PLAN_STEP_CHARS,
   isPromptId,
   randomId,
+  type AgentSummary,
   type AuthorityDomain,
   type FormField,
   type PlanStep,
@@ -155,6 +156,13 @@ export interface AgentRow {
   runtime: string;
   location?: string;
   online: boolean;
+}
+
+/** The relay's view of an agent, as the extension's own surfaces list it. Here
+ *  beside the type it builds, because two callers need it — the consent
+ *  window's picker and the popup's directory — and one shape is the point. */
+export function toAgentRow(agent: AgentSummary): AgentRow {
+  return { agent: agent.agent, name: agent.name, runtime: agent.runtime, location: agent.location, online: agent.online };
 }
 
 /** Reasons the extension provider may return across the page boundary. */

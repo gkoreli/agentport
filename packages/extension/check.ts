@@ -23,6 +23,8 @@ import {
   type ContentToWorker,
   type PageOutbound,
 } from './src/bridge.js';
+import { ConsentWindows, type ConsentWindowHost } from './src/consent-windows.js';
+import { KeepAlive, type KeepAliveHost } from './src/keepalive.js';
 import { leftBehindByNavigation, mayReclaim, reclaimKeyFor } from './src/lifecycle.js';
 import { WidgetSurface, type OverlayBridge, type OverlayHost, type WidgetPage } from './src/widget.js';
 
@@ -1239,3 +1241,326 @@ async function attachedFixture(ref: string, verify = 'six little words go right 
 }
 
 console.log('widget surface check passed');
+
+// --- consent windows: a window nobody answered is a refusal -----------------
+//
+// WHAT THIS COVERS AND WHY IT COULD NOT BEFORE. Every one of these paths lived
+// in `sw.ts`, which touches `self` at module load and cannot be imported in
+// Node, so the fail-closed rule that the whole consent design rests on had
+// exactly one form of evidence: the code reads as though it holds. The service
+// takes its window plumbing now — open one, close one, hear that one went away
+// — so the dismissal and the deadline can both be driven directly.
+//
+// Two properties, and they are not the same property. A window that is
+// DISMISSED must deny, and a window that is never touched at all must ALSO
+// deny, because the far side has a deadline of its own and stops listening: an
+// approval window still offering its buttons after the daemon declined for the
+// user is a lie about what pressing them does.
+//
+// Every wait below is bounded. A consent surface that hangs is precisely the
+// failure being checked for, and a check that hangs on its own subject reports
+// nothing at all (rule 3).
+
+const within = async <T>(promise: Promise<T>, ms: number, label: string): Promise<T> => {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label}: nothing settled within ${ms}ms`)), ms);
+  });
+  try {
+    return await Promise.race([promise, deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
+/** Is this promise still waiting? Answered with a race rather than a flag, so
+ *  "not settled" is observed rather than assumed. */
+const stillPending = async (promise: Promise<unknown>): Promise<boolean> =>
+  (await Promise.race([promise.then(() => 'settled'), new Promise((r) => setTimeout(() => r('pending'), 20))])) ===
+  'pending';
+
+function consentFixture(options: { askWindowMs?: number; approveWindowMs?: number; refuseToOpen?: boolean } = {}) {
+  const opened: { pendingId: string; windowId: number }[] = [];
+  const closed: number[] = [];
+  const logs: LogEntry[] = [];
+  let nextWindowId = 100;
+  let dismissed: ((windowId: number) => void) | undefined;
+
+  const host: ConsentWindowHost = {
+    open: async (pendingId) => {
+      // A browser that refuses to open the window is the case OS notifications
+      // taught us about: the surface does not exist and nobody can be asked.
+      if (options.refuseToOpen) throw new Error('no window for you');
+      const windowId = (nextWindowId += 1);
+      opened.push({ pendingId, windowId });
+      return windowId;
+    },
+    close: async (windowId) => {
+      closed.push(windowId);
+    },
+    onRemoved: (listener) => {
+      dismissed = listener;
+    },
+  };
+
+  const windows = new ConsentWindows({
+    host,
+    // Pinned to `debug` for the same reason the widget fixture pins it: an
+    // assertion that stops seeing its log because AGENTPORT_LOG happened to be
+    // set is an assertion that reports green when it cannot look.
+    log: createLogger('check.consent', { level: 'debug', sink: (entry) => logs.push(entry) }),
+    ...options,
+  });
+
+  return {
+    windows,
+    opened,
+    closed,
+    logsSince: () => logs.splice(0).map((entry) => ({ level: entry.level, data: entry.data })),
+    /** The user closed the window without answering. */
+    dismiss: (windowId: number) => {
+      assert.ok(dismissed, 'nothing is listening for a consent window being closed, so a dismissal is silence');
+      dismissed(windowId);
+    },
+    /** The window that this decision opened, asserted to exist first: a
+     *  refusal that happened because nothing was ever shown proves nothing. */
+    onlyWindow: (label: string) => {
+      assert.equal(opened.length, 1, `${label}: expected exactly one consent window`);
+      return opened[0]!;
+    },
+  };
+}
+
+const approvalPrompt = {
+  domain: 'runtime_own_tool' as const,
+  summary: 'Delete the build directory on your VPS',
+  call: { name: 'shell', arguments: { command: 'rm -rf /tmp/build' } },
+};
+const question = { message: 'Which draft should I revise?', fields: [{ key: 'draft', label: 'Draft' }] };
+const agentRow = { agent: 'a'.repeat(64), name: 'VPS Agent', runtime: 'acp', online: true };
+
+// 1. Dismissed without an answer. Each kind refuses in its own dialect, and the
+//    dialects are not interchangeable: a question that came back `false` would
+//    reach `session.answer()` as an answer the user never gave.
+{
+  const fixture = consentFixture();
+  const decision = fixture.windows.askApproval(
+    'https://shop.example',
+    { name: 'VPS Agent' },
+    approvalPrompt,
+    new Set(),
+  );
+  await settle();
+  fixture.dismiss(fixture.onlyWindow('approval').windowId);
+  assert.equal(
+    await within(decision, 1_000, 'dismissed approval'),
+    false,
+    'closing the approval window without answering approved the call',
+  );
+}
+{
+  const fixture = consentFixture();
+  const answer = fixture.windows.askQuestion('s_ask', 'https://shop.example', { name: 'VPS Agent' }, question);
+  await settle();
+  fixture.dismiss(fixture.onlyWindow('question').windowId);
+  assert.equal(
+    await within(answer, 1_000, 'dismissed question'),
+    undefined,
+    'a dismissed question produced something the agent would read as the user answering',
+  );
+}
+{
+  const fixture = consentFixture();
+  const picked = fixture.windows.askConnect('https://shop.example', [agentRow], { name: 'Shop', tools: [] });
+  await settle();
+  fixture.dismiss(fixture.onlyWindow('connect').windowId);
+  assert.equal(
+    await within(picked, 1_000, 'dismissed picker'),
+    null,
+    'closing the picker without choosing attached an agent anyway',
+  );
+}
+
+// 2. No window at all. The browser refused to create one, so there is no
+//    surface a person could have answered on — which is a denial, not a wait.
+{
+  const fixture = consentFixture({ refuseToOpen: true });
+  const decision = fixture.windows.askApproval(
+    'https://shop.example',
+    { name: 'VPS Agent' },
+    approvalPrompt,
+    new Set(),
+  );
+  assert.equal(
+    await within(decision, 1_000, 'approval with no window'),
+    false,
+    'a request nobody could be shown was left hanging instead of denied',
+  );
+  assert.ok(
+    fixture.logsSince().some((entry) => entry.level === 'error'),
+    'the consent surface failed to open and nothing said so',
+  );
+}
+
+// 3. THE NEW DEADLINE. An approval window on another virtual desktop used to
+//    park the agent's turn for as long as nobody looked at it; the daemon grew
+//    a five-minute deadline of its own, which only moves the stall five minutes
+//    away and puts it out of the user's sight. This one is strictly inside it,
+//    settles to a DECLINE — never a standing yes nobody said — and takes the
+//    window down with it.
+{
+  const fixture = consentFixture({ approveWindowMs: 10 });
+  const decision = fixture.windows.askApproval(
+    'https://shop.example',
+    { name: 'VPS Agent' },
+    approvalPrompt,
+    new Set(),
+  );
+  await settle();
+  const window = fixture.onlyWindow('approval deadline');
+  assert.equal(
+    await within(decision, 2_000, 'unanswered approval'),
+    false,
+    'an approval window nobody answered never settled, so the agent waited on the daemon to decline for it',
+  );
+  assert.deepEqual(
+    fixture.closed,
+    [window.windowId],
+    'the deadline decided for the user and left the window on screen still offering Approve',
+  );
+  assert.ok(
+    fixture.logsSince().some((entry) => entry.level === 'warn'),
+    'a decision was made for the user with nothing in the log to say so',
+  );
+}
+
+// 4. The same arming code serves the question channel, which decays the OTHER
+//    way: an unanswered question is a SKIP ("proceed without one"), and turning
+//    it into `false` would attribute an answer to the user.
+{
+  const fixture = consentFixture({ askWindowMs: 10 });
+  const answer = fixture.windows.askQuestion('s_ask', 'https://shop.example', { name: 'VPS Agent' }, question);
+  await settle();
+  const window = fixture.onlyWindow('question deadline');
+  assert.equal(
+    await within(answer, 2_000, 'unanswered question'),
+    undefined,
+    'a question window outlived the daemon`s own deadline, so the form went nowhere and said nothing',
+  );
+  assert.deepEqual(fixture.closed, [window.windowId], 'the question expired and its window stayed on screen');
+}
+
+// 5. `closeFor` — the one door the session registry has into this module. A
+//    window asking on behalf of a session that has just died is a form the user
+//    fills in for an agent that stopped listening. It settles as that kind's
+//    refusal, and it settles ONLY the windows that session opened.
+{
+  const fixture = consentFixture();
+  const dying = fixture.windows.askQuestion('s_dying', 'https://shop.example', { name: 'VPS Agent' }, question);
+  const other = fixture.windows.askQuestion('s_other', 'https://shop.example', { name: 'VPS Agent' }, question);
+  await settle();
+  assert.equal(fixture.opened.length, 2);
+  const dyingWindow = fixture.opened[0]!;
+
+  fixture.windows.closeFor('s_dying');
+  assert.equal(
+    await within(dying, 1_000, 'question for a dead session'),
+    undefined,
+    'the session died and its question was left open for the user to answer into nothing',
+  );
+  assert.deepEqual(fixture.closed, [dyingWindow.windowId], 'a dead session left its window on screen');
+  assert.equal(
+    await stillPending(other),
+    true,
+    'one session closing settled another session`s question',
+  );
+  // Left open, it would hold its own deadline timer for four real minutes and
+  // this file would look like it hangs — which is the failure mode rule 3 is
+  // about, arriving from the check's own housekeeping instead of the code's.
+  fixture.windows.closeFor('s_other');
+  assert.equal(await within(other, 1_000, 'second question'), undefined);
+}
+
+console.log('consent window check passed');
+
+// --- the worker keep-alive: awake while attached, asleep otherwise ----------
+//
+// `chrome.alarms` OUTLIVES the service worker, which is what makes the gate
+// worth checking rather than reading. The alarm used to be created at every
+// worker start and cleared never, and the listener beside it touched storage
+// unconditionally while the `setInterval` next to it was gated on the session
+// count — so an install that had attached once woke the worker every minute
+// forever, with an empty table, to do nothing.
+//
+// The direction that costs a user something is the other one, and it has its
+// own assertion below: an alarm cleared when the last session ends and never
+// re-armed when the next one starts is an attachment that dies with the worker.
+
+function keepAliveFixture() {
+  const calls: string[] = [];
+  const state = { live: 0 };
+  const host: KeepAliveHost = {
+    touch: () => calls.push('touch'),
+    arm: () => calls.push('arm'),
+    clear: () => calls.push('clear'),
+  };
+  return {
+    keepAlive: new KeepAlive({ host, live: () => state.live }),
+    state,
+    since: () => calls.splice(0),
+  };
+}
+
+{
+  const fixture = keepAliveFixture();
+
+  // A fresh worker cannot see whether the generation before it left an alarm
+  // armed, so the first reconcile with an empty table clears one. Nothing is
+  // armed for an install with nothing attached.
+  fixture.keepAlive.sync();
+  assert.deepEqual(fixture.since(), ['clear'], 'a worker with nothing attached scheduled a wake-up anyway');
+  fixture.keepAlive.sync();
+  assert.deepEqual(fixture.since(), [], 'reconciling an unchanged table churned the alarm');
+
+  // A session appears: now there is something to keep awake.
+  fixture.state.live = 1;
+  fixture.keepAlive.sync();
+  assert.deepEqual(fixture.since(), ['arm'], 'a live session did not keep the worker awake');
+  fixture.keepAlive.wake();
+  assert.deepEqual(fixture.since(), ['touch'], 'the wake-up fired and did not reset the idle timer');
+
+  // A second one changes nothing: the alarm is a property of "any", not "each".
+  fixture.state.live = 2;
+  fixture.keepAlive.sync();
+  assert.deepEqual(fixture.since(), [], 'the second session armed a second alarm');
+
+  // The last one goes.
+  fixture.state.live = 0;
+  fixture.keepAlive.sync();
+  assert.deepEqual(fixture.since(), ['clear'], 'the last session ended and the worker went on waking every minute');
+  fixture.keepAlive.wake();
+  assert.deepEqual(
+    fixture.since(),
+    [],
+    'a wake-up with nothing attached kept an idle worker alive for nothing to do',
+  );
+
+  // THE ONE THAT COSTS A SESSION IF IT IS WRONG. Clearing is only safe if the
+  // alarm comes back: without this the next attachment is one eviction away
+  // from a resume nobody wakes up to perform.
+  fixture.state.live = 1;
+  fixture.keepAlive.sync();
+  assert.deepEqual(fixture.since(), ['arm'], 'a cleared alarm never returned, so the next session dies with the worker');
+}
+
+// An alarm inherited from an evicted worker: it fires into a table that no
+// longer has anything in it, and stops itself — once, not on every tick.
+{
+  const fixture = keepAliveFixture();
+  fixture.keepAlive.wake();
+  assert.deepEqual(fixture.since(), ['clear'], 'an alarm outliving its worker kept firing forever');
+  fixture.keepAlive.wake();
+  assert.deepEqual(fixture.since(), [], 'the same dead alarm was cleared again on every tick');
+}
+
+console.log('worker keep-alive check passed');

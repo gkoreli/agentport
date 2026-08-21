@@ -10,7 +10,23 @@ they moved.
 
 ## Unreleased
 
-### Revocation reaches every tier, and attachment authority is one object
+### The consent-window service and popup API move out of the service worker
+
+`sw.ts` was a cohesive session registry with two unrelated services bolted
+on. `ConsentWindows` now owns the pending-consent state, the fail-closed
+ordering (mint → register → arm → open, in ONE place instead of four
+copies), and the window deadlines; `PopupApi` owns the popup message
+router; the registry stays whole, and the module header now argues why so
+the next size-driven refactor does not scatter its invariants. Two fixes
+rode along, both watched failing: approval windows finally have a deadline
+(`ASK_WINDOW_MS` had one, approvals had NONE — a window on another virtual
+desktop parked the agent's turn; expiry now declines and closes the
+window), and the keep-alive alarm is gated on live sessions instead of
+waking the worker every minute forever on an install that attached once.
+Two pre-existing defects found and recorded rather than silently fixed: an
+approval window still outlives its session (questions carry the session
+ref, approvals do not — now capped by the deadline instead of unbounded),
+and a window whose decision settles while creation is in flight leaks.
 
 `agentport revoke <origin>` wrote a tombstone, logged, and left a live
 extension attachment running and reopenable: every revocation check in the

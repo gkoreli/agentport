@@ -49,9 +49,10 @@ attacker gets to choose.
 
 The obvious attack — a decider that auto-approves on grant membership, walked
 past by an own-tool request titled after a granted tool — does not work
-against the extension today. `askApproval` in `packages/extension/src/sw.ts`
+against the extension today. `packages/extension/src/consent-windows.ts#askApproval`
 never branches on `call.name`, never consults grant membership, and has no
-auto-approve path: it opens an extension-origin window and waits for a human.
+auto-approve path: it opens an extension-origin window and waits for a human
+(bounded now — an unanswered window declines rather than waiting forever).
 (The `toolNames.has(name)` checks in `packages/extension/src/sw.ts#dispatchToolCall` are the *dispatch*
 grant boundary, correctly placed; an own-tool request never reaches them
 because it is not a `tool.call`.)
