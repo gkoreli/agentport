@@ -1356,6 +1356,7 @@ const agentRow = { agent: 'a'.repeat(64), name: 'VPS Agent', runtime: 'acp', onl
 {
   const fixture = consentFixture();
   const decision = fixture.windows.askApproval(
+    's_check',
     'https://shop.example',
     { name: 'VPS Agent' },
     approvalPrompt,
@@ -1397,6 +1398,7 @@ const agentRow = { agent: 'a'.repeat(64), name: 'VPS Agent', runtime: 'acp', onl
 {
   const fixture = consentFixture({ refuseToOpen: true });
   const decision = fixture.windows.askApproval(
+    's_check',
     'https://shop.example',
     { name: 'VPS Agent' },
     approvalPrompt,
@@ -1422,6 +1424,7 @@ const agentRow = { agent: 'a'.repeat(64), name: 'VPS Agent', runtime: 'acp', onl
 {
   const fixture = consentFixture({ approveWindowMs: 10 });
   const decision = fixture.windows.askApproval(
+    's_check',
     'https://shop.example',
     { name: 'VPS Agent' },
     approvalPrompt,

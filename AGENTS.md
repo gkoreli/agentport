@@ -187,10 +187,12 @@ npm run deployed:check # deployed front door vs this tree — exit 1 lags, 2 unr
 npm run typecheck  # tsc -b over all packages
 npm run deploy     # build the site + wrangler deploy
 
-# these FIVE are checked separately, outside the project references — and
-# they are the only thing that typechecks them at all, because every one is
-# bundled by esbuild, which does not typecheck. A type error here still
-# BUILDS and still ships.
+# these FIVE live outside the project references because every one is
+# bundled by esbuild, which does not typecheck — a type error here still
+# BUILDS and still ships. `npm run typecheck` now runs them too
+# (`typecheck:bundled`), because the day they were only separate commands,
+# a final gate pass forgot them and main sat red on the extension project
+# for three commits. Run one individually only to narrow a failure.
 npx tsc -p examples/inkwell/tsconfig.json
 npx tsc -p site/tsconfig.json             # browser code (DOM lib)
 npx tsc -p site/tsconfig.worker.json      # worker code (workers-types)

@@ -11,7 +11,8 @@
   ],
   "scripts": {
     "build": "tsc -b",
-    "typecheck": "tsc -b --force && tsc -p tsconfig.harness.json --noEmit",
+    "typecheck": "tsc -b --force && tsc -p tsconfig.harness.json --noEmit && npm run typecheck:bundled",
+    "typecheck:bundled": "tsc -p examples/inkwell/tsconfig.json && tsc -p site/tsconfig.json && tsc -p site/tsconfig.worker.json && tsc -p wallet/tsconfig.json && tsc -p packages/extension/tsconfig.json --noEmit",
     "relay": "tsx packages/relay/src/cli.ts",
     "daemon": "tsx packages/daemon/src/cli.ts",
     "demo": "tsx examples/inkwell/src/serve.ts",

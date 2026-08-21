@@ -10,6 +10,20 @@ they moved.
 
 ## Unreleased
 
+### `npm run typecheck` covers the esbuild-bundled projects, ending the forgettable-command class
+
+The consent-window follow-up changed `askApproval`'s signature and updated
+only the new check sections; the three older call sites sat as type errors
+on main for three commits, invisible because `check:extension` runs tsx
+(which does not typecheck) and the runtime assertions degraded into
+weaker-but-green shapes. The listed command — the extension's separate
+`tsc -p` — would have caught it, and a final gate pass forgot to run it:
+exactly the failure AGENTS.md's typechecks-nowhere ledger predicts, caught
+by a sibling stream's clean-worktree gates. The call sites are fixed, and
+`typecheck:bundled` folds all five out-of-reference projects into
+`npm run typecheck`, so the local command now equals what CI's verify job
+already ran.
+
 ### The daemon's transport and wire-bounding move out of the session aggregate
 
 `RelayLink` owns the socket — dial, greeting, ping/pong liveness, handshake
