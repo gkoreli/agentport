@@ -29,6 +29,7 @@ import {
   createWebMcpRegistry,
   normalizeToolResult,
   readRegistration,
+  toSiteTool,
   type ModelContextLike,
 } from '../packages/client/src/webmcp.js';
 import type { SiteTool } from '../packages/client/src/index.js';
@@ -519,6 +520,32 @@ console.log('\n11. a legacy MCP-B envelope is unwrapped, not forwarded as data')
   check(
     'normalizeToolResult is identity on arrays',
     JSON.stringify(normalizeToolResult([1, 2])) === '[1,2]',
+  );
+}
+
+// ---------------------------------------------------------------------------
+console.log('\n11b. a real-world multiline description survives the wire bound');
+// ---------------------------------------------------------------------------
+//
+// Found by the 2026-08-21 supply walk: Shopify's storefront adapter registers
+// a description with embedded newlines, the wire carries descriptions as
+// display() — which refuses control characters — and the daemon rejected the
+// whole grant at grant.tools[9].description. The harvest boundary flattens
+// page-authored control characters, because a consent card does not honour a
+// page's formatting anyway.
+{
+  const registration = readRegistration({
+    name: 'multiline.description',
+    description: 'Used to get facts.\nSome examples:\n\tWhat is your policy?',
+    inputSchema: { type: 'object', properties: {} },
+    execute: () => 'ok',
+  });
+  if (!registration.ok) throw new Error('the multiline fixture failed to read at all');
+  const lent = toSiteTool(registration.value);
+  check(
+    'control characters in a harvested description flatten to single spaces',
+    lent.description === 'Used to get facts. Some examples: What is your policy?',
+    JSON.stringify(lent.description),
   );
 }
 

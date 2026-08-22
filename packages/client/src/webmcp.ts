@@ -275,10 +275,31 @@ export function readRegistration(value: unknown): RegistrationRead {
  * rebuild the identical hole under a new field name. `readOnlyHint` is
  * therefore recorded on the registration and read by nobody.
  */
+/**
+ * A description is read on consent surfaces, so the wire carries it as
+ * `display()` — which refuses control characters outright. Real supply writes
+ * multiline prose: the 2026-08-21 walk (`docs/reviews/webmcp-supply-walk.md`)
+ * found Shopify's storefront adapter registering a description with embedded
+ * newlines on every Liquid store, and the daemon's decoder rightly refused
+ * the whole grant at `grant.tools[9].description`. Page-authored formatting
+ * is not something a consent card honours anyway, so the harvest boundary
+ * flattens control characters to spaces — the same rule the daemon's own
+ * probe output applies (`packages/daemon/src/acp-preflight.ts#probeAcpRuntime`
+ * sanitizes agent-authored text before a terminal reads it).
+ */
+function displayable(text: string): string {
+  let out = '';
+  for (const ch of text) {
+    const code = ch.codePointAt(0) ?? 0;
+    out += code < 0x20 || (code >= 0x7f && code <= 0x9f) ? ' ' : ch;
+  }
+  return out.replace(/ {2,}/g, ' ').trim();
+}
+
 export function toSiteTool(registration: WebMcpRegistration): SiteTool {
   return {
     name: registration.name,
-    description: registration.description,
+    description: displayable(registration.description),
     inputSchema: registration.inputSchema,
     requiresApproval: true,
     handler: (input) => {

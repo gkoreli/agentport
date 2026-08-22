@@ -10,6 +10,28 @@ they moved.
 
 ## Unreleased
 
+### The supply was walked, and it is real
+
+The north star's obligation, performed against the August supply: three
+Shopify Liquid storefronts (allbirds, kith, brooklinen; gymshark as the
+negative control) each hand a user-supplied agent TEN commerce tools
+through `cdn.shopify.com`'s storefront adapter, harvested end to end by
+our extension on today's Chrome — which ships `document.modelContext`
+natively, with our observe wrapper proven live on every registration.
+Nothing excluded us, but by mechanism rather than named right, which is
+direct evidence for the consumer-class filing. Cloudflare's preview has
+no walkable site yet. The walk found the first real-world grant refusal —
+real supply writes multiline tool descriptions and the wire's `display()`
+rightly refuses control characters — fixed at the one converter both
+harvesters share, watched failing in `webmcp:harvest`. And the flagship
+demo ran end to end: a stranger's own Claude, attached through consent
+chrome to a store that has never heard of AgentPort, chose
+`search_catalog`, cleared the per-call approval that named the tool and
+its lender, and answered with live catalog data in under a second.
+Nothing carted, nothing bought. Screenshots in `docs/reviews/assets/`;
+instruments (`scripts/walk-webmcp.ts`, `walk-flagship.ts`) are a person's
+tools, never gate-wired.
+
 ### The extension exists only where you enabled it
 
 The content script used to announce the extension on every page on the web
