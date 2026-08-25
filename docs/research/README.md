@@ -77,7 +77,7 @@ The lens that set the protocol agenda. Its P0s became protocol v7.
 | P0/L | the grant is frozen at attach — nothing can add, remove or re-declare a tool | **CLOSED** `56cabda` — `grant.update`, with the narrow/widen asymmetry (widening needs a fresh delegation `grantHash`). |
 | P0/S | `SurfaceDescriptor.context` and `Prompt.context` reach the daemon and are discarded | **CLOSED** `ce61d12` — a shipped false affordance, now threaded into the turn. |
 | P0/L | everything is text: no content blocks, attachments or images | **PARTIAL** `ff3a285` — images upload-only, one budget, refused early. `resource_link` and download deliberately deferred with reasons recorded at `PromptImage`. |
-| P1/M | the harness cannot navigate, wait or search | **PARTIAL** `6dfb81c` — find/waitFor/select/setChecked/pressKey shipped. **`page.navigate` remains open**; `docs/ADR-021-web-harness.md` records why (it needs the cross-origin decision and an authority domain, which are protocol territory). A working prototype exists at tag `wip/wf_af2cca26-9af-6`. |
+| P1/M | the harness cannot navigate, wait or search | **CLOSED** — `6dfb81c` shipped find/waitFor/select/setChecked/pressKey, and `page.navigate` landed 2026-08-25. Both things ADR-021 deferred it for turned out not to be protocol territory: `page.*` already rides `site_tool` authority, and the cross-origin rule derives from `reclaimKeyFor` rather than being decided beside it. See that ADR's addendum. |
 | P1/L | consent is never remembered, so the harness trains reflexive approval | **OPEN — deliberately.** Gated behind `docs/ADR-019-security-hardening.md` Gate C containment. |
 | P1/M | a detach cancels the turn outright and nothing reports completion | **OPEN** |
 | P1/M | no surface lists what holds your agent, so revocation is unreachable | **CLOSED** `d7aa6dc` — the popup lists holders and takes authority back. |
@@ -96,7 +96,7 @@ The lens that set the protocol agenda. Its P0s became protocol v7.
 | P0/M | `agentport revoke` does not reach an extension attachment at all | **CLOSED** `40a98eb` — a false security guarantee, found here. Every revocation check sat inside a delegation guard, so the direct-key tier was unreachable. Now per-origin tombstones judged across tiers. |
 | P1/S | an unanswered approval window blocks the turn forever | **CLOSED** `8976c2d`, `c1d0af2` |
 | P1/L | the harness cannot see shadow DOM or any iframe, and reports "empty" rather than "cannot see" | **CLOSED** `6dfb81c` — honest blindness counts, open-shadow recursion. |
-| P1/L | four missing verbs | **PARTIAL** `6dfb81c` — see `page.navigate` above. |
+| P1/L | four missing verbs | **CLOSED** — `6dfb81c` plus `page.navigate` (2026-08-25). |
 | P1/S | the obstruction check treats "I could not look" as "it is clear" | **CLOSED** `6dfb81c` — three states (`clear`/`blocked`/`unknown`). Silence had meant permission on the one check between a borrowed agent and the wrong button. |
 | P1/M | the extension announces itself on every website before any consent | **CLOSED** `13b07ff` — `packages/extension/src/enablement.ts`; the extension exists only on enabled origins. |
 | P1/L | remembered consent has no store, surface or revocation path | **OPEN — deliberately**, same Gate C. |
@@ -173,7 +173,7 @@ Two of those refs hold work that is genuinely not in `main`:
 
 | ref | what is in it | why it did not land |
 |---|---|---|
-| `refs/wip/wf_af2cca26-9af-6` | a working `page.navigate` — same-origin only, refusing cross-origin with the attachment's approved origin named, and answering before the document is torn down so the agent never sees a call that neither succeeded nor failed | a **port**, not a rebase: it is written against `page.listElements`, and `packages/extension/src/pagetools.ts` has since moved to handle-based `page.find`. `docs/ADR-021-web-harness.md` also defers the tool pending the cross-origin decision and an authority domain, which are protocol questions |
+| `refs/wip/wf_af2cca26-9af-6` | the `page.navigate` prototype this ref was kept for | **LANDED 2026-08-25.** Ported onto the current harness rather than merged — it was written against `page.listElements`, which `packages/extension/src/pagetools.ts` replaced with handle-based `page.find`. The prototype's own reasoning survived intact: same-origin only, script schemes refused, answered before the document is torn down. Kept for provenance, not because anything is owed to it. |
 | `refs/wip/untracked` | `pagetools-check.ts`, a 340-line offline happy-dom harness asserting that every tool is gated as its grant claims, that `display:none` and `[hidden]` controls are never offered, that truncation is reported truthfully, and that reads carry the untrusted marker | written against the same older API. `packages/extension/check.ts` now covers part of this ground; the delta is worth reading before rewriting it from scratch |
 
 `refs/wip/untracked` exists because `git stash create` captures **tracked**

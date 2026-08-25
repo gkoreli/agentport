@@ -2,8 +2,9 @@
 
 - **Status:** accepted; ship-order 1, 2 and 4 delivered (navigation
   survival and truthful page tools, separated authority domains, the read
-  boundary). 3 is ADR-019 Gate C and is blocked; 5-7 outstanding, and
-  `page.navigate` is still proposed rather than built.
+  boundary). 3 is ADR-019 Gate C and is blocked; 5-7 outstanding.
+  `page.navigate` is BUILT as of 2026-08-25 — see the addendum, which records
+  the two decisions §2 was waiting on and why neither needed the protocol.
 - **Date:** 2026-08-06
 - **Depends on:** ADR-006 (WebMCP harvest), ADR-008/009 (extension tiers and
   custody), ADR-018 (security architecture), ADR-019 (hardening gates)
@@ -214,8 +215,8 @@ collapsed "clear" with "could not look" and the caller turned that silence
 into permission. The real-engine smoke (`scripts/extension-ui-smoke.ts`)
 executes all of it in Chrome, which is how the viewport-coordinate
 off-canvas rule was caught silently dropping every element above the scroll
-position. §2's `page.navigate` remains unbuilt: it needs the cross-origin
-decision and an authority domain, which are protocol territory.
+position. §2's `page.navigate` is now built; the addendum below records why the two
+things it was waiting on turned out not to be protocol territory after all.
 
 ### 6. Prompt injection is the hard problem here, and it gets worse
 
@@ -287,3 +288,61 @@ behind a weaker fallback.
 Remembered generic writes stay out of scope until there is a materially
 stronger semantic authorization design than "the user said clicks are fine
 here".
+
+## Addendum, 2026-08-25 — `page.navigate`, and the two questions it was waiting on
+
+§2 asked for the tool and then deferred it, on the grounds that it "needs the
+cross-origin decision and an authority domain, which are protocol territory."
+Both turned out to be answerable inside the harness, and one of them was
+already answered by code that shipped months ago. Recording that, because a
+deferral whose stated reason has quietly expired is worse than no deferral —
+it keeps a decision looking expensive long after it stopped being.
+
+**The authority domain was never open.** A `page.*` tool is lent by the party
+that registered it, and `packages/client/src/session.ts#AgentSession` stamps
+`domain: 'site_tool'` for tools it registered rather than taking anyone's word
+for it. `page.navigate` therefore rides exactly the authority `page.click`
+already rides, and needs no new domain, no wire field, and no change to
+`AttachmentPolicy`. The question was answered by ADR-024's separation before
+this ADR asked it.
+
+**The cross-origin decision is not a policy — it is a boundary the session
+already has.** `packages/extension/src/lifecycle.ts#reclaimKeyFor` embeds the
+origin in the reclaim key, so a same-origin navigation hands the parked
+attachment to the next document and a cross-origin one *cannot* reach it. A
+cross-origin navigate would therefore destroy the session performing the call:
+the agent would never see the result of its own tool, and the conversation
+would end in the middle of the action that ended it.
+
+So the rule is not "we have decided to forbid leaving the origin". It is
+**navigate may only go where the session can follow**, which happens to be the
+same line, but derives from the mechanism instead of sitting beside it — and
+so cannot drift away from it. If reclaim ever crosses origins, this tool's
+boundary moves with it and nobody has to remember to widen a rule.
+
+What shipped:
+
+- same-origin only, refused by comparing against `location.origin`, with the
+  refusal naming both origins so the agent can tell the user what to open;
+- `http:`/`https:` only — `javascript:` and `data:` are script execution
+  wearing a URL, and this tool's approval says "go to another page";
+- `requiresApproval: true`, unconditionally. A navigation replaces the
+  document the user is looking at; there is no reading version of it;
+- already-there is a truthful no-op (`navigated: false`), not an error and not
+  a false success;
+- **the answer is posted before the navigation commits.** Once it commits this
+  content script is gone and a later reply reaches nobody, which would leave
+  the agent holding a tool call that neither succeeded nor failed — the one
+  outcome the bounded wire exists to make impossible. The result also states
+  that every element handle is now void, because they are.
+
+Evidence: `packages/extension/check.ts` (the `page.navigate` block), watched
+failing on two sabotages — removing the cross-origin refusal, and committing
+the navigation before answering — each producing the assertion written for it
+rather than an unrelated red.
+
+**The gap, stated rather than papered over.** These checks run under happy-dom,
+so they prove the tool's own decisions and not the reclaim that follows a real
+navigation. The end-to-end property — navigate, and the SAME session picks up
+in the next document — belongs in `scripts/extension-ui-smoke.ts`, which drives
+real Chrome. It is not written yet, and is not claimed here.

@@ -8,6 +8,39 @@ header or an extension popup names exactly one commit. Separately versioned
 npm artifacts (`@gkoreli/agentport`, the shared chat overlay) are noted where
 they moved.
 
+## Unreleased
+
+### The harness can navigate
+
+`page.navigate` — the last of the four verbs ADR-021 named, and the reason
+the north star said the harness "ends at the edge of one document". It was
+deferred on the grounds that it needed the cross-origin decision and an
+authority domain, "which are protocol territory". Neither turned out to be,
+and one had been answered months earlier: a `page.*` tool is stamped
+`site_tool` by the client that registered it, so navigate rides exactly the
+authority `page.click` already rides.
+
+The cross-origin rule is the interesting half. It is not a policy placed
+beside the mechanism — it IS the mechanism:
+`packages/extension/src/lifecycle.ts#reclaimKeyFor` embeds the origin in the
+reclaim key, so a same-origin navigation hands the parked attachment to the
+next document and a cross-origin one cannot reach it. Navigating across an
+origin would destroy the session performing the call, and the agent would
+never see the result of its own tool. So the rule is **navigate may only go
+where the session can follow** — the same line, derived rather than declared,
+and it moves by itself if reclaim ever widens.
+
+Also: `javascript:` and `data:` refused (script execution wearing a URL, and
+this tool's approval says "go to another page"); always gated; already-there
+is a truthful `navigated: false` rather than a false success; and the answer
+is posted BEFORE the navigation commits, because afterwards this content
+script is gone and the reply would reach nobody — leaving the agent holding a
+call that neither succeeded nor failed. Watched failing on two sabotages.
+
+The happy-dom checks prove the tool's decisions, not the reclaim that follows
+a real navigation; that end-to-end assertion belongs in the real-Chrome smoke
+and is not written yet. Stated in ADR-021's addendum rather than implied.
+
 ## 0.0.14 — the protocol v7 cutover
 
 The first release since `v0.1.7`, and the largest: thirty-six commits, a

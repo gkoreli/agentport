@@ -877,6 +877,61 @@ export function genericPageTools(): SiteTool[] {
         return { ok: true, changed: settled.mutations > 0, stable: settled.stable };
       },
     },
+    {
+      name: 'page.navigate',
+      description:
+        'Go to another page on this same site. Same-origin only. The current document is replaced, so every element handle becomes void — call page.listElements again on the new page.',
+      requiresApproval: true,
+      inputSchema: objectSchema({ url: { type: 'string' } }, ['url']),
+      handler: async (args) => {
+        const raw = String(args['url'] ?? '');
+        let target: URL;
+        try {
+          target = new URL(raw, location.href);
+        } catch {
+          throw new Error(`page.navigate needs a URL; ${JSON.stringify(raw.slice(0, 120))} is not one`);
+        }
+        // `javascript:` and `data:` are script execution wearing a URL, and
+        // this tool's approval says "go to another page", not "run this".
+        if (target.protocol !== 'http:' && target.protocol !== 'https:') {
+          throw new Error(`page.navigate opens http and https pages; ${target.protocol} is refused`);
+        }
+        // The boundary is not a policy bolted on: it is the boundary the
+        // session itself has. `lifecycle.ts#reclaimKeyFor` embeds the origin
+        // in the reclaim key, so a same-origin navigation hands this
+        // attachment to the next document and a cross-origin one CANNOT —
+        // the parked session is unreachable and the conversation dies with
+        // the document that asked. Navigating across an origin would
+        // therefore destroy the session performing the navigation, and the
+        // agent would never see the result of its own tool call. Refuse it
+        // where the user is told why, rather than succeed into silence.
+        if (target.origin !== location.origin) {
+          throw new Error(
+            `page.navigate cannot leave ${location.origin}. This attachment was approved for that site, ` +
+              `and the session cannot follow you to ${target.origin} — ask the user to open it themselves.`,
+          );
+        }
+        if (target.href === location.href) {
+          // Not an error: an agent re-checking where it is has not done
+          // anything wrong. But it must not be told a navigation happened.
+          return { ok: true, navigated: false, url: location.href, note: 'already on that page; nothing was done' };
+        }
+        // Answer BEFORE the document is torn down. Once the navigation
+        // commits this content script is gone, and a reply posted after that
+        // reaches nobody — the agent would be left holding a tool call that
+        // neither succeeded nor failed, which is the one outcome a bounded
+        // wire is supposed to make impossible.
+        const from = location.href;
+        setTimeout(() => location.assign(target.href), 0);
+        return {
+          ok: true,
+          navigated: true,
+          from,
+          to: target.href,
+          note: 'navigation started; every handle from page.listElements is now void — call page.info on the new document to confirm where you landed',
+        };
+      },
+    },
   ];
 }
 

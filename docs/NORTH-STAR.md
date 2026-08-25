@@ -103,10 +103,12 @@ This is the same product, taken to its widest form:
   named actions that carry meaning, with the site's own approval hints.
 - **On a site that declared nothing**, the agent gets the generic page harness
   — read the page, list what is on it, find by text, wait for it, fill, click,
-  select, scroll — supplied by the extension. It still cannot *navigate*;
-  ADR-021 proposes `page.navigate` and does not build it, because it needs the
-  cross-origin decision and an authority domain, which are protocol territory.
-  That is why the harness still ends at the edge of one document.
+  select, scroll — supplied by the extension, and since 2026-08-25 navigate.
+  `page.navigate` goes only where the session can follow:
+  `packages/extension/src/lifecycle.ts#reclaimKeyFor` embeds the origin, so a
+  same-origin navigation hands the attachment to the next document and a
+  cross-origin one cannot reach it. The harness drives a multi-page flow
+  within a site; crossing to another site is still something the user does.
 - **On a site that declared some things**, it gets both, with the site's own
   tools preferred where they overlap, because a named action beats synthesized
   clicks every time.
@@ -130,9 +132,11 @@ What that demands, and where we currently stand:
   document instance. **Built within an origin** — the widget tier reclaims its
   session across a same-origin navigation, and `grant.update` lets the new
   document re-declare what it lends instead of the agent holding a grant
-  describing the page it just left. Crossing an *origin* still destroys the
-  conversation, and no navigation the agent performs itself is possible until
-  `page.navigate` exists.
+  describing the page it just left. The agent can now *cause* one too:
+  `page.navigate` is bounded to exactly the navigations the session survives,
+  which is the same line rather than a second rule that could drift from it.
+  Crossing an *origin* still destroys the conversation, and that is the
+  remaining half.
 - **Consent must be remembered.** "Attached, then detached" is about the
   agent's authority ending, not about making the user re-approve the same
   agent for the same site every few minutes. Approving once should mean

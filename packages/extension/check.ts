@@ -1047,6 +1047,73 @@ console.log('extension elicitation round-trip check passed');
   assert.equal(Object.getPrototypeOf(hostile[0]), Object.prototype, 'building an answer walked into a prototype');
 }
 
+// --- page.navigate: it may only go where the session can follow -------------
+{
+  const navWin = new Window({ url: 'https://harness.test/catalogue?page=2' });
+  (globalThis as unknown as { window: unknown }).window = navWin;
+  (globalThis as unknown as { document: unknown }).document = navWin.document;
+  (globalThis as unknown as { location: unknown }).location = navWin.location;
+
+  const { genericPageTools } = await import('./src/pagetools.js');
+  const navigate = genericPageTools().find((tool) => tool.name === 'page.navigate')!;
+
+  // Gated, always. A navigation replaces the document the user is looking at;
+  // there is no version of it that is a read.
+  assert.equal(navigate.requiresApproval, true, 'page.navigate is not gated — it changes the document');
+
+  // THE ONE THAT MATTERS. Cross-origin is refused because the SESSION cannot
+  // follow: `lifecycle.ts#reclaimKeyFor` embeds the origin, so the parked
+  // attachment is unreachable from the next document. Succeeding here would
+  // destroy the session performing the call, and the agent would never see
+  // the result of its own tool.
+  await assert.rejects(
+    () => navigate.handler({ url: 'https://evil.test/collect' }) as Promise<unknown>,
+    /cannot leave https:\/\/harness\.test/,
+    'page.navigate crossed an origin — the session cannot survive that',
+  );
+  // A protocol-relative URL is the same escape wearing different syntax.
+  await assert.rejects(
+    () => navigate.handler({ url: '//evil.test/collect' }) as Promise<unknown>,
+    /cannot leave https:\/\/harness\.test/,
+    'a protocol-relative URL escaped the origin check',
+  );
+  // Script-bearing schemes are not "pages" and this tool's approval does not
+  // authorise running them.
+  for (const url of ['javascript:fetch("//evil.test")', 'data:text/html,<script>1</script>']) {
+    await assert.rejects(
+      () => navigate.handler({ url }) as Promise<unknown>,
+      /opens http and https pages/,
+      `page.navigate accepted ${url.slice(0, 20)} — that is script execution, not navigation`,
+    );
+  }
+  await assert.rejects(() => navigate.handler({ url: 'http://' }) as Promise<unknown>, /is not one/);
+
+  // Already there: not an error, but it must not claim to have navigated.
+  const noop = (await navigate.handler({ url: '/catalogue?page=2' })) as { navigated: boolean };
+  assert.equal(noop.navigated, false, 'page.navigate reported a navigation it did not perform');
+
+  // The success path answers BEFORE the document is torn down, because a reply
+  // posted after the navigation commits reaches nobody — the agent would hold
+  // a call that neither succeeded nor failed.
+  let assigned: string | undefined;
+  (navWin.location as unknown as { assign: (url: string) => void }).assign = (url) => {
+    assigned = url;
+  };
+  const moved = (await navigate.handler({ url: '/catalogue?page=3' })) as {
+    navigated: boolean;
+    from: string;
+    to: string;
+    note: string;
+  };
+  assert.equal(moved.navigated, true);
+  assert.equal(moved.to, 'https://harness.test/catalogue?page=3');
+  assert.equal(moved.from, 'https://harness.test/catalogue?page=2', 'the answer did not say where it came from');
+  assert.equal(assigned, undefined, 'the navigation committed before the agent was answered');
+  assert.ok(moved.note.includes('void'), 'the agent was not told its element handles are now void');
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(assigned, 'https://harness.test/catalogue?page=3', 'the navigation never actually happened');
+}
+
 console.log('page harness check passed');
 
 // --- the fallback surface's state machine -----------------------------------
