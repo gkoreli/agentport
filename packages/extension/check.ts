@@ -1047,6 +1047,64 @@ console.log('extension elicitation round-trip check passed');
   assert.equal(Object.getPrototypeOf(hostile[0]), Object.prototype, 'building an answer walked into a prototype');
 }
 
+// --- the gating registry the compiler cannot check --------------------------
+// Lifted from an offline harness that was written for the pre-`page.find` API
+// and archived at `refs/wip/untracked`. This is the assertion worth keeping:
+// which tools are gated is a hand-maintained fact spread across eleven object
+// literals, and AGENTS.md's rule applies — a registry the compiler cannot
+// check is a registry that will eventually be wrong. The failure mode is not
+// a crash. It is a tool that changes the page shipping ungated, and nobody
+// noticing until it has already changed somebody's page.
+{
+  const pageWin = new Window({ url: 'https://harness.test/' });
+  (globalThis as unknown as { window: unknown }).window = pageWin;
+  (globalThis as unknown as { document: unknown }).document = pageWin.document;
+  (globalThis as unknown as { location: unknown }).location = pageWin.location;
+  const { genericPageTools } = await import('./src/pagetools.js');
+
+  // Stated here, once, as the intent: everything that can alter the document
+  // or where the user is asks first; everything that only looks does not.
+  const MUTATES = new Set(['page.fill', 'page.click', 'page.select', 'page.setChecked', 'page.pressKey', 'page.navigate']);
+  const READS = new Set(['page.info', 'page.readText', 'page.readSelection', 'page.listElements', 'page.scroll', 'page.waitFor', 'page.find']);
+
+  const names = genericPageTools().map((tool) => tool.name);
+  // Totality in both directions, so ADDING a tool fails here until it is
+  // classified. A new mutating verb that nobody added to MUTATES would
+  // otherwise sail through with the rest of this block still green.
+  assert.deepEqual(
+    [...names].sort(),
+    [...MUTATES, ...READS].sort(),
+    'the page toolset changed without this gating table being updated — classify the new tool',
+  );
+  for (const tool of genericPageTools()) {
+    if (MUTATES.has(tool.name)) {
+      assert.equal(tool.requiresApproval, true, `${tool.name} changes the page and is not gated`);
+    } else {
+      assert.notEqual(tool.requiresApproval, true, `${tool.name} only reads but asks for approval — that trains reflexive clicking`);
+    }
+  }
+
+  // A control the user cannot see is a control they cannot have consented to.
+  // `display:none` and `[hidden]` controls used to be offered as clickable,
+  // which hands a hostile page a button the agent can press and the user can
+  // never observe.
+  pageWin.document.body.innerHTML = `
+    <button>Visible action</button>
+    <button style="display:none">Delete account</button>
+    <button hidden>Wipe disk</button>
+  `;
+  const box = { width: 100, height: 20, top: 0, left: 0, right: 100, bottom: 20, x: 0, y: 0, toJSON: () => ({}) };
+  (pageWin as unknown as { Element: { prototype: Record<string, unknown> } }).Element.prototype['getBoundingClientRect'] = () => box;
+  (pageWin as unknown as { Element: { prototype: Record<string, unknown> } }).Element.prototype['checkVisibility'] = undefined;
+
+  const tools = new Map(genericPageTools().map((t) => [t.name, t] as const));
+  const shown = (await tools.get('page.listElements')!.handler({})) as { elements: { label: string }[] };
+  const labels = shown.elements.map((row) => row.label);
+  assert.ok(labels.some((label) => label.includes('Visible action')), 'the visible control was not listed at all');
+  assert.ok(!labels.some((label) => label.includes('Delete account')), 'a display:none control was offered as clickable');
+  assert.ok(!labels.some((label) => label.includes('Wipe disk')), 'a [hidden] control was offered as clickable');
+}
+
 // --- page.navigate: it may only go where the session can follow -------------
 {
   const navWin = new Window({ url: 'https://harness.test/catalogue?page=2' });
