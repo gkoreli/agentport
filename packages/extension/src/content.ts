@@ -331,11 +331,49 @@ function onWorkerMessage(message: WorkerToContent): void {
   }
 }
 
+/**
+ * Bound a locally-executed handler.
+ *
+ * Widget tools run in this world and some of them wait on the page
+ * (`page.waitFor`, the settle after a click). A handler that never resolves
+ * would wedge the agent's turn with nothing to time it out — the daemon has no
+ * tool-call timeout of its own — so the local route gets the same guard the
+ * page route already has.
+ */
+function withTimeout<T>(work: Promise<T> | T, name: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error(`${name} did not finish within ${TOOL_CALL_TIMEOUT_MS / 1000}s`)),
+      TOOL_CALL_TIMEOUT_MS,
+    );
+    void Promise.resolve(work).then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err: unknown) => {
+        clearTimeout(timer);
+        reject(err instanceof Error ? err : new Error(String(err)));
+      },
+    );
+  });
+}
+
 async function runToolCall(call: Extract<WorkerToContent, { t: 'tool.call' }>): Promise<void> {
   const record = records.get(call.ref);
   const route = record?.routes.get(call.name);
   if (!record || !route) {
-    tell({ t: 'tool.result', ref: call.ref, callId: call.callId, ok: false, error: `unknown tool ${call.name}` });
+    // Which of the two it is matters to the agent: a granted tool missing from
+    // this document is a different problem from a name that was never granted.
+    tell({
+      t: 'tool.result',
+      ref: call.ref,
+      callId: call.callId,
+      ok: false,
+      error: record
+        ? `${call.name} is not present on the current page (${location.href})`
+        : `unknown tool ${call.name}`,
+    });
     return;
   }
 
@@ -361,7 +399,7 @@ async function runToolCall(call: Extract<WorkerToContent, { t: 'tool.call' }>): 
   }
 
   try {
-    const result = await route(call.arguments ?? {});
+    const result = await withTimeout(route(call.arguments ?? {}), call.name);
     tell({ t: 'tool.result', ref: call.ref, callId: call.callId, ok: true, result });
   } catch (err) {
     tell({

@@ -136,16 +136,41 @@ consent flow as a site-declared grant, over one of two toolsets:
   Harvested tools execute in the page (that is where they were defined). They
   are ungated by default because the site deliberately published them;
   `annotations.destructiveHint: true` opts a tool into per-call approval.
-- **Otherwise the generic `page.*` toolset:** `page.info`, `page.readText`,
-  `page.readSelection`, `page.listElements`, `page.scroll` are ungated reads;
-  `page.fill` and `page.click` mutate the document and always ask. Writes
-  address elements by a handle from `page.listElements`, never by a selector, so
-  the agent can only act on something that was enumerated to it and the approval
-  card can name the element instead of showing a CSS string.
+- **Otherwise the generic `page.*` toolset** (`src/pagetools.ts`):
+  `page.info`, `page.readText`, `page.readSelection`, `page.listElements`,
+  `page.scroll` and `page.waitFor` are ungated; `page.fill`, `page.click` and
+  `page.navigate` change the document and always ask.
 
-Page text is hostile data. `page.readText` returns it labelled as untrusted, and
-the approval round-trip is the only thing between a poisoned paragraph and a
-click — see "Prompt injection" in `AGENTS.md`.
+  The harness is what the agent falls back to when a site says nothing, so its
+  failure modes are the product's failure modes. Three properties carry that:
+
+  - **Addressing that reports staleness.** Writes address elements by a handle
+    from `page.listElements`, never by a selector. `isConnected` is not enough —
+    framework reconciliation and virtualised lists reuse the same node for
+    different content — so each handle records an identity snapshot and a use
+    after the element (or the URL) changed is refused, naming the drift.
+  - **Truthful action.** `page.click` re-checks that the element is rendered,
+    enabled and not covered, dispatches the full pointer sequence (a control
+    listening only on `mousedown` used to see nothing), and reports what it
+    observed — including that the page did not change. `page.fill` writes
+    through the prototype's value setter so a controlled component actually
+    sees the change, then reads the field back: a value the site reverted is an
+    error, not `{ok:true}`.
+  - **Truthful bounds.** `page.readText` and `page.listElements` report whether
+    they truncated and how much exists, so "the page ends here" is
+    distinguishable from "you got the first 40 000 characters" — and they count
+    the shadow roots and frames the harness structurally cannot reach, so an
+    almost-empty web-components page is never reported as an empty one.
+
+Page text is hostile data. Every read carries an explicit `untrusted` marker in
+its payload, `page.readText` returns only text a person can actually see (an
+invisible paragraph is the ideal injection carrier), and the approval
+round-trip is the only thing between a poisoned paragraph and a click — see
+"Prompt injection" in `AGENTS.md`.
+
+`npm run check:extension` runs `pagetools-check.ts`, which drives the toolset
+over happy-dom and asserts each of those properties in a state where the
+previous implementation failed.
 
 ## nisli
 

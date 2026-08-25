@@ -6,7 +6,7 @@
   "scripts": {
     "build": "tsx build.ts",
     "typecheck": "tsc -p tsconfig.json",
-    "check": "tsx check.ts"
+    "check": "tsx check.ts && tsx pagetools-check.ts"
   },
   "dependencies": {
     "@agentport/client": "0.0.1",
@@ -14,6 +14,7 @@
     "@nisli/core": "file:../../../nisli/packages/core"
   },
   "devDependencies": {
-    "@types/chrome": "^0.0.287"
+    "@types/chrome": "^0.0.287",
+    "happy-dom": "^20.11.1"
   }
 }
