@@ -15,7 +15,13 @@ import { AgentDaemon } from '../packages/daemon/src/daemon.js';
 import { memoryRevocations } from '../packages/daemon/src/revocations.js';
 import { McpBridge } from '../packages/daemon/src/mcp-bridge.js';
 import { AcpRuntime } from '../packages/daemon/src/runtimes/acp.js';
-import { DemoWriterRuntime, type AgentRuntime, type TurnContext } from '../packages/daemon/src/runtime.js';
+import {
+  DemoWriterRuntime,
+  attachmentPolicy,
+  type AgentRuntime,
+  type AttachmentPolicy,
+  type TurnContext,
+} from '../packages/daemon/src/runtime.js';
 import { AgentWallet, buildGrant, type SiteTool } from '../packages/client/src/index.js';
 import {
   Deferred,
@@ -164,7 +170,7 @@ console.log('\n0c. ACP attachment identity');
     surface: { name: 'Same Label', origin: 'https://same.test' },
     grant: { tools: [] },
     tools: [],
-    policy: { mayAsk: false },
+    policy: attachmentPolicy(false),
   };
   const first = makeRuntime();
   const second = makeRuntime();
@@ -296,18 +302,15 @@ const reply = await session.prompt('Then the wind rose.');
 check('agent read the document', toolEvents.includes('inkwell.document.read:true'), toolEvents);
 check('write was approved', approvals.length > 0, approvals);
 // ADR-023: the two authorities must be TELLABLE APART on the decision
-// surface. This one write produces both — the runtime asks first through its
-// own advisory channel, then the grant gate asks about the actual tool.call —
-// and before this change they arrived indistinguishable, so a policy written
-// for one would have answered the other.
+// surface, and ADR-024 R11 says only one of them may be asked here at all.
+// The grant gate is the site's own tool, so the page answering for it is
+// self-referential rather than escalation — it could call the function
+// directly. That one belongs here. (The refusal of the other is section 18;
+// this session's runtime deliberately does not raise one, so asserting its
+// absence here would be vacuous.)
 check(
   'the grant gate asks as a site tool',
   approvalDomains.includes('site_tool'),
-  approvalDomains,
-);
-check(
-  "the runtime's own request is a different domain",
-  approvalDomains.includes('runtime_own_tool'),
   approvalDomains,
 );
 check('document was mutated in the page', doc.text.endsWith('Then the wind rose.'), doc.text);
@@ -633,6 +636,11 @@ check(
     surface: { name: 'Inkwell', origin: 'https://inkwell.test' },
     grant: { tools: [], alwaysAsk: [], expiresAt: Date.now() + 60_000 },
     missed: 0,
+    // Well-formed on purpose: this check is about ROUTING AUTHORITY, so the
+    // forgery has to survive the decoder and be refused for who sent it. A
+    // frame missing a required field would be rejected as bad_frame and prove
+    // only that the schema works.
+    ownTools: false,
     epk: 'a'.repeat(64),
     epkSig: 'b'.repeat(128),
   }));
@@ -1760,12 +1768,17 @@ console.log('\n15. revocation (ADR-022)');
 }
 
 // --- 16. an approval answers the question it was asked ----------------------
-// ADR-023 R6. The digest is not about this session, where a fresh id already
-// pairs a request with its answer. It is about the answer that no human
-// produced — a policy engine, a remembered "yes" — which must be pinned to
-// the call it was made about or a stored decision for one call satisfies
-// another. Modelled here by a decider that says yes to something other than
-// what it was shown.
+// ADR-023 R6, on the gate that still exists. The site-tool gate is bound by
+// construction rather than by a digest: `#onToolCall` shows the decider the
+// same `arguments` reference it then dispatches, in the same tick, so a
+// decider that rewrites what it was shown changes nothing about what runs.
+// That is worth asserting precisely because the plausible "improvement" —
+// dispatching `prompt.call.arguments`, the object the user approved — would
+// silently turn this into a TOCTOU hole.
+//
+// The OTHER binding — the `callHash` on `approval.request`/`approval.response`
+// — is a different path and is checked where that path is live: section 18's
+// direct-key row, where the daemon really does send the frame.
 console.log('\n16. an approval answers the question it was asked (ADR-023)');
 {
   doc.text = 'Untouched by tampering.';
@@ -1781,8 +1794,8 @@ console.log('\n16. an approval answers the question it was asked (ADR-023)');
   });
   await tampering.prompt('Rewrite everything.');
   check(
-    'a yes about a different call is refused',
-    doc.text === 'Untouched by tampering.',
+    'the call that runs is the call the decider was shown',
+    doc.text.endsWith('Rewrite everything.') && !doc.text.includes('never saw'),
     doc.text,
   );
   tampering.close();
@@ -1809,6 +1822,24 @@ console.log('\n17. the agent asks its own user (ADR-024)');
 
   const policies: boolean[] = [];
   const asked = new Deferred<string | undefined>();
+  /** Every answer the agent received, in turn order — `asked` only ever
+   *  settles on the first one. */
+  const answered: (string | undefined)[] = [];
+  /** A question nobody answers decays after the daemon's five-minute deadline,
+   *  which is far longer than a suite waits: bound every turn that asks. */
+  const bounded17 = async <T>(work: Promise<T>): Promise<T | 'hung'> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        work,
+        new Promise<'hung'>((resolve) => {
+          timer = setTimeout(() => resolve('hung'), 10_000);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  };
   class AskingRuntime implements AgentRuntime {
     readonly name = 'asking';
     openSession(context: { policy: { mayAsk: boolean } }): void {
@@ -1819,6 +1850,7 @@ console.log('\n17. the agent asks its own user (ADR-024)');
         message: 'Which draft should I revise?',
         fields: [{ key: 'draft', label: 'Draft', options: ['The first', 'The second'], multi: false }],
       });
+      answered.push(answers?.['draft']);
       asked.resolve(answers?.['draft']);
       ctx.say(answers ? `Revising ${answers['draft']}.` : 'I could not ask, so I guessed.');
     }
@@ -1888,12 +1920,319 @@ console.log('\n17. the agent asks its own user (ADR-024)');
     policies,
   );
 
+  // The direct-key tier: no delegation, so the client is the owner's own key
+  // and its wallet is the answer surface. Same predicate as the own-tool rule
+  // (ADR-024 R11) — narrowing that predicate to delegation returned this
+  // capability here too, and a capability nothing exercises is a claim, not a
+  // property.
+  const direct17 = new AgentWallet({ relayUrl: url17, userSecretKey: owner17.secretKey, socketFactory });
+  await direct17.connect();
+  const directAsker = await direct17.openSession({
+    agent: agent17.publicKey,
+    surface: { name: 'Direct Asker', origin: 'https://direct-asker.test' },
+    tools: [],
+  });
+  check('a wallet holding the user own key may be asked', policies[2] === true, policies);
+  directAsker.on('ask', (question) => {
+    directAsker.answer(question.id, { draft: 'The first' });
+  });
+  // These two prove the ROUND TRIP, and only that. They cannot prove routing,
+  // and would still pass on a daemon that withheld the capability: elicitation
+  // is refused by NOT DECLARING it (ADR-024 R2), and `AskingRuntime` calls
+  // `ctx.ask` directly instead of consulting what it was told — which a real
+  // ACP runtime does not do, but which also means nothing in the daemon stops
+  // it. That is ADR-024's own R2 falsifiability clause, still open: the check
+  // that could see it is a runtime-ignores-policy check, and it belongs with
+  // the fix, not here.
+  const directSaid = await bounded17(directAsker.prompt('Revise it.'));
+  check('the question reaches that wallet and comes back', answered[1] === 'The first', answered);
+  check(
+    'and the agent acted on it rather than guessing',
+    directSaid !== 'hung' && directSaid.includes('The first'),
+    directSaid,
+  );
+
+  directAsker.close();
   delegatedSession.close();
   dropIn.close();
   page17.close();
   delegated17.close();
+  direct17.close();
   await daemon17.stop();
   await r17.close();
+}
+
+// --- 18. a page may not answer for the user's own capability ----------------
+// ADR-024 R11, and the hole ADR-023 left open: the domain field made the two
+// authorities DISTINGUISHABLE without making them ROUTE differently, so a
+// delegated session asked the page whether the agent could use the agent's own
+// shell. `site_tool` stays in the page because a site forging approval for its
+// own function gains nothing it already lacked; `runtime_own_tool` is the
+// user's machine, and there is no surface in that tier which the requesting
+// origin cannot draw — so it is REFUSED, not rerouted.
+//
+// All three tiers are here, because the discriminator is DELEGATION and the
+// rows either side of the refusal are what make it a routing rule rather than
+// a ban. A check that only exercised the refused row could not tell a correct
+// predicate from one that refuses everything.
+//
+// Every wait here has its own deadline. This is a refusal path, and a refusal
+// that hangs is indistinguishable from a slow one: the bug it targets would
+// otherwise stall the suite instead of failing it.
+console.log("\n18. a page may not answer for the user's own capability (ADR-024 R11)");
+{
+  const r18 = new Relay({ port: 0, log: () => {} });
+  await r18.listening();
+  const url18 = `ws://127.0.0.1:${r18.port}`;
+  const owner18 = generateKeyPair();
+  const agent18 = generateKeyPair();
+  const cert18 = signCert(owner18.secretKey, {
+    user: owner18.publicKey,
+    agent: agent18.publicKey,
+    name: 'Shell Agent',
+    runtime: 'own-tools',
+    issuedAt: Date.now(),
+  });
+
+  const policies: AttachmentPolicy[] = [];
+  const decisions: (boolean | undefined)[] = [];
+  /**
+   * Asks about its OWN capability — the agent's shell, on the user's machine —
+   * which is what `TurnContext.requestApproval` is for and why the daemon
+   * stamps everything arriving on it `runtime_own_tool`.
+   */
+  class OwnToolRuntime implements AgentRuntime {
+    readonly name = 'own-tools';
+    openSession(context: { policy: AttachmentPolicy }): void {
+      policies.push(context.policy);
+    }
+    async prompt(_text: string, ctx: TurnContext): Promise<void> {
+      const granted = await ctx.requestApproval('Run a shell command', {
+        name: 'runtime.tool',
+        arguments: { command: 'rm -rf ~/notes' },
+      });
+      decisions.push(granted);
+      ctx.say(granted ? 'I ran it.' : 'I did not run it.');
+    }
+  }
+
+  const localAsks: { domain: string; summary: string }[] = [];
+  const daemon18 = new AgentDaemon({
+    relayUrl: url18,
+    identity: {
+      secretKey: agent18.secretKey,
+      publicKey: agent18.publicKey,
+      name: 'Shell Agent',
+      runtime: 'own-tools',
+      cert: cert18,
+    },
+    createRuntime: () => new OwnToolRuntime(),
+    onConnectOffer: async () => true,
+    onLocalApproval: async (domain, summary) => {
+      localAsks.push({ domain, summary });
+      return true;
+    },
+  });
+  await daemon18.start();
+
+  /** A refusal must FAIL, never stall — so every await here is bounded. */
+  const bounded = async <T>(work: Promise<T>): Promise<T | 'hung'> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        work,
+        new Promise<'hung'>((resolve) => {
+          timer = setTimeout(() => resolve('hung'), 10_000);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
+  // --- the delegated tier: the page is the only thing that could answer -----
+  const pageKeys18 = generateKeyPair();
+  const page18 = new AgentWallet({ relayUrl: url18, userSecretKey: pageKeys18.secretKey, socketFactory });
+  await page18.connect();
+  const grant18 = buildGrant({ surface: { name: 'Delegated Shell' }, tools: [] });
+  const issued18 = Date.now();
+  const pageDecisions: string[] = [];
+  const delegated18 = await page18.openSession({
+    agent: agent18.publicKey,
+    approved: {
+      grant: grant18,
+      delegation: signDelegation(owner18.secretKey, {
+        delegate: pageKeys18.publicKey,
+        agent: agent18.publicKey,
+        origin: 'https://delegated-shell.test',
+        grantHash: hashGrant(grant18),
+        issuedAt: issued18,
+        expiresAt: issued18 + 60 * 60 * 1000,
+      }),
+    },
+    surface: { name: 'Delegated Shell', origin: 'https://delegated-shell.test' },
+    tools: [],
+    // The hole, in one line: on today's code this runs, and the site answers
+    // for the user's own shell. It must never be consulted.
+    decide: async (prompt) => {
+      pageDecisions.push(prompt.domain);
+      return true;
+    },
+  });
+
+  const localBefore18 = localAsks.length;
+  const said = await bounded(delegated18.prompt('Clean up my notes.'));
+  check('the refusal answers rather than hanging the turn', said !== 'hung', said);
+  check(
+    'the page is never asked whether the agent may use the agent OWN tools',
+    pageDecisions.length === 0,
+    pageDecisions,
+  );
+  check(
+    'and the refusal is not silently redirected to the daemon owner either',
+    localAsks.length === localBefore18,
+    localAsks.slice(localBefore18),
+  );
+  check('the agent is told no, in the same shape a human decline produces', decisions[0] === false, decisions);
+  check('so it reports what it did not do', said !== 'hung' && said.includes('did not'), said);
+  // R4/R11's other half. A refusal nobody can see is the invisible
+  // diminishment: the model treats an absent affordance as nothing at all and
+  // guesses, so the only party who can act on this is the user — and only if
+  // the session surface says so.
+  check(
+    'the session tells the page its agent has no own tools here',
+    delegated18.info.ownTools === false,
+    delegated18.info,
+  );
+  check('the runtime is told the same thing the daemon enforces', policies[0]?.mayUseOwnTools === false, policies[0]);
+  check(
+    'one predicate: a tier that may not answer for the user may not be asked either',
+    policies[0]?.mayUseOwnTools === policies[0]?.mayAsk,
+    policies[0],
+  );
+
+  // --- the direct-key tier: the client IS the owner's key ------------------
+  // The row the discriminator turns on. There is no delegation here: the
+  // relay stamped the owner's own public key, and the daemon checked it
+  // against the cert. That wallet is the extension's consent window once the
+  // extension is the wallet, and today it is the in-page demo wallet — which
+  // is allowed for the SAME self-referential reason page-answered `site_tool`
+  // approvals are: a page holding the user key could already mint any
+  // authority it wanted, so refusing to ask it protects nothing. The refusal
+  // belongs where a page does NOT hold the key, which is the delegated row
+  // above.
+  const directDecisions: string[] = [];
+  const direct18 = new AgentWallet({ relayUrl: url18, userSecretKey: owner18.secretKey, socketFactory });
+  await direct18.connect();
+  const directSession = await bounded(
+    direct18.openSession({
+      agent: agent18.publicKey,
+      surface: { name: 'Direct Shell', origin: 'https://direct-shell.test' },
+      tools: [],
+      decide: async (prompt) => {
+        directDecisions.push(prompt.domain);
+        return true;
+      },
+    }),
+  );
+  check('the direct-key attachment opened', directSession !== 'hung', directSession);
+  if (directSession !== 'hung') {
+    const directSaid = await bounded(directSession.prompt('Clean up my notes.'));
+    check(
+      "a wallet holding the user's own key is asked, not refused",
+      directDecisions.length === 1,
+      directDecisions,
+    );
+    check(
+      'and the question names the agent OWN authority (ADR-023)',
+      directDecisions[0] === 'runtime_own_tool',
+      directDecisions,
+    );
+    check('the agent may act on that answer', directSaid !== 'hung' && directSaid.includes('I ran it.'), directSaid);
+    check(
+      'and the session says its agent keeps its own tools',
+      directSession.info.ownTools === true,
+      directSession.info,
+    );
+    directSession.close();
+  }
+
+  // ADR-023 R6's digest, on the one path that carries it: `approval.request`
+  // out, `approval.response` back, with the hash recomputed from what the
+  // decider was actually shown rather than echoed from the request. Modelled
+  // by a decider that says yes to something other than what it was handed —
+  // a policy engine or a remembered "yes" pinned to the wrong call.
+  const tamperer = new AgentWallet({ relayUrl: url18, userSecretKey: owner18.secretKey, socketFactory });
+  await tamperer.connect();
+  const tampered = await bounded(
+    tamperer.openSession({
+      agent: agent18.publicKey,
+      surface: { name: 'Tampered Shell', origin: 'https://tampered-shell.test' },
+      tools: [],
+      decide: async (prompt) => {
+        if (prompt.call) prompt.call.arguments = { command: 'something the user never saw' };
+        return true;
+      },
+    }),
+  );
+  check('the tampering attachment opened', tampered !== 'hung', tampered);
+  if (tampered !== 'hung') {
+    const tamperedSaid = await bounded(tampered.prompt('Clean up my notes.'));
+    check(
+      'a yes about a different call is refused, not counted as approval',
+      tamperedSaid !== 'hung' && tamperedSaid.includes('did not'),
+      tamperedSaid,
+    );
+    tampered.close();
+  }
+  tamperer.close();
+  direct18.close();
+
+  // --- the drop-in tier: an answer surface no page can draw ----------------
+  // The other half of the rule, and the reason this is a routing decision
+  // rather than a ban: where a trusted surface exists the question is still
+  // asked, and ADR-023's domain arrives with it so the owner can tell which
+  // authority they are lending.
+  const dropInPage18 = new AgentWallet({
+    relayUrl: url18,
+    userSecretKey: generateKeyPair().secretKey,
+    socketFactory,
+  });
+  await dropInPage18.connect();
+  const offer18 = await dropInPage18.beginConnect({
+    surface: { name: 'Terminal Shell', origin: 'https://terminal-shell.test' },
+    tools: [],
+    decide: async (prompt) => {
+      pageDecisions.push(prompt.domain);
+      return true;
+    },
+  });
+  daemon18.claimConnect(offer18.code);
+  const dropIn18 = await bounded(offer18.accepted);
+  check('the drop-in attachment opened', dropIn18 !== 'hung', dropIn18);
+  if (dropIn18 !== 'hung') {
+    const dropInSaid = await bounded(dropIn18.prompt('Clean up my notes.'));
+    check(
+      'a tier with an unforgeable answer surface still gets the question',
+      localAsks.length === localBefore18 + 1,
+      localAsks,
+    );
+    check(
+      'and it arrives stamped as the agent\'s OWN authority (ADR-023)',
+      localAsks[localBefore18]?.domain === 'runtime_own_tool',
+      localAsks[localBefore18],
+    );
+    check('the page was not consulted there either', pageDecisions.length === 0, pageDecisions);
+    check('the agent may act on the answer', dropInSaid !== 'hung' && dropInSaid.includes('I ran it.'), dropInSaid);
+    check('and that session says its agent keeps its own tools', dropIn18.info.ownTools === true, dropIn18.info);
+    dropIn18.close();
+  }
+
+  delegated18.close();
+  page18.close();
+  dropInPage18.close();
+  await daemon18.stop();
+  await r18.close();
 }
 
 // --- teardown ---------------------------------------------------------------

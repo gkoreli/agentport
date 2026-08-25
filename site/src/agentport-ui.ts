@@ -89,6 +89,21 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
   // a dropped turn produces would otherwise overwrite the only notice showing
   // them — losing the one check a careful user can actually perform.
   const verify = signal('');
+  // Persistent attachment state, exactly like `verify`, and for the same
+  // reason: this is a standing fact about what the agent may do here, not a
+  // transient message a later run error may overwrite.
+  //
+  // The daemon decides it and signs it into the sealing proof; the panel only
+  // renders it. It has to be RENDERED and not merely carried: an agent that
+  // silently cannot use half of itself is the invisible diminishment ADR-024
+  // R4 names — the model experiences an absent affordance as nothing at all
+  // and simply guesses, so the only party who can act on this is the user.
+  //
+  // Starts and resets FALSE. Nothing renders it until an attachment is live,
+  // and the only thing that clears it is an attachment that positively said
+  // its agent keeps its own tools — so the failure mode of a future edit is a
+  // banner shown too often, not a restriction hidden.
+  const ownTools = signal(false);
 
   let session: AgentSessionHandle | null = null;
   let adapter: AguiAdapter | null = null;
@@ -213,6 +228,9 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
             verify.value = event.value.verify ?? '';
             notice.value = 'reconnected · new sealing keys';
             status.value = session ? `${session.info.agentName} · ${session.info.runtime}` : status.value;
+            // Re-read rather than remembered: a re-attachment restates the
+            // policy, and the panel keeps nothing across the gap.
+            ownTools.value = session?.info.ownTools === true;
             online.value = true;
             // An in-flight turn lost its answer when the socket died; the
             // composer must not stay disabled waiting for a `done` that can
@@ -234,6 +252,7 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
             currentRunId = null;
             plan.value = [];
             verify.value = '';
+            ownTools.value = false;
             chat.reset();
           }
           return;
@@ -302,6 +321,9 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
     live.value = true;
     online.value = true;
     verify.value = next.info.verify ?? '';
+    // `=== true`, fail-closed: an attachment that did not positively say its
+    // agent keeps its own tools is one whose agent does not.
+    ownTools.value = next.info.ownTools === true;
     status.value = `${next.info.agentName} · ${next.info.runtime}`;
     notice.value = `connected · ${next.grant.tools.length} tools lent · expires ${new Date(
       next.grant.expiresAt,
@@ -455,6 +477,14 @@ const AgentPanel = component<{ config: SurfaceConfig }>('agent-panel', (props) =
       computed(() => verify.value !== ''),
       () => html`<div class="ap-verify" title="Compare these words with your agent's consent screen">
         verify <code>${verify}</code>
+      </div>`,
+    )}
+
+    ${when(
+      computed(() => live.value && !ownTools.value),
+      () => html`<div class="ap-limits" role="status">
+        On this site your agent works with <strong>this site's tools only</strong> — its own tools
+        stay on your machine, because nothing here can ask you about them without the site watching.
       </div>`,
     )}
 

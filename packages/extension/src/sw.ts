@@ -528,7 +528,16 @@ function toRow(agent: AgentSummary): AgentRow {
  */
 async function infoFor(
   entry: SessionEntry,
-): Promise<{ agentName: string; runtime: string; alias?: string; verify?: string }> {
+): Promise<{ agentName: string; runtime: string; ownTools: boolean; alias?: string; verify?: string }> {
+  // `ownTools` crosses to the PAGE in both branches, unlike the agent's real
+  // name or its fingerprint words. It is not a fact about the attachment's
+  // identity or keys, which is what ADR-009 withholds — it is a fact about
+  // what the agent may do here, which the page has to render or the user is
+  // left inferring a withheld capability from a guess (ADR-024 R4). Passing
+  // it through is also what stops the panel claiming a restriction that does
+  // not apply: an extension attachment KEEPS its own tools, and a page told
+  // nothing would fail closed and say the opposite.
+  const { ownTools } = entry.session.info;
   if (entry.from !== 'page') {
     const { agentName, runtime, verify } = entry.session.info;
     // The fingerprint words for THIS attachment, and only for the widget. The
@@ -537,9 +546,14 @@ async function infoFor(
     // verify anything with them — it would only gain the text needed to paint a
     // convincing fake of our chrome, so the ADR-009 rule that a page learns a
     // generic label and nothing about the attachment's keys holds here too.
-    return { agentName, runtime, ...(verify ? { verify } : {}) };
+    return { agentName, runtime, ownTools, ...(verify ? { verify } : {}) };
   }
-  return { agentName: 'Personal agent', runtime: 'agent', alias: await originAlias(entry.origin) };
+  return {
+    agentName: 'Personal agent',
+    runtime: 'agent',
+    ownTools,
+    alias: await originAlias(entry.origin),
+  };
 }
 
 function grantFor(entry: SessionEntry): { tools: ToolDefinition[]; alwaysAsk: string[]; expiresAt: number } {
@@ -577,7 +591,11 @@ function wireSession(entry: SessionEntry): void {
     if (current) current.missedEvents += 1;
   };
 
-  for (const event of ['delta', 'thought', 'tool'] as const) {
+  // `ask` is turn content, so it counts as missed when nobody is bound: a
+  // question the agent asked into a document that navigated away is lost, and
+  // the daemon's own deadline decays it to a skip. Counting it is how the next
+  // document learns something happened it did not see.
+  for (const event of ['delta', 'thought', 'tool', 'ask'] as const) {
     session.on(event, (payload) => forward(event, payload, true));
   }
   session.on('done', (payload) => {
@@ -1067,6 +1085,24 @@ async function onContentMessage(port: chrome.runtime.Port, message: ContentReque
     }
     case 'prompt.cancel': {
       lookup(port, message.ref)?.session.cancel(message.promptId);
+      return;
+    }
+    case 'answer': {
+      // `lookup` is the ownership check: this port must hold this ref. The
+      // wallet then refuses an ask id it never issued, and the daemon refuses
+      // one it has already settled — delete-before-resolve there means a
+      // duplicate answer is a no-op rather than a second, contradictory one.
+      const entry = lookup(port, message.ref);
+      if (!entry) {
+        log.warn('dropped an answer for a session this port does not hold', { data: { ref: message.ref } });
+        return;
+      }
+      // `Object.fromEntries`, not assignment into a literal: it DEFINES own
+      // properties, so a field key of `__proto__` becomes a plain key instead
+      // of reaching the prototype setter. The pairs were already validated
+      // against the wire's own key pattern and length bound at the page
+      // boundary, so this is the first and only place they become an object.
+      entry.session.answer(message.askId, Object.fromEntries((message.values ?? []).map((f) => [f.key, f.value])));
       return;
     }
     case 'tool.result': {

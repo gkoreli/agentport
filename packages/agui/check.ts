@@ -28,7 +28,12 @@ const session = new AgentSession({
   id: 'session-check',
   surface: { name: 'AG-UI check', origin: 'https://example.test' },
   grant: { tools: [tool], alwaysAsk: [], expiresAt: Date.now() + 60_000 },
-  info: { agentName: 'Fake agent', runtime: 'fake', verify: 'coral-anvil-fern-river-slate-owl' },
+  info: {
+    agentName: 'Fake agent',
+    runtime: 'fake',
+    ownTools: true,
+    verify: 'coral-anvil-fern-river-slate-owl',
+  },
   tools: [tool],
   decide: async () => true,
   send: (frame) => sent.push(frame),

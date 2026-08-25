@@ -160,7 +160,14 @@ export function mountOverlay(port: MessagePort): void {
   const notices = signal<Array<{ id: number; text: string }>>([]);
   // Attachment state, deliberately outside the chat store: neither is anything
   // the agent *said*, and both are replaced wholesale rather than accumulated.
-  const plan = signal<readonly PlanStep[]>([]);
+  //
+  // `PlanStep[]`, not `readonly PlanStep[]`: nisli's `each` takes a
+  // `ReadonlySignal<T[]>`, and a signal whose VALUE is readonly is not that —
+  // `Signal<readonly T[]>` cannot be handed to it, because the array type is
+  // invariant in that position. The immutability that matters here is the
+  // snapshot discipline (every write below replaces the whole array, never
+  // mutates it), which is a property of the writes rather than of the type.
+  const plan = signal<PlanStep[]>([]);
   const verify = signal('');
   const chat = createChatStore();
   const pendingPrompts = new Map<string, (accepted: boolean) => void>();
