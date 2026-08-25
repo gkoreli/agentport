@@ -1,0 +1,386 @@
+<title>AgentPort Roadmap</title>
+<style>
+  :root {
+    --bg: #F6F8F7;
+    --surface: #FFFFFF;
+    --surface-2: #EEF2F0;
+    --ink: #1A2321;
+    --muted: #5A6B66;
+    --line: #DCE4E1;
+    --accent: #0E6B5F;
+    --accent-ink: #FFFFFF;
+    --p0-bg: #F7E8E7; --p0-fg: #9C3530;
+    --p1-bg: #F5EBDD; --p1-fg: #8A5410;
+    --p2-bg: #E7EFED; --p2-fg: #33564F;
+    --good: #0E6B5F;
+    --code-bg: #EEF2F0;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #111815;
+      --surface: #18211E;
+      --surface-2: #1E2A26;
+      --ink: #E4EBE8;
+      --muted: #8FA39C;
+      --line: #28352F;
+      --accent: #3FBDA8;
+      --accent-ink: #0C1512;
+      --p0-bg: #3A2321; --p0-fg: #E8938D;
+      --p1-bg: #382C1A; --p1-fg: #DBA55C;
+      --p2-bg: #1E2E2A; --p2-fg: #8FBDB2;
+      --good: #3FBDA8;
+      --code-bg: #1E2A26;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #111815;
+    --surface: #18211E;
+    --surface-2: #1E2A26;
+    --ink: #E4EBE8;
+    --muted: #8FA39C;
+    --line: #28352F;
+    --accent: #3FBDA8;
+    --accent-ink: #0C1512;
+    --p0-bg: #3A2321; --p0-fg: #E8938D;
+    --p1-bg: #382C1A; --p1-fg: #DBA55C;
+    --p2-bg: #1E2E2A; --p2-fg: #8FBDB2;
+    --good: #3FBDA8;
+    --code-bg: #1E2A26;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    line-height: 1.6;
+    margin: 0;
+    padding: 0;
+    font-size: 16px;
+  }
+  .wrap {
+    max-width: 76ch;
+    margin: 0 auto;
+    padding: 3.5rem 1.5rem 5rem;
+  }
+  .mono, h1, h2, h3, .chip, .eyebrow, code, .phase-n {
+    font-family: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+  }
+  .eyebrow {
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    font-size: 0.72rem;
+    color: var(--accent);
+    font-weight: 600;
+    margin: 0 0 0.75rem;
+  }
+  h1 {
+    font-size: 2rem;
+    line-height: 1.15;
+    letter-spacing: -0.02em;
+    margin: 0 0 0.5rem;
+    text-wrap: balance;
+  }
+  .dek {
+    color: var(--muted);
+    font-size: 1.05rem;
+    margin: 0 0 0.75rem;
+    max-width: 62ch;
+  }
+  .meta {
+    color: var(--muted);
+    font-size: 0.8rem;
+    letter-spacing: 0.04em;
+  }
+  h2 {
+    font-size: 1.25rem;
+    letter-spacing: -0.01em;
+    margin: 3.25rem 0 1rem;
+    padding-top: 1.5rem;
+    border-top: 2px solid var(--ink);
+    text-wrap: balance;
+  }
+  h3 {
+    font-size: 0.98rem;
+    margin: 1.75rem 0 0.5rem;
+    text-wrap: balance;
+  }
+  p { margin: 0.75rem 0; }
+  a { color: var(--accent); }
+  code {
+    background: var(--code-bg);
+    border-radius: 4px;
+    padding: 0.1em 0.35em;
+    font-size: 0.86em;
+  }
+  .chip {
+    display: inline-block;
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    padding: 0.1rem 0.45rem;
+    border-radius: 3px;
+    vertical-align: 0.12em;
+    margin-right: 0.4rem;
+  }
+  .chip.p0 { background: var(--p0-bg); color: var(--p0-fg); }
+  .chip.p1 { background: var(--p1-bg); color: var(--p1-fg); }
+  .chip.p2 { background: var(--p2-bg); color: var(--p2-fg); }
+
+  .verdict {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--accent);
+    border-radius: 6px;
+    padding: 1.25rem 1.5rem;
+    margin: 2rem 0;
+  }
+  .verdict p:first-child { margin-top: 0; }
+  .verdict p:last-child { margin-bottom: 0; }
+
+  ul { padding-left: 1.35rem; margin: 0.75rem 0; }
+  li { margin: 0.5rem 0; }
+  li::marker { color: var(--accent); }
+
+  .finding {
+    margin: 1.5rem 0;
+    padding: 0 0 0 1.1rem;
+    border-left: 2px solid var(--line);
+  }
+  .finding > .fhead {
+    font-weight: 650;
+    margin: 0 0 0.25rem;
+  }
+  .finding p { margin: 0.4rem 0; }
+  .why {
+    color: var(--muted);
+    font-size: 0.92rem;
+  }
+
+  .phase {
+    display: grid;
+    grid-template-columns: 3.2rem 1fr;
+    gap: 0 1rem;
+    margin: 1.75rem 0;
+  }
+  .phase-n {
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: var(--accent);
+    line-height: 1.2;
+  }
+  .phase h3 { margin-top: 0.1rem; }
+  .phase p, .phase ul { grid-column: 2; }
+  .phase .ptag {
+    grid-column: 1;
+    grid-row: 2;
+    font-size: 0.68rem;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+
+  .tablewrap { overflow-x: auto; margin: 1.25rem 0; }
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    font-size: 0.9rem;
+    font-variant-numeric: tabular-nums;
+  }
+  th {
+    text-align: left;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--muted);
+    font-weight: 600;
+    padding: 0.5rem 0.9rem 0.5rem 0;
+    border-bottom: 2px solid var(--ink);
+    white-space: nowrap;
+  }
+  td {
+    padding: 0.55rem 0.9rem 0.55rem 0;
+    border-bottom: 1px solid var(--line);
+    vertical-align: top;
+  }
+  td:first-child { white-space: nowrap; }
+
+  .footer {
+    margin-top: 4rem;
+    padding-top: 1.25rem;
+    border-top: 1px solid var(--line);
+    color: var(--muted);
+    font-size: 0.8rem;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+  }
+</style>
+
+<div class="wrap">
+  <p class="eyebrow">navigator.agent · survey of six parallel deep-dives</p>
+  <h1>AgentPort Roadmap</h1>
+  <p class="dek">Architecture, capabilities, integrations, and product sequence — synthesized from a six-agent fan-out over the repo, the deployed artifacts, and the August 2026 landscape.</p>
+  <p class="meta">2026-08-20 · main = v0.1.7 + 1 CI commit · protocol agentport/6 · deployed bundle verified byte-identical to main</p>
+
+  <div class="verdict">
+    <p><strong>The verdict in four sentences.</strong> The engineering is far ahead of the product: 45 validated frames, sealed sessions, a real ACP runtime — and zero third-party integrations, a front door broken in two places <em>right now</em>, and the one capability nobody else has (the generic page harness) locked behind an unlisted extension. The architecture needs no grand redesign; it needs its domain entities to own their rules — the same extraction pattern <code>revocations.ts</code> and <code>lifecycle.ts</code> already prove — because every drifted duplicate found is a rule written twice. The landscape moved decisively this month: WebMCP tool <em>supply</em> arrived at platform scale (Cloudflare edge-injection Aug 6, Shopify storefronts reported Aug 5) with <strong>no demand-side consumer yet</strong> — and AgentPort is a demand-side product. The window is a distribution race: the wedge is the extension harness, and the Chrome Web Store listing is engineering, not a release decision.</p>
+  </div>
+
+  <h2>0 · Fix the front door this week</h2>
+  <p>The vision agent walked the deployed paths as a stranger and found requirement 6 broken for the third time — both instances are small and both sit on the only two paths a stranger walks:</p>
+
+  <div class="finding">
+    <p class="fhead"><span class="chip p0">P0</span>The CLI's first printed link is a dead page</p>
+    <p><code>packages/cli/src/main.ts#defaults</code> points every stranger at the hosted <code>/pair</code>, which is deliberately script-free and says only "Waiting for the AgentPort extension…" — an extension with no store listing. The working path (the hosted wallet's Pair tab, which already reads <code>#code=</code>) is never mentioned. Fix: a static fallback paragraph on <code>pair.html</code> linking the wallet, and the daemon's pairing print names both routes.</p>
+  </div>
+
+  <div class="finding">
+    <p class="fhead"><span class="chip p0">P0</span>The live landing hero snippet throws before it reaches the network</p>
+    <p>Its <code>alwaysAsk</code> names a tool absent from <code>tools</code>, so <code>buildGrant</code> rejects it for anyone who copies it verbatim; it also omits <code>data-relay</code>/<code>data-wallet</code>, so it dials the adopter's own origin. Fix: use the README snippet, and add the check the north star predicts — extract the snippet from the page, serve it from a foreign origin, and assert <code>connect()</code> reaches a relay dial. An artifact property, not a belief about visitors.</p>
+  </div>
+
+  <div class="finding">
+    <p class="fhead"><span class="chip p1">P1</span>The default runtime fails opaquely on unauthenticated machines</p>
+    <p>Nothing documents the Claude Code prerequisite; <code>AcpRuntime</code> never reads <code>authMethods</code> or calls ACP <code>authenticate</code>, so failure arrives in the browser minutes later. Fix: <code>agentport doctor</code> (spawn the resolved ACP pair, complete initialize, report capabilities, exit non-zero with the remediation), run implicitly before the first pairing code. Document <code>AGENTPORT_AGENT_CWD</code> — the highest-consequence undocumented variable in the project.</p>
+  </div>
+
+  <h2>1 · Architecture: entities should own their rules</h2>
+  <p>The DDD audit's conclusion is precise: the protocol models entities well as <em>shapes</em> (schemas with inferred types), but almost none own their <em>rules</em> — the rules live as inline boolean conjunctions inside four host classes, copy-pasted wherever a second party judges the same entity. Every duplicate found has already drifted or already hurt. The fix is not a framework; it's the extraction pattern the repo has proven three times (<code>revocations.ts</code>, <code>lifecycle.ts</code>, <code>webmcp.ts</code>).</p>
+
+  <div class="finding">
+    <p class="fhead"><span class="chip p0">P0</span><code>SessionDelegation</code> validity is written three times and has drifted</p>
+    <p>Relay, daemon, and <code>connect.ts</code> each hand-write the conjunction — different clause sets, a dead clause the schema makes unreachable, a hand-rolled regex beside the exported validator, and <strong>no judge checks <code>issuedAt</code> against the clock</strong>, so a future-dated delegation survives a revocation tombstone recorded now. One browser-safe <code>delegationAuthorizes()</code> predicate in the protocol package, with a closed reason set, called by all three.</p>
+  </div>
+
+  <div class="finding">
+    <p class="fhead"><span class="chip p0">P0</span>Live revocation is a caller obligation, and it misses the extension tier entirely</p>
+    <p>Two findings converged here. <code>AgentDaemon#enforceRevocations</code> is only ever called by a <code>setInterval</code> in <code>cli.ts</code> — any other embedder gets tombstones honoured at open and never during live traffic. Worse: every revocation check sits inside a delegation guard, and the extension opens <em>direct-key</em> sessions with no delegation — so <code>agentport revoke &lt;origin&gt;</code> writes a tombstone, logs, and leaves the extension attachment alive and reopenable. A false guarantee on north-star requirement 4, and the hard prerequisite for remembered consent. Fix: an <code>AttachmentAuthority</code> value object (expiry + revocation + <code>allows(tool)</code> in one place), tombstones keyed on the attachment's <em>origin</em> rather than the delegation, and the sweep moved into the daemon's own heartbeat.</p>
+  </div>
+
+  <div class="finding">
+    <p class="fhead"><span class="chip p1">P1</span>Three more predicates that need one home</p>
+    <p><strong>Tool gating</strong> — <code>requiresApproval || alwaysAsk.includes(name)</code> is spelled out in seven files, four of which draw consent screens; a divergence under-warns the user on the exact boundary they're authorizing. Export <code>isGated()</code> from the protocol. <strong>Terminal resume denials</strong> — invariant 9 rests on two hand-copied string lists; a fifth daemon reason would make both tiers retry withdrawn authority forever. Make it a protocol vocabulary. <strong>The AG-UI subscription set</strong> — not compiler-total over <code>SessionEvents</code>; <code>ask</code> already fell out, so the inkwell demo blocks five minutes on an agent question no surface renders. Make the set a <code>Record&lt;keyof SessionEvents, …&gt;</code> so omission is a type error, then handle <code>ask</code> deliberately.</p>
+  </div>
+
+  <div class="finding">
+    <p class="fhead"><span class="chip p1">P1</span><code>attachmentPolicy</code> should be derived from routing, not asserted beside it</p>
+    <p>The two-input redesign was right, but <code>#ask</code>/<code>#requestApproval</code> still re-derive the <code>viaConnect</code> fork the policy claims to describe — and they've drifted: <code>#ask</code> has a deadline, <code>#requestApproval</code> waits forever on a silent wallet. Build one <code>ConsentRouting</code> object at session open with the destinations already bound, derive the policy booleans from it, and give the shared one-shot helper a required deadline so an approval cannot ship without one.</p>
+  </div>
+
+  <h3>File-by-file decomposition verdicts</h3>
+  <div class="tablewrap"><table>
+    <tr><th>File</th><th>Verdict</th><th>What moves</th></tr>
+    <tr><td><code>daemon.ts</code> (1765)</td><td>Cohesive aggregate — do not split session logic</td><td>Extract <code>RelayLink</code> (dial/heartbeat/backoff) and <code>bounds.ts</code> (pure bounding fns, finally testable in wire:check)</td></tr>
+    <tr><td><code>sw.ts</code> (1352)</td><td>Registry is one aggregate; two passengers</td><td>Extract <code>consent-windows.ts</code> and <code>popup-api.ts</code>; state in the header the registry stays whole</td></tr>
+    <tr><td><code>content.ts</code> (1134)</td><td>Genuinely two programs</td><td>Extract <code>WidgetSurface</code> class — 11 module-scope state variables become an assertable object</td></tr>
+    <tr><td><code>wallet.ts</code> (1042)</td><td>Cohesive; one hidden library</td><td>Extract <code>FrameCorrelator</code> (two past bugs live there, neither testable today); move <code>buildGrant</code> to the grant module</td></tr>
+  </table></div>
+
+  <p>On composition vs. inheritance: the house preference holds almost everywhere. The one honest inheritance case found: <code>PageSession</code> should extend the protocol's existing <code>Emitter</code> instead of hand-rolling a listener registry — and share a small composed <code>TurnBook</code> with <code>AgentSession</code>. Two implementations of one handle contract is the ceiling; only a third would earn an abstract base. Also delete <code>createWalletProvider</code> — a helper whose only caller is a demo is the demo's code (dogfooding tenet).</p>
+
+  <h2>2 · Capabilities: what the wire cannot say yet</h2>
+  <p>The protocol expresses the whole conversational loop. What it cannot express is <em>state changing under the session</em> — and that single theme gates both north-star demands. Three items justify the next lockstep cutover (<strong>protocol v7</strong>); batch them with the runtime-redaction fix so one cutover pays for all four.</p>
+
+  <div class="finding">
+    <p class="fhead"><span class="chip p0">P0</span>The grant is frozen at attach — add <code>grant.update</code></p>
+    <p>No frame updates a live grant, so WebMCP's <code>toolchange</code> has no channel, same-origin navigation leaves the daemon believing the old document's tools, and <code>reclaimKeyFor</code> must refuse to carry WebMCP widgets across navigations at all. The security design is the hard half and must be asymmetric: narrowing needs nothing; <strong>widening requires a fresh delegation whose <code>grantHash</code> covers the new grant</strong> — anything else lets a page grow its own authority mid-session. Highest-leverage frame the protocol lacks.</p>
+  </div>
+
+  <div class="finding">
+    <p class="fhead"><span class="chip p0">P0</span>Content blocks: everything is text, in both directions</p>
+    <p>No image, no attachment, no resource link anywhere in 45 frames — "look at this" is the first thing users try. ACP already handles content blocks, so the runtime side is nearly free. Build the <em>upload</em> direction only; the download direction moves the agent's own data into a site and must ride <code>runtime_own_tool</code> authority, or it's the exfiltration path ADR-021 §6 warns about wearing a new field name.</p>
+  </div>
+
+  <div class="finding">
+    <p class="fhead"><span class="chip p0">P0</span>The <code>context</code> fields are a shipped no-op — cheapest fix on this list</p>
+    <p><code>SurfaceDescriptor.context</code> and <code>Prompt.context</code> are validated, sealed, routed, delivered — and never read by the daemon. The reference site passes both. Thread them into the ACP preamble under the existing untrusted-data framing, and add the e2e assertion so it can't rot back.</p>
+  </div>
+
+  <div class="finding">
+    <p class="fhead"><span class="chip p1">P1</span>One agent everywhere is currently N agents wearing one name</p>
+    <p>Each attachment spawns a fresh ACP process with a fresh conversation — the exact opposite of the north-star signal, and unbounded (N attachments = N model processes). ACP supports multiple sessions per connection; hoist the process to daemon lifetime, keep the AgentPort session as the authority unit (<code>McpBridge</code> already isolates tools per session, which is what makes this safe). Ship a concurrency cap first so today's behaviour degrades honestly. Related: either narrow the "with your memory" wording, or build opt-in conversation continuity via <code>loadSession</code> — decided at the daemon, never by the page.</p>
+  </div>
+
+  <div class="finding">
+    <p class="fhead"><span class="chip p1">P1</span>Detach kills the turn; nothing can tell the user when work finishes</p>
+    <p>"Ask your agent the long thing, come back later" is structurally impossible: detach aborts the prompt controller outright. Split the blanket rule — keep the turn alive, fail tool calls fast with <code>client_detached</code>. Notification belongs in the extension service worker and the daemon's local surface, <em>never</em> the relay (it would be the first durable state the relay ever held).</p>
+  </div>
+
+  <div class="finding">
+    <p class="fhead"><span class="chip p1">P1</span>Revocation exists but is unreachable; and the agent key is a supercookie</p>
+    <p>No surface lists what currently holds your agent — the data all exists in the extension's session table and cert store; add the popup view with per-row revoke and a kill-all. Separately, every site learns the stable agent public key — a cross-origin correlator that ADR-009 already named blocking. Pairwise per-origin identity (HKDF over device key + origin) needs its own ADR <strong>before</strong> the extension is distributed; identifier schemes can't be changed after sites depend on them.</p>
+  </div>
+
+  <div class="finding">
+    <p class="fhead"><span class="chip p1">P1</span>Harness verbs: the missing four, in consent-risk order</p>
+    <p><code>page.waitFor</code> and <code>page.find</code> are pure reads — build now (and make <code>page.scroll</code> await settle; today a scroll-then-read returns the pre-scroll DOM). <code>page.select</code>/<code>setChecked</code>/<code>pressKey</code> are mutations and must land <em>after</em> the approval card can name its target — today the card says <code>Run page.click {"element":"g3e12"}</code>, which trains reflexive approval, the worst outcome ADR-021 names. <code>page.navigate</code> needs the cross-origin decision and its own authority domain. Also: the harness reports shadow-DOM/iframe blindness as an <em>empty page</em> rather than an unreadable one — count what was skipped and say so; and the obstruction check treats "couldn't look" as "clear" on every below-the-fold click — make it three-state.</p>
+  </div>
+
+  <h2>3 · Integrations: the month the supply arrived</h2>
+  <p>Between May and August the landscape moved decisively on the half of the thesis AgentPort does <em>not</em> own — site-declared tools — and barely at all on the half it does own: no browser or OS vendor lets a user supply their own remote agent. Verified as of this week:</p>
+  <ul>
+    <li><strong>WebMCP</strong> is a W3C CG draft (2026-08-19) in a Chrome origin trial from 149; the API moved to <code>document.modelContext.registerTool(tool, {exposedTo, signal})</code> with <code>toolchange</code> and a declarative form variant. <strong>Cloudflare</strong> ships edge-injected WebMCP for any fronted site (Aug 6); <strong>Shopify</strong> reportedly enabled it across Liquid storefronts (Aug 5). Supply at platform scale, no mainstream consumer yet.</li>
+    <li><strong>MCP 2026-07-28</strong> is the largest breaking revision ever: handshake removed, <code>server/discover</code> mandatory, MRTR replaces server-initiated elicitation. <code>McpBridge</code> targets the old shape — and MRTR is genuinely a <em>better</em> fit for the approval round-trip (authority re-judged on the retry, carried in <code>requestState</code>).</li>
+    <li><strong>ACP</strong> hit 1.0–1.6 with 60+ agents and 13 clients; an <em>Active</em> RFD standardizes ACP over WebSocket/HTTP while explicitly deferring origin validation, version binding, and the security audit — the exact problems AgentPort has already solved and adversarially tested.</li>
+    <li><strong>Claude in Chrome</strong> went GA — the closest competitor to the widest-form claim, but local-only (native messaging), single-vendor, and the site is not a party. The nearest direct competitor (WebMCP Bridge) has 178 users. The shelf is empty.</li>
+  </ul>
+
+  <h3>The integration moves, in order</h3>
+  <div class="tablewrap"><table>
+    <tr><th>Move</th><th>Why now</th></tr>
+    <tr><td><strong>Be the first consumer</strong></td><td>Walk a real Shopify storefront and a Cloudflare-preview site with only the extension; ship the demo where the user's own remote agent acts on a store that never heard of AgentPort. That artifact answers "why would a site adopt this" with "it already did."</td></tr>
+    <tr><td><strong>Update the harvest</strong></td><td><code>webmcp.ts</code> needs <code>{exposedTo, signal}</code>, declarative forms, <code>toolchange</code> → <code>grant.update</code>. Position on hints: <code>readOnlyHint</code> may never lower the gate; <code>untrustedContentHint</code> may only raise scrutiny.</td></tr>
+    <tr><td><strong>Cut the MCP bridge over</strong></td><td>To 2026-07-28 semantics with MRTR for approvals; add a check that fails on version mismatch rather than a silently empty tool list.</td></tr>
+    <tr><td><strong>File the fourth consumer class</strong></td><td>WebMCP's explainer names built-in, iframe, and extension agents — a user-supplied <em>remote</em> agent is unnamed, and default exposure privileges the browser's own agent. Argue it in before <code>exposedTo</code> defaults harden.</td></tr>
+    <tr><td><strong>Take the ACP RFD seat</strong></td><td>Contribute the running answers (origin identity, sealed content, version-bound proofs, resume tokens) while the RFD is Active. Don't compete with the transport; be the layer above it.</td></tr>
+    <tr><td><strong>Standards-track custody</strong></td><td>Make the wallet interface "sign this canonical body" so passkey <code>sign</code> (WebAuthn L3), NIP-46, and the extension are one implementation; map <code>AgentCert</code>/<code>SessionDelegation</code> to the FIDO mandate profile (AP2 was contributed May 2026).</td></tr>
+  </table></div>
+
+  <h2>4 · Product: the wedge and the race</h2>
+  <p>There are exactly two integrations in existence, both toys, both ours. The script-tag story asks a site to ship a feature serving zero of its visitors — an unwinnable cold start (the Payment-Handler postmortem in the prior-art review says exactly this). The wedge is the thing no site and no browser vendor can supply: <strong>the user's own remote agent, with their files and MCP servers, acting on any page through the extension harness</strong>. That creates the user population that makes the site-side proposition ("an assistant with no inference bill and no SDK") real later.</p>
+  <p><strong>Distribution is engineering, and the repo's own note claiming otherwise is false.</strong> The manifest's broad host permissions are load-bearing but trigger the store's heaviest review; between here and a listing: a privacy policy and permission justification as source-controlled files, passkey wrapping for the root key (currently plaintext hex — gate the listing on this), the revocation UI, per-origin enablement (today the extension announces itself on every page on the web before any consent — a fingerprinting bit that contradicts the north star verbatim), the unconditional keep-alive alarm fix, and release builds without inline sourcemaps. This gates adoption signals 2, 5, and 6 — the highest-leverage large item in the plan.</p>
+  <p>Two cheap truth-fixes that make walked signals report the right answer: refresh identity labels (<code>runtime</code>/<code>name</code>/<code>location</code>) from env on every load — today a goose swap keeps a cert stamped <code>claude-code</code>; and carry the relay URL on stored certs so one user can hold agents on two relays. And one honesty item for the next cutover: the daemon still tells every page which runtime the user runs — first entry on the "site learns nothing" list, enforced today by asking integrators nicely.</p>
+
+  <h2>5 · The sequence</h2>
+
+  <div class="phase">
+    <div class="phase-n">01</div>
+    <h3>This week — the front door</h3>
+    <p class="ptag">✓ landed 08-20</p>
+    <p><code>/pair</code> fallback + dual-route pairing print · fix the landing snippet + executable-snippet check · <code>scripts/deployed-check.ts</code> · <code>agentport doctor</code> · correct the stale AGENTS.md distribution claim.</p>
+  </div>
+
+  <div class="phase">
+    <div class="phase-n">02</div>
+    <h3>Entities own their rules</h3>
+    <p class="ptag">✓ landed 08-20</p>
+    <p><code>delegationAuthorizes()</code> (with the <code>issuedAt</code> clock check) · <code>AttachmentAuthority</code> + origin-keyed tombstones + heartbeat sweep — closes the extension-revocation hole · <code>isGated()</code> · terminal-denial vocabulary · AG-UI totality + <code>ask</code> rendering · <code>ConsentRouting</code> + approval deadlines everywhere. Then the four file extractions, each with the checks the extraction newly makes possible.</p>
+  </div>
+
+  <div class="phase">
+    <div class="phase-n">03</div>
+    <h3>Capabilities, protocol v7 in one cutover</h3>
+    <p class="ptag">✓ landed 08-21</p>
+    <p>Thread <code>context</code> (no wire change — do it first) · batch <code>grant.update</code>, content blocks (upload), runtime redaction, and the denial vocabulary into one v7 cutover · harness reads (<code>waitFor</code>, <code>find</code>, scroll-settle, honest blindness counts) · approval card names its target · revocation UI in the popup · detach keeps the turn alive.</p>
+  </div>
+
+  <div class="phase">
+    <div class="phase-n">04</div>
+    <h3>Integrations while the window is open</h3>
+    <p class="ptag">✓ landed 08-21</p>
+    <p>Shopify/Cloudflare stranger-walk and the flagship demo · WebMCP harvest update · MCP bridge cutover with MRTR approvals · fourth-consumer-class writeup · ACP RFD engagement · shared agent process (one conversation across sites).</p>
+  </div>
+
+  <div class="phase">
+    <div class="phase-n">05</div>
+    <h3>Distribution</h3>
+    <p class="ptag">◐ eng 08-21</p>
+    <p>Pairwise-identity ADR <em>before</em> listing · per-origin enablement · passkey wrapping · privacy policy + justification docs · store assets · submit. Everything above feeds this; this is what turns the empty shelf into the occupied one.</p>
+  </div>
+
+  <div class="footer">
+    <p>Synthesized from six parallel Opus deep-dives (domain model, cross-tier composition, protocol capability gaps, external landscape, product/adoption, extension &amp; harness) · ~973k tokens read, 255 tool calls · every claim cited to file + symbol in the underlying reports · deployed-state claims verified against the live Worker on 2026-08-20.</p>
+  </div>
+</div>
