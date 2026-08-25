@@ -131,11 +131,14 @@ consent flow as a site-declared grant, over one of two toolsets:
 
 - **WebMCP, if the site has any.** `src/inpage.ts` wraps
   `document.modelContext` when it exists, falls back to the deprecated
-  `navigator.modelContext`, and installs a minimal two-spelling shim when
-  neither exists, so a site that registers tools gets AgentPort for free.
-  Harvested tools execute in the page (that is where they were defined). They
-  are ungated by default because the site deliberately published them;
-  `annotations.destructiveHint: true` opts a tool into per-call approval.
+  `navigator.modelContext`, and installs a two-spelling shim shaped like the
+  current draft when neither exists, so a site that registers tools gets
+  AgentPort for free. Harvested tools execute in the page (that is where they
+  were defined) and **every one of them asks before it runs** — everything we
+  know about a harvested tool was written by the page, so no page-authored
+  field decides whether the user is consulted. What we accept, what we forward
+  and what we knowingly do not implement is one file,
+  `packages/client/src/webmcp.ts`; the claim is ADR-006.
 - **Otherwise the generic `page.*` toolset:** `page.info`, `page.readText`,
   `page.readSelection`, `page.listElements`, `page.scroll` are ungated reads;
   `page.fill` and `page.click` mutate the document and always ask. Writes

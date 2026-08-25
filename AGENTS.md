@@ -25,7 +25,7 @@ capabilities to whatever agent the platform supplies. AgentPort lets the
 - Not a workspace. The agent isn't a member of anything — it's attached and
   then detached.
 - Not a new tool-description format. Long term the site's tools should come
-  from WebMCP (`navigator.modelContext`); `SiteTool` is shaped to match.
+  from WebMCP (`document.modelContext`); `SiteTool` is shaped to match.
 
 ## Architecture
 
@@ -128,6 +128,7 @@ agent**. The daemon's pairing link (`/pair#code=…`) auto-fills the dialog.
 npm run e2e        # full loop over real sockets, no browser, 108 checks
 npm run wire:check # wire validation: 492 fixture cases across all 43 frames
 npm run agui:check # every emitted AG-UI event parsed by @ag-ui/core's schemas
+npm run webmcp:harvest # our belief about the WebMCP draft, 67 checks
 npm run typecheck  # tsc -b over all packages
 npm run deploy     # build the site + wrangler deploy
 
@@ -363,9 +364,15 @@ Not built yet, in rough priority order:
 3. **Extension packaging.** The wallet lives in the page today, which is only
    acceptable for a demo — the page can reach the user key. Move it behind an
    extension boundary with `postMessage`.
-4. ~~WebMCP interop.~~ **Done.** Both connect.js and the extension harvest
-   `document.modelContext` registrations (with the deprecated
-   `navigator.modelContext` fallback) into `SiteTool`s at attachment time.
+4. **WebMCP interop — partial, and deliberately so.** Both connect.js and the
+   extension harvest `document.modelContext` registrations (with the deprecated
+   `navigator.modelContext` fallback) into `SiteTool`s at attachment time, and
+   every harvested tool asks before it runs. This used to say "Done", which is
+   how the harvesters spent five months wrapping a method the draft removed in
+   March. ADR-006 now lists what a site can rely on and what we do not
+   implement; `packages/client/src/webmcp.ts` is the one place our belief about
+   the draft lives, and `npm run webmcp:harvest` is its gate. Still missing:
+   declarative WebMCP, cross-origin exposure, and live grant reconciliation.
 5. ~~Revocation.~~ **Done (ADR-022).** The revocation object is the
    `SessionDelegation`, addressed by its origin, and a revocation is a
    *tombstone* (`{origin, at}` refuses delegations issued at or before `at`),

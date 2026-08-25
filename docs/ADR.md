@@ -147,29 +147,107 @@ restore the UI. The relay stores nothing readable even before ADR-003 sealing.
 
 ---
 
-## ADR-006: Adopt WebMCP as the tool-declaration layer; AgentPort is everything above it — planned (priority 4)
+## ADR-006: Harvest WebMCP, and claim only what we harvest — accepted (claim rewritten 2026-08-07)
 
 **Context.** WebMCP (`document.modelContext`, formerly `navigator.modelContext`)
-is a W3C Draft CG Report edited by Google/Microsoft engineers, shipped in
-Chrome 146, origin-trialing in 149. As of July 2026 it has browser support and
-site-side tooling but **no mainstream agent consumers and no story for remote
-or external agents** — the spec deliberately scopes out agent identity, trust,
-transport, and consent. Meanwhile the remote-daemon projects (Paseo, Remote Pi,
-OpenClaw) connect agents only to their *owners*, never to third-party sites.
+is a Web Machine Learning Community Group **Draft Community Group Report** —
+not a W3C Recommendation, not on the standards track, experimental in Chrome
+only, WebKit opposed, Mozilla neutral, TAG review pending. It is still exactly
+the input side we want: a site declaring what it can do, for whatever agent is
+present. AgentPort supplies what that draft deliberately scopes out — identity
+(AgentCert), transport, session scoping (grants + TTL), and consent — for an
+agent the *user* owns, running elsewhere. That relationship is unchanged, and
+NORTH-STAR is right that WebMCP is a component we harvest, never a competitor.
 
-**Decision.** Stop asking sites to adopt a proprietary tool format. Harvest
-WebMCP registrations (`document.modelContext`, with the deprecated
-`navigator.modelContext` probed for compatibility) in both connect.js and the
-extension, mapping them into the session grant. Position AgentPort as the layer
-WebMCP explicitly lacks: **identity (AgentCert), transport (relay/direct),
-session scoping (grants + TTL), and consent (approvals)** for an agent the
-user owns, running elsewhere. WebMCP declares the tools; AgentPort is how
-*your* agent reaches them safely.
+What changed is the claim. The first version of this ADR concluded **"every
+WebMCP-adopting site becomes AgentPort-compatible with zero AgentPort code"**.
+That was never true, and it did the specific damage a reassuring sentence does:
+it read like a finished feature, so for five months nobody re-read the draft.
+In that window `provideContext()` was removed (2026-03-05) and both harvesters
+kept wrapping it; `registerTool()` became promise-returning (2026-06-08) and we
+kept adopting tools the browser had refused; and the approval gate stayed keyed
+on `annotations.destructiveHint`, an MCP field the current draft does not
+define, so a spec-compliant `purchase` or `delete` tool arrived **ungated**.
+`docs/reviews/webmcp-conformance.md` is the independent review that found it.
 
-**Consequences.** Every WebMCP-adopting site becomes AgentPort-compatible with
-zero AgentPort code. Our `SiteTool` API remains as the fallback and the richer
-option (approval gating metadata). Positioning: completing a standard, not
-proposing one.
+**Decision.** Keep harvesting. Withdraw the claim and replace it with one that
+is concrete enough to be wrong.
+
+*What a site can rely on today:*
+
+1. Tools registered through `document.modelContext.registerTool(tool, options)`
+   **after** AgentPort's script is present are harvested into the session
+   grant, in both connect.js and the extension.
+2. `navigator.modelContext` is probed as a fallback, so integrations written
+   before the getter moved to `Document` (2026-05-27) still work.
+3. The whole options object is forwarded to the native implementation
+   untouched, so the site's own `signal`/`exposedTo` behave as the browser
+   defines them.
+4. A tool is adopted only once the native registration promise **fulfils**, so
+   a registration the browser rejected is never lent to the agent.
+5. Aborting the `AbortSignal` passed to `registerTool` withdraws the tool from
+   the harvested set — the draft's only unregistration mechanism.
+6. A page's `execute` return value is forwarded as a raw JavaScript value, as
+   the draft specifies; the MCP envelope is built at the daemon.
+7. On a browser with no WebMCP at all, the extension installs a stand-in shaped
+   like the current draft — `EventTarget`, promise-returning `registerTool`,
+   `getTools()`, `toolchange` — and offering none of the members the draft
+   dropped.
+8. **Every harvested tool requires per-call approval.** Nothing the page wrote
+   about a tool changes that.
+
+*Why (8) is unconditional.* Everything we know about a harvested tool was
+authored by the page, and a page is untrusted here by standing rule; MCP says
+the same of its own annotation hints. There is therefore no page-authored field
+that may decide whether the user is asked — and "the page may add approval but
+never remove it" is not the rule either, because the gate is a boolean whose
+default is already the maximum, so there is nothing left for a page to add.
+Name-sniffing is the same defect wearing a different field. The relaxation the
+review suggests — `readOnlyHint === true` *and* a trusted user-side origin
+policy — waits on the second half, which does not exist; shipping only the
+first half would rebuild the identical hole under a new name.
+
+*What we do not implement* is enumerated, in code, in
+`WEBMCP_NOT_IMPLEMENTED` (`packages/client/src/webmcp.ts`): declarative WebMCP
+(the draft marks its own section TODO), `executeTool()` (Chrome-only and ahead
+of the CG IDL, and the draft does not give its signature), `getTools()` as a
+source of lendable tools (`RegisteredTool` carries no callback, so tools
+registered before we load are reported in a warning and lent to nobody),
+`exposedTo`/`fromOrigins`/the `tools` Permissions Policy, per-tool owner origin
+and window in the grant, `title` and `untrustedContentHint` in the grant (no
+`ToolDefinition` field exists for them), live grant reconciliation (a grant is
+a snapshot taken at attach time, so a withdrawal after attach leaves the
+session's routes intact), and MCP-B `CallToolResult` normalisation.
+
+*Where the belief lives.* `packages/client/src/webmcp.ts` is the single
+artifact: the descriptor we accept, the options we forward, the shape we
+produce, the gating rule, and the not-implemented list. Both harvesters are
+wiring over it. An internal registry can be made compiler-exhaustive; someone
+else's draft cannot, and "re-read the spec periodically" is a process, and
+processes rot. One file is what is left: the next person diffs the draft
+against it instead of auditing two harvesters that already drifted apart once.
+`npm run webmcp:harvest` is its acceptance gate.
+
+**Consequences.** The supportable claim is *"best-effort compatibility with
+imperative WebMCP registrations, including older MCP-B/early-Chrome shapes"* —
+not "full WebMCP conformance", which waits on a stable declarative spec,
+representative WPT coverage, and browser-agent execution semantics.
+
+Every harvested tool call now costs an approval round-trip — an extension
+consent window per call in the widget tier, a terminal prompt in the drop-in
+tier. That is a real cost and it is the right one: nobody described that
+capability to the user, and the extension attached on their behalf without the
+site being asked.
+
+One thing this ADR does **not** fix, so it is written down rather than implied:
+a tool passed explicitly through `connect()` is still ungated unless the site
+sets `requiresApproval` or names it in `alwaysAsk`, and both of those are also
+page-authored. The two cases are not identical — a `connect()` integration is
+code the site wrote against us, and the consent screen shows the user the exact
+partition of free vs. always-ask tools before they approve it — but the default
+there is fail-open too. Closing it needs a user-side origin policy, which is
+also the missing half of the `readOnlyHint` relaxation above. One mechanism
+would answer both.
 
 ---
 
@@ -468,10 +546,14 @@ format:
   was backwards. A young, fast-moving spec is an argument FOR depending on the
   package: its versioning tells you when you have drifted. Restating it locally
   is how you drift silently. This repo has now been bitten twice — the
-  hand-rolled AG-UI types above, and the WebMCP harvester, which by its own
-  report "follows the repository's existing extension integration, not an
-  independently fetched specification"
-  (`docs/webmcp-harvest-report.md`). Take the dependency; pin it; let the
+  hand-rolled AG-UI types above, and the WebMCP harvester, whose own
+  implementation report admitted it "follows the repository's existing
+  extension integration, not an independently fetched specification" — and
+  which was then wrapping a method the draft had removed five months earlier.
+  That report is deleted and ADR-006 now carries the claim; WebMCP has no
+  package to depend on, so the fallback is one recorded belief
+  (`packages/client/src/webmcp.ts`) rather than two drifting copies. Where a
+  package *does* exist: take the dependency; pin it; let the
   package's own schemas fail the check when we drift (`npm run agui:check`
   parses every emitted event with `EventSchemas`).
 

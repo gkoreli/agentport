@@ -13,15 +13,17 @@
  * in-page demo wallet works unmodified against the extension.
  */
 
-import type {
-  AgentConnectRequest,
-  AgentProvider,
-  AgentSessionHandle,
-  PromptRequest,
-  SessionEvents,
-  SiteTool,
+import {
+  createWebMcpRegistry,
+  type AgentConnectRequest,
+  type AgentProvider,
+  type AgentSessionHandle,
+  type ModelContextLike,
+  type PromptRequest,
+  type SessionEvents,
+  type SiteTool,
 } from '@agentport/client';
-import { randomId, type HistoryEntry, type ToolDefinition } from '@agentport/protocol';
+import { createLogger, randomId, type HistoryEntry, type ToolDefinition } from '@agentport/protocol';
 import {
   ENVELOPE,
   TO_PAGE,
@@ -263,7 +265,7 @@ function onInbound(body: PageInbound): void {
 
 async function runTool(call: Extract<PageInbound, { t: 'tool.call' }>): Promise<void> {
   const session = sessions.get(call.ref);
-  const tool = session?.tools.get(call.name) ?? webmcpTools.get(call.name);
+  const tool = session?.tools.get(call.name) ?? webmcp.get(call.name);
   if (!tool) {
     send({ t: 'tool.result', callId: call.callId, ok: false, error: `unknown tool ${call.name}` });
     return;
@@ -362,7 +364,6 @@ if (target.navigator) {
   Object.defineProperty(target.navigator, 'agent', { value: provider, configurable: true, enumerable: false });
 }
 target.agent = provider;
-window.dispatchEvent(new Event('agent#initialized'));
 
 // ---------------------------------------------------------------------------
 // WebMCP interop
@@ -373,39 +374,22 @@ window.dispatchEvent(new Event('agent#initialized'));
 // tools carry intent, ours only carry pixels. Registrations live in the page
 // world, so harvesting has to happen here and calls have to execute here; the
 // content script only sees names, descriptions and schemas.
+//
+// What WebMCP *is* — the descriptor we accept, the options we forward, the
+// rule that a harvested tool always asks — lives in
+// `packages/client/src/webmcp.ts`. This is wiring. Two copies of that belief
+// is how both harvesters ended up still wrapping a method the draft removed in
+// March; there is one copy now, and it is not here.
 // ---------------------------------------------------------------------------
 
-const webmcpTools = new Map<string, SiteTool>();
-
-interface WebMcpToolLike {
-  name?: unknown;
-  description?: unknown;
-  inputSchema?: unknown;
-  execute?: unknown;
-  annotations?: { readOnlyHint?: unknown; destructiveHint?: unknown };
-}
-
-function adoptWebMcpTools(list: unknown): void {
-  if (!Array.isArray(list)) return;
-  for (const entry of list as WebMcpToolLike[]) {
-    if (!isRecord(entry) || typeof entry.name !== 'string' || typeof entry.execute !== 'function') continue;
-    const execute = entry.execute as (args: Record<string, unknown>) => unknown;
-    const annotations = isRecord(entry.annotations) ? entry.annotations : {};
-    webmcpTools.set(entry.name, {
-      name: entry.name,
-      description: typeof entry.description === 'string' ? entry.description : entry.name,
-      inputSchema: isRecord(entry.inputSchema) ? entry.inputSchema : { type: 'object' },
-      // A site's tool is ungated by default. Only explicit destructive
-      // metadata adds AgentPort's per-call approval boundary.
-      ...(annotations['destructiveHint'] === true ? { requiresApproval: true } : {}),
-      handler: (args) => execute.call(entry, args),
-    });
-  }
-  publishWebMcpTools();
-}
+const webmcp = createWebMcpRegistry({
+  logger: createLogger('extension.webmcp'),
+  onChange: () => publishWebMcpTools(),
+});
 
 function mergeWebMcpTools(explicit: readonly SiteTool[]): SiteTool[] {
-  const merged = new Map(webmcpTools);
+  const merged = new Map<string, SiteTool>();
+  for (const tool of webmcp.tools()) merged.set(tool.name, tool);
   for (const tool of explicit) merged.set(tool.name, tool);
   return [...merged.values()];
 }
@@ -413,63 +397,48 @@ function mergeWebMcpTools(explicit: readonly SiteTool[]): SiteTool[] {
 function publishWebMcpTools(): void {
   send({
     t: 'webmcp.tools',
-    tools: [...webmcpTools.values()].map(({ handler: _handler, ...definition }) => definition),
+    tools: webmcp.tools().map(({ handler: _handler, ...definition }) => definition),
   });
 }
 
-interface ModelContextLike {
-  provideContext?: (context: { tools?: unknown }) => unknown;
-  registerTool?: (tool: unknown) => unknown;
-}
-
-function observeModelContext(): void {
-  const doc = document as Document & { modelContext?: ModelContextLike };
-  const nav = navigator as Navigator & { modelContext?: ModelContextLike };
+function installWebMcp(): void {
+  const doc = document as Document & { modelContext?: unknown };
+  const nav = navigator as Navigator & { modelContext?: unknown };
   // Chrome moved WebMCP onto document; the navigator spelling remains only as
   // a compatibility fallback for older implementations and site polyfills.
   const existing = isRecord(doc.modelContext)
-    ? doc.modelContext
+    ? (doc.modelContext as ModelContextLike)
     : isRecord(nav.modelContext)
-      ? nav.modelContext
+      ? (nav.modelContext as ModelContextLike)
       : undefined;
 
   if (existing) {
-    // A real implementation is present: wrap it, never replace it. We only want
-    // to see what the site registers.
-    const provideContext = existing.provideContext;
-    if (typeof provideContext === 'function') {
-      existing.provideContext = function (this: unknown, context: { tools?: unknown }) {
-        webmcpTools.clear();
-        adoptWebMcpTools(context?.tools);
-        return provideContext.call(this, context);
-      };
-    }
-    const registerTool = existing.registerTool;
-    if (typeof registerTool === 'function') {
-      existing.registerTool = function (this: unknown, tool: unknown) {
-        adoptWebMcpTools([tool]);
-        return registerTool.call(this, tool);
-      };
-    }
+    // A real implementation is present: wrap it, never replace it. We only
+    // want to see what the site registers, and the browser stays the authority
+    // on whether a registration was accepted at all.
+    webmcp.observe(existing);
     return;
   }
 
-  // No implementation: stand one up under both spellings so WebMCP-aware sites
-  // get AgentPort on browsers from either side of the API move. Both names
-  // share one registry and remain configurable for a later native install.
-  const shim: ModelContextLike = {
-    provideContext(context) {
-      webmcpTools.clear();
-      adoptWebMcpTools(context?.tools);
-    },
-    registerTool(tool) {
-      adoptWebMcpTools([tool]);
-      const name = isRecord(tool) ? String(tool['name']) : '';
-      return { unregister: () => { webmcpTools.delete(name); publishWebMcpTools(); } };
-    },
-  };
+  // No implementation: stand one up so WebMCP-aware sites get AgentPort on
+  // browsers that have not shipped it. It is shaped like the current draft —
+  // promise-returning `registerTool(tool, {signal})`, `getTools()`,
+  // `toolchange` — and offers none of the methods the draft dropped.
+  //
+  // Both spellings, one registry: a site written before the getter moved to
+  // Document reaches for `navigator.modelContext`, and on a browser with
+  // neither there is nothing else for it to find. Configurable, so a later
+  // native install can take the name back.
+  const shim = webmcp.shim(location.origin);
   Object.defineProperty(document, 'modelContext', { value: shim, configurable: true, enumerable: false });
   Object.defineProperty(navigator, 'modelContext', { value: shim, configurable: true, enumerable: false });
 }
 
-observeModelContext();
+installWebMcp();
+
+// Announced last, and that ordering is load-bearing: a site may call
+// `navigator.agent.connect()` synchronously from this listener, and connect
+// merges the harvested WebMCP tools. Firing before the registry above exists
+// would reach it in its temporal dead zone and throw inside the site's own
+// handler.
+window.dispatchEvent(new Event('agent#initialized'));
