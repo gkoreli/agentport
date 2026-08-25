@@ -224,6 +224,31 @@
   <p class="dek">Architecture, capabilities, integrations, and product sequence — synthesized from a six-agent fan-out over the repo, the deployed artifacts, and the August 2026 landscape.</p>
   <p class="meta">2026-08-20 · main = v0.1.7 + 1 CI commit · protocol agentport/6 · deployed bundle verified byte-identical to main</p>
 
+  <div class="verdict" style="border-left-color:#0E6B5F;background:var(--surface-2)">
+    <p style="margin-top:0"><strong>Status, 2026-08-25 — sections 0 through 4 are done and SHIPPED.</strong>
+    Released as v0.0.14 / CLI v0.1.8. The deployed relay speaks <code>agentport/7</code>
+    (<code>npm&nbsp;run&nbsp;relay:version</code>) and the front door is this tree's build
+    (<code>npm&nbsp;run&nbsp;deployed:check</code>) — the two are in agreement for the first time in
+    weeks. That release was also the first this project ever deployed without a human running
+    Wrangler: the protected <code>production</code> environment had never held
+    <code>CLOUDFLARE_API_TOKEN</code>, which is why every prior release was manual.</p>
+
+    <p><strong>The flagship demo ran.</strong> A user's own authed Claude attached through consent
+    chrome to allbirds.com — a store that has never heard of AgentPort — harvested Shopify's ten
+    storefront WebMCP tools, cleared a per-call approval naming the tool and its lender, and
+    answered from live catalogue data in 665&nbsp;ms. Nothing carted, nothing bought. The walk also
+    found the first real-world grant refusal: real supply writes multiline tool descriptions, and
+    the wire's <code>display()</code> rightly refuses control characters.</p>
+
+    <p style="margin-bottom:0"><strong>What is left is section 5, and it is two items.</strong>
+    Protocol v8 ships pairwise per-origin agent identity (ADR-026) — its open question D4 must be
+    settled by prototype before any of it merges — and that gates the Chrome Web Store submission,
+    because the identifier a stranger's site first sees is the one it keeps. Everything else is
+    triaged in the repo at <code>docs/research/README.md</code>: all 62 findings from this survey
+    with a disposition, of which 35 are closed against the commit that closed them, 6 partial,
+    21 open.</p>
+  </div>
+
   <div class="verdict">
     <p><strong>The verdict in four sentences.</strong> The engineering is far ahead of the product: 45 validated frames, sealed sessions, a real ACP runtime — and zero third-party integrations, a front door broken in two places <em>right now</em>, and the one capability nobody else has (the generic page harness) locked behind an unlisted extension. The architecture needs no grand redesign; it needs its domain entities to own their rules — the same extraction pattern <code>revocations.ts</code> and <code>lifecycle.ts</code> already prove — because every drifted duplicate found is a rule written twice. The landscape moved decisively this month: WebMCP tool <em>supply</em> arrived at platform scale (Cloudflare edge-injection Aug 6, Shopify storefronts reported Aug 5) with <strong>no demand-side consumer yet</strong> — and AgentPort is a demand-side product. The window is a distribution race: the wedge is the extension harness, and the Chrome Web Store listing is engineering, not a release decision.</p>
   </div>
