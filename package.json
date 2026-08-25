@@ -39,6 +39,7 @@
     "docs:check": "tsx scripts/docs-check.ts",
     "snippet:check": "tsx scripts/snippet-check.ts",
     "deployed:check": "tsx scripts/deployed-check.ts",
+    "relay:version": "tsx scripts/relay-version.ts",
     "source:check": "tsx scripts/source-check.ts"
   },
   "devDependencies": {

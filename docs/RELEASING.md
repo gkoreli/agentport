@@ -13,6 +13,20 @@ semantics cut over together. There is no compatibility window or fallback.
 visibly during `hello`; `relay speaks agentport/N` means the release was only
 partially shipped.
 
+To ask a relay which one it speaks:
+
+```bash
+npm run relay:version                          # the deployed relay
+npm run relay:version -- ws://127.0.0.1:8787/relay   # your own
+```
+
+There is no version endpoint and there should not be one: a relay that
+describes itself can describe itself wrongly. `scripts/relay-version.ts`
+instead offers a `hello` carrying a version no relay will ever have and reads
+the refusal, so the answer comes from the same code path a real endpoint
+takes. It exits 0 when the relay agrees with this tree, 1 on a mismatch, 2 if
+it is unreachable or silent, 3 if the reply names no version.
+
 ## The release workflow
 
 `.github/workflows/auto-tag.yml` watches every source that contributes to the

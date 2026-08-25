@@ -186,6 +186,8 @@ npm run docs:check   # every code citation in the docs resolves to a real symbol
 npm run client:check # FrameCorrelator direct assertions — its two recorded bugs, socket-free
 npm run snippet:check # the integration snippet from BOTH front doors, extracted and EXECUTED
 npm run deployed:check # deployed front door vs this tree — exit 1 lags, 2 unreachable (release path)
+npm run relay:version  # what protocol version a relay speaks; defaults to the deployed one,
+                       # takes a URL for your own. 0 agrees, 1 mismatch, 2 unreachable, 3 unparseable
 npm run typecheck  # tsc -b over all packages
 npm run deploy     # build the site + wrangler deploy
 
