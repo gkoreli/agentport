@@ -1102,7 +1102,10 @@ async function main(): Promise<void> {
     if (browser) await stopChrome(browser);
     await closeServer(server).catch(() => undefined);
     await closeServer(otherServer).catch(() => undefined);
-    await rm(temporary, { recursive: true, force: true });
+    // Chrome's parent can exit a moment before its children release the last
+    // profile files. Bound the cleanup race instead of turning an entirely
+    // successful browser run into a spurious ENOTEMPTY release failure.
+    await rm(temporary, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 }
 
