@@ -21,6 +21,24 @@ if (!ci && args.length > 0) {
   throw new Error(`usage: npm run deploy${args.length > 0 ? ' or npm run deploy:ci' : ''}`);
 }
 
+// CI authenticates Wrangler with a token from the protected `production`
+// environment. When that secret is missing the deploy still RUNS — Wrangler
+// fails several minutes later, inside its own auth flow, with a message about
+// credentials rather than about this repository's configuration. That is how
+// every release here came to be performed by hand: the automation was one
+// unset secret away from working and never said so. Name the cause instead.
+if (ci && !process.env['CLOUDFLARE_API_TOKEN']) {
+  throw new Error(
+    'CLOUDFLARE_API_TOKEN is not set, so this runner cannot deploy.\n' +
+      'It belongs to the protected `production` environment, beside the\n' +
+      'CLOUDFLARE_ACCOUNT_ID variable that is already there:\n\n' +
+      '  gh secret set CLOUDFLARE_API_TOKEN --env production\n\n' +
+      'Use a dedicated Cloudflare API token (Edit Cloudflare Workers), never\n' +
+      "the local Wrangler OAuth session — it is interactive and it expires.\n" +
+      'See docs/RELEASING.md, "Cloudflare authentication".',
+  );
+}
+
 if (!ci) run('npm version patch --no-git-tag-version');
 const { version } = JSON.parse(readFileSync('package.json', 'utf8')) as { version: string };
 

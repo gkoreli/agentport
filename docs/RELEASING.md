@@ -69,7 +69,38 @@ The production job requires a protected GitHub `production` environment with:
 - variable `CLOUDFLARE_DEPLOYED_COMMIT` — the full commit SHA of an exact
   manual deployment, set only after its production smoke passes.
 
-## Current manual Cloudflare deployment
+## Why every release so far was manual
+
+Worth stating plainly, because the answer is not "the process requires it".
+The workflow above has always been able to deploy on its own. The protected
+`production` environment had `CLOUDFLARE_ACCOUNT_ID` and **no
+`CLOUDFLARE_API_TOKEN`**, so the deploy step could never authenticate — and
+it failed inside Wrangler's own credential flow, several minutes in, saying
+nothing about this repository's configuration. The manual path below is what
+that missing secret produced, not a policy.
+
+Set the secret once and pushes to `main` deploy themselves:
+
+```bash
+gh secret set CLOUDFLARE_API_TOKEN --env production
+```
+
+Use a **dedicated** Cloudflare API token created from the *Edit Cloudflare
+Workers* template — never the local Wrangler OAuth session, which is
+interactive and expires. `scripts/deploy.ts` now refuses a CI deploy with the
+secret unset and names it, so this cannot silently recur.
+
+One companion setting matters: `CLOUDFLARE_DEPLOYED_COMMIT` SUPPRESSES the
+automatic deploy for the exact commit it names. It exists so a manual
+deployment is not redundantly repeated, and it should be set only immediately
+after one. Left pointing at a stale commit it is inert; left pointing at the
+commit you are about to push, it silently skips the deploy and publishes
+against whatever is already live.
+
+## Manual Cloudflare deployment
+
+Still the right path when you are deliberately deploying by hand — a wire
+cutover you want to watch, or a token you have not yet issued.
 
 The repository's single deployment entry point is:
 
