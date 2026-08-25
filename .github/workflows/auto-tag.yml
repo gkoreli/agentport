@@ -19,6 +19,7 @@ on:
       - ".github/workflows/auto-tag.yml"
       - "package.json"
       - "package-lock.json"
+      - "mise.toml"
       - "wrangler.toml"
       - "wrangler.wallet.toml"
       - "scripts/deploy.ts"
