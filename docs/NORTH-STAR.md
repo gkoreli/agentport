@@ -102,10 +102,11 @@ This is the same product, taken to its widest form:
 - **On a site that declared tools**, the agent gets the site's own intent —
   named actions that carry meaning, with the site's own approval hints.
 - **On a site that declared nothing**, the agent gets the generic page harness
-  — read the page, list what is on it, fill, click, scroll — supplied by the
-  extension. It cannot yet search the page or navigate it; ADR-021 proposes
-  `page.navigate` and does not build it, which is why the harness still ends
-  at the edge of one document.
+  — read the page, list what is on it, find by text, wait for it, fill, click,
+  select, scroll — supplied by the extension. It still cannot *navigate*;
+  ADR-021 proposes `page.navigate` and does not build it, because it needs the
+  cross-origin decision and an authority domain, which are protocol territory.
+  That is why the harness still ends at the edge of one document.
 - **On a site that declared some things**, it gets both, with the site's own
   tools preferred where they overlap, because a named action beats synthesized
   clicks every time.
@@ -120,21 +121,35 @@ everything else you have been doing with it. A browser-vendor assistant is
 another agent to bring things to. This one is the agent you already brought
 everything to, now able to see and act on the page in front of you.
 
-What that demands, and where we currently fall short:
+What that demands, and where we currently stand:
 
 - **A session must outlive a navigation.** Driving a real website means
   clicking something and going somewhere. An agent whose session dies the
   moment it succeeds at clicking a link is not an automation harness; it is a
   demo. The attachment belongs to the *user and the origin*, not to the
-  document instance.
+  document instance. **Built within an origin** — the widget tier reclaims its
+  session across a same-origin navigation, and `grant.update` lets the new
+  document re-declare what it lends instead of the agent holding a grant
+  describing the page it just left. Crossing an *origin* still destroys the
+  conversation, and no navigation the agent performs itself is possible until
+  `page.navigate` exists.
 - **Consent must be remembered.** "Attached, then detached" is about the
   agent's authority ending, not about making the user re-approve the same
   agent for the same site every few minutes. Approving once should mean
   something durable and revocable, and per-call approval should be reserved
-  for what actually deserves it.
+  for what actually deserves it. **Still unbuilt, deliberately**: it is gated
+  behind ADR-019's Gate C, because remembering an approval on a page whose
+  text the agent is reading is exactly the prompt-injection case, and the
+  revocation path had to exist first. It now does — `agentport revoke` reaches
+  every tier, and the extension popup lists what holds your agent.
 - **The harness must be good enough to trust.** Generic page tools are what
   the agent falls back to when a site says nothing, so their failure modes are
-  the product's failure modes.
+  the product's failure modes. **Materially closer**: it reports what it
+  cannot see rather than reporting an empty page, answers obstruction in three
+  states instead of turning "could not look" into permission, and the approval
+  card names what it is about to click. It is also, now, executed in a real
+  browser — which is how the viewport-coordinate bug that hid everything above
+  the fold was caught.
 
 None of this weakens what the site learns: the site is not a party to any of
 it. On an undeclared site, the site does not even know an agent is present.
@@ -275,11 +290,27 @@ waited for, and each hid a defect that no suite could have surfaced:
 | someone runs a relay we do not operate | binding one to `0.0.0.0` and pointing `remote-check` at it | it works — and the two variables that make it possible were documented nowhere |
 | someone swaps in a runtime | resolving the two env vars that name one | setting only the obvious half spawned `goose` with Claude Code's arguments |
 
-The WebMCP signal is the exception, and instructive for it: that claim was
-once "every WebMCP-adopting site becomes compatible", which was false, and
-somebody found it, withdrew it, and left `WEBMCP_NOT_IMPLEMENTED` behind as
-the single source for the negative claim. It is the one signal already walked,
-and it is the only one that had nothing left to find.
+The WebMCP signal has now been walked twice, and the second walk is the more
+useful one. The first was a correction: the claim was once "every
+WebMCP-adopting site becomes compatible", which was false, and somebody found
+it, withdrew it, and left `WEBMCP_NOT_IMPLEMENTED` behind as the single source
+for the negative claim. That left it looking like the one signal with nothing
+left to find.
+
+The second walk went to the supply itself — three Shopify Liquid storefronts
+serving ten commerce tools through their own CDN adapter, on a Chrome that
+ships `document.modelContext` natively — and found something no amount of
+reading the draft would have: **real sites write multiline tool
+descriptions**, and the wire's `display()` rightly refuses control characters,
+so every one of those grants was refused. A defect reachable only by a site
+nobody here wrote. The row belongs in the table with the others:
+
+| a site that only implemented WebMCP | attaching to allbirds.com, which has never heard of us | real tool descriptions carry newlines; every harvested grant was refused |
+
+It also answered the question the whole signal exists for. Nothing on those
+sites excluded a user-supplied agent — **by mechanism, not by named right**,
+which is precisely the distinction the standards filing turns on, and not a
+distinction anyone could have drawn from the specification text.
 
 **The shared shape is worth more than any of the fixes.** Not one of those was
 a false claim. The integration really is one call, the relay really is

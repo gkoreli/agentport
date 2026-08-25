@@ -65,6 +65,8 @@ site/                the deployed demo: landing + two surfaces + CF Worker/DO.
 examples/inkwell/    the original local-only demo, kept as the minimal example.
 CHANGELOG.md         what changed per version, and why it mattered.
 docs/NORTH-STAR.md   what this is for; read before proposing architecture.
+docs/research/       surveys, frozen at the commit they describe, plus a
+                     living index giving every finding its disposition.
 scripts/e2e.ts       the real test — relay + daemon + wallet over real sockets.
 scripts/acp-smoke.ts real-agent proof; run where the ACP agent is authed.
 scripts/remote-check.ts  pair + prompt against the deployed relay.
@@ -591,16 +593,31 @@ Not built yet, in rough priority order:
    listing, so the extension is a load-unpacked build and the README says so
    rather than implying a link. An earlier version of this entry called that
    "a release decision, not engineering", and a survey of the manifest and
-   the extension's own stubbed-list disproved it. It is engineering with a
-   worklist: the broad host permissions force a written single-purpose
-   justification and a hosted privacy policy that do not exist yet; the root
-   user key is stored as plaintext hex
-   (`packages/extension/src/storage.ts#ensureUserKey`) and needs
-   passkey wrapping before strangers hold it; there is no revocation UI, so a
-   store user could not see or cut off what holds their agent without the
-   CLI; and pairwise per-origin agent identity (ADR-009) must be designed
-   BEFORE listing, because an identifier scheme cannot be changed after
-   sites depend on it.
+   the extension's own stubbed-list disproved it. It was engineering with a
+   worklist, and **the worklist is now done** — which is worth stating
+   precisely, because a stale worklist is how a finished item keeps looking
+   blocked:
+
+   - the broad host permissions no longer apply broadly. The extension exists
+     only on origins the user enabled (`packages/extension/src/enablement.ts`),
+     so the pre-consent fingerprint a reviewer would have asked about first is
+     gone;
+   - the root user key is wrapped, not plaintext hex
+     (`packages/extension/src/keywrap.ts`), with named custody states. WebAuthn
+     is unavailable on `chrome-extension://` origins — recorded as the
+     constraint rather than worked around, with the PRF slot reserved;
+   - the revocation UI exists: the popup lists what holds your agent and takes
+     it back, so a store user never needs the CLI;
+   - the single-purpose justification, listing copy and asset specs are
+     source-controlled under `packages/extension/store/`, and the privacy
+     policy is served at `/privacy`.
+
+   What remains is not on that list. **Pairwise per-origin agent identity is
+   designed and unbuilt** (`docs/ADR-026-pairwise-agent-identity.md`), and it
+   gates submission rather than accompanying it: an identifier scheme cannot
+   be changed after sites depend on it, and the identifier a stranger's site
+   first sees is the one it keeps. That is protocol v8. Everything else left
+   is an outward act — a developer account, real screenshots, submit.
 
    Note what this does *not* block: `#trustedSurfaces` keys on DELEGATION, not
    on the wallet's implementation, so the extension already counts as a
