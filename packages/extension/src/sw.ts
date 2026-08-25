@@ -35,7 +35,15 @@
  */
 
 import { AgentWallet, ResumeError, type AgentSession, type SiteTool } from '@agentport/client';
-import { createLogger, Deferred, toErr, type AgentSummary, type LogContext, type ToolDefinition } from '@agentport/protocol';
+import {
+  createLogger,
+  Deferred,
+  toErr,
+  type AgentSummary,
+  type LogContext,
+  type PlanStep,
+  type ToolDefinition,
+} from '@agentport/protocol';
 import {
   LIMITS,
   mintId,
@@ -241,6 +249,16 @@ interface SessionEntry {
    *  buffered: the transcript is the user's, and the agent's own store is
    *  where a reclaiming document re-reads it from. */
   missedEvents: number;
+  /**
+   * The agent's CURRENT plan for the turn it is running, or undefined when it
+   * has none. Held here and nowhere else because the worker is the only thing
+   * that survives a navigation, and a plan is precisely the progress UI a
+   * multi-page flow needs after the click that moved the page. It is state, not
+   * transcript: one snapshot replaces the last, and it is dropped when the turn
+   * it belongs to ends — so this can never grow, and nothing about a finished
+   * conversation is retained here.
+   */
+  plan?: { promptId: string; steps: PlanStep[] };
   orphanTimer?: ReturnType<typeof setTimeout>;
 }
 
@@ -554,8 +572,19 @@ function toRow(agent: AgentSummary): AgentRow {
  * iframe behind the content script's closed shadow root, so it keeps the real
  * name without exposing it to the page.
  */
-async function infoFor(entry: SessionEntry): Promise<{ agentName: string; runtime: string; alias?: string }> {
-  if (entry.from !== 'page') return { agentName: entry.session.info.agentName, runtime: entry.session.info.runtime };
+async function infoFor(
+  entry: SessionEntry,
+): Promise<{ agentName: string; runtime: string; alias?: string; verify?: string }> {
+  if (entry.from !== 'page') {
+    const { agentName, runtime, verify } = entry.session.info;
+    // The fingerprint words for THIS attachment, and only for the widget. The
+    // widget renders in an extension-origin frame, where comparing them against
+    // the daemon's consent screen actually proves something. A page could not
+    // verify anything with them — it would only gain the text needed to paint a
+    // convincing fake of our chrome, so the ADR-009 rule that a page learns a
+    // generic label and nothing about the attachment's keys holds here too.
+    return { agentName, runtime, ...(verify ? { verify } : {}) };
+  }
   return { agentName: 'Personal agent', runtime: 'agent', alias: await originAlias(entry.origin) };
 }
 
@@ -572,19 +601,59 @@ function grantFor(entry: SessionEntry): { tools: ToolDefinition[]; alwaysAsk: st
 function wireSession(entry: SessionEntry): void {
   const { ref, session } = entry;
   const livePort = (): chrome.runtime.Port | null => sessions.get(ref)?.port ?? null;
-  for (const event of ['delta', 'thought', 'done', 'tool'] as const) {
-    session.on(event, (payload) => {
-      const target = livePort();
-      if (target) post(target, { t: 'event', ref, event, payload });
-      // Nothing is bound: the document is navigating. Count what it missed so
-      // the reclaiming document can say how much it is re-reading, and so the
-      // loss is never silent.
-      else {
-        const current = sessions.get(ref);
-        if (current) current.missedEvents += 1;
-      }
-    });
+
+  /**
+   * Send to whatever document is bound right now.
+   *
+   * `countIfUnbound` separates the two kinds of thing an agent emits. Turn
+   * OUTPUT that nobody was holding is gone — the relay counts dropped frames
+   * rather than buffering them (ADR-005) — so it is counted here and re-read
+   * from the agent's own store. Attachment STATE is not lost by the same drop:
+   * the worker keeps the current value and hands it to the next document, so
+   * counting it would overstate what has to be recovered.
+   */
+  const forward = (event: string, payload: unknown, countIfUnbound: boolean): void => {
+    const target = livePort();
+    if (target) {
+      post(target, { t: 'event', ref, event, payload });
+      return;
+    }
+    if (!countIfUnbound) return;
+    const current = sessions.get(ref);
+    if (current) current.missedEvents += 1;
+  };
+
+  for (const event of ['delta', 'thought', 'tool'] as const) {
+    session.on(event, (payload) => forward(event, payload, true));
   }
+  session.on('done', (payload) => {
+    // A plan is what the agent intends NOW. Once its turn is over the checklist
+    // is history, so the worker stops offering it to the next document rather
+    // than letting a finished plan reappear after a navigation.
+    const current = sessions.get(ref);
+    if (current?.plan?.promptId === payload.promptId) current.plan = undefined;
+    forward('done', payload, true);
+  });
+  session.on('plan', (payload) => {
+    // Snapshot semantics (see `Plan` in messages.ts): each event REPLACES the
+    // previous plan, so only the latest is worth keeping and a superseded one
+    // was never lost.
+    const current = sessions.get(ref);
+    if (current) current.plan = { promptId: payload.promptId, steps: payload.steps };
+    forward('plan', payload, false);
+  });
+  session.on('reattached', (payload) => {
+    // The socket dropped and the wallet put this attachment back on a fresh
+    // one. The turn that was in flight lost its answer (the client rejects it),
+    // so whatever plan it had is stale.
+    const current = sessions.get(ref);
+    if (current) current.plan = undefined;
+    // The fingerprint words go to the widget only, for the reason `infoFor`
+    // gives: a page cannot verify with them and could fake chrome with them. A
+    // page surface is still told it reattached — its in-flight prompt died and
+    // it has to re-read history — just not with the attachment's key material.
+    forward('reattached', current?.from === 'widget' ? payload : {}, false);
+  });
   session.on('closed', (payload) => {
     const current = sessions.get(ref);
     // A socket-level resume swapped the session object; the old one going
@@ -972,6 +1041,10 @@ async function onContentMessage(port: chrome.runtime.Port, message: ContentReque
               info: await infoFor(entry),
               grant: grantFor(entry),
               activePrompts: [...entry.activePrompts],
+              // The plan the agent is working to right now, so the document
+              // that just arrived renders the progress of the turn it walked
+              // into instead of a blank panel above a running composer.
+              ...(entry.plan ? { plan: entry.plan.steps } : {}),
             }
           : null,
       });

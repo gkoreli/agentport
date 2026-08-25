@@ -3,7 +3,9 @@ import { readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { mintId, readPageOutbound } from './src/bridge.js';
+import { MAX_PLAN_STEPS, MAX_PLAN_STEP_CHARS } from '@agentport/protocol';
+
+import { mintId, readPageOutbound, sanitizePlanSteps } from './src/bridge.js';
 import { leftBehindByNavigation, mayReclaim, reclaimKeyFor } from './src/lifecycle.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -38,6 +40,84 @@ assert.deepEqual(
 // statement as the original connect and gets the same sanitizer.
 assert.equal(readPageOutbound({ t: 'resume', rid: 'r_test' }), undefined);
 assert.equal(readPageOutbound({ t: 'history', rid: 'r_test' }), undefined);
+
+// --- plan snapshots --------------------------------------------------------
+//
+// A plan crosses two hops after the wire (worker → content script → the
+// extension-origin iframe that draws it), and one validator serves both. What
+// these assert is the rule that makes a plan a plan: it is a SNAPSHOT of what
+// the agent intends now, so it is renderable whole or not at all. Half a
+// checklist is a claim about the agent's intentions that the agent never made.
+
+const step = (over: Record<string, unknown> = {}) => ({ text: 'Read the draft', status: 'pending', ...over });
+
+assert.deepEqual(sanitizePlanSteps([]), [], 'an empty snapshot is how a finished turn clears its plan');
+assert.deepEqual(
+  sanitizePlanSteps([step(), step({ status: 'active', priority: 'high' }), step({ status: 'done' })]),
+  [
+    { text: 'Read the draft', status: 'pending' },
+    { text: 'Read the draft', status: 'active', priority: 'high' },
+    { text: 'Read the draft', status: 'done' },
+  ],
+);
+// Rebuilt, not narrowed: anything the sender attached that the schema does not
+// name must not ride along into the renderer — including an own `__proto__`,
+// which only a rebuild onto a fresh object makes structurally harmless.
+assert.deepEqual(sanitizePlanSteps([step({ note: 'extra' })]), [{ text: 'Read the draft', status: 'pending' }]);
+const smuggled = JSON.parse('{"text":"Read the draft","status":"pending","__proto__":{"x":1}}') as unknown;
+assert.deepEqual(
+  Object.getOwnPropertyNames(sanitizePlanSteps([smuggled])?.[0] ?? {}),
+  ['text', 'status'],
+  'a rendered plan step carried keys the schema does not name',
+);
+
+// One bad step refuses the whole snapshot — the renderer keeps the last good
+// plan rather than showing a checklist with a step missing from the middle.
+for (const bad of [
+  step({ status: 'in_progress' }),
+  step({ status: 'PENDING' }),
+  step({ status: undefined }),
+  step({ status: 1 }),
+  step({ text: '' }),
+  step({ text: 42 }),
+  step({ text: undefined }),
+  step({ text: 'x'.repeat(MAX_PLAN_STEP_CHARS + 1) }),
+  step({ priority: 'urgent' }),
+  step({ priority: null }),
+  'Read the draft',
+  null,
+  [],
+]) {
+  assert.equal(
+    sanitizePlanSteps([step(), bad, step({ status: 'done' })]),
+    undefined,
+    `a snapshot containing ${JSON.stringify(bad)} was rendered anyway`,
+  );
+}
+// Priority is optional, and absent is not the same as present-and-invalid.
+assert.deepEqual(sanitizePlanSteps([step({ priority: undefined })]), [{ text: 'Read the draft', status: 'pending' }]);
+assert.deepEqual(sanitizePlanSteps([step({ priority: 'low' })]), [
+  { text: 'Read the draft', status: 'pending', priority: 'low' },
+]);
+
+// The wire cap is the renderer's cap: a snapshot that crossed the sealed
+// channel intact is never refused here for its size, and one that could not
+// have come off the wire is never drawn.
+assert.equal(sanitizePlanSteps(Array.from({ length: MAX_PLAN_STEPS }, () => step()))?.length, MAX_PLAN_STEPS);
+assert.equal(sanitizePlanSteps(Array.from({ length: MAX_PLAN_STEPS + 1 }, () => step())), undefined);
+assert.deepEqual(sanitizePlanSteps([step({ text: 'x'.repeat(MAX_PLAN_STEP_CHARS) })]), [
+  { text: 'x'.repeat(MAX_PLAN_STEP_CHARS), status: 'pending' },
+]);
+
+// Not an array is not "no plan": there is no snapshot here at all, and the
+// caller must say so rather than silently clear a plan the agent still holds.
+for (const notAPlan of [undefined, null, 'plan', 42, {}, { steps: [] }]) {
+  assert.equal(sanitizePlanSteps(notAPlan), undefined, `${JSON.stringify(notAPlan)} was accepted as a plan`);
+}
+// A sparse array has holes the item loop would otherwise read as undefined.
+const sparse: unknown[] = [step()];
+sparse.length = 3;
+assert.equal(sanitizePlanSteps(sparse), undefined, 'a sparse plan array was accepted');
 
 console.log('extension boundary check passed');
 
@@ -148,6 +228,15 @@ assert.ok(
 assert.doesNotMatch(content, /createChatStore|ui-chat/, 'content script bundles the chat renderer');
 assert.match(overlay, /createChatStore/, 'extension iframe does not bundle the shared chat store');
 assert.match(overlay, /ui-chat/, 'extension iframe does not bundle the shared Chat components');
+// The plan checklist and the sealing-key fingerprint words are drawn in the
+// extension's own frame, never in the page's world — the same boundary the
+// chat renderer is held to, and a stronger requirement for the fingerprint
+// words, which exist to be trusted.
+// Matched on the rendered markup, not on the class name: the stylesheet in
+// this same bundle mentions `.plan-step` whether or not anything draws one.
+assert.match(overlay, /class="plan-step"/, 'extension iframe does not render the agent plan');
+assert.match(overlay, /class="verify"/, 'extension iframe does not render the attachment fingerprint words');
+assert.doesNotMatch(content, /class="plan-step"|class="verify"/, 'content script draws attachment state into the page');
 assert.match(overlayHtml, /overlay\.js/, 'extension iframe page does not load its renderer');
 assert.ok(!staticManifest.permissions?.includes('notifications'), 'approval flow must not depend on OS notifications');
 assert.doesNotMatch(serviceWorker, /chrome\.notifications/, 'service worker still contains the unreliable notification approval path');
