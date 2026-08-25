@@ -8,7 +8,55 @@ header or an extension popup names exactly one commit. Separately versioned
 npm artifacts (`@gkoreli/agentport`, the shared chat overlay) are noted where
 they moved.
 
-## Unreleased
+## 0.0.14 — the protocol v7 cutover
+
+The first release since `v0.1.7`, and the largest: thirty-six commits, a
+lockstep wire change, and the first time this project's own claim was
+demonstrated against a site nobody here wrote. `@gkoreli/agentport` goes to
+0.1.8 in the same release, because the relay and every endpoint cut over
+together — there is no `agentport/6` parser left anywhere in the tree.
+
+### CI can deploy, which it never could before
+
+Every release to date was deployed by hand, and the cause was one unset
+secret: the protected `production` environment had `CLOUDFLARE_ACCOUNT_ID`
+and no `CLOUDFLARE_API_TOKEN`, so the workflow's deploy step authenticated
+against nothing and failed several minutes in, inside Wrangler's credential
+flow, saying nothing about this repository. `scripts/deploy.ts` now refuses
+`--ci` without it and names the cause, the fixing command, and the kind of
+token to use — watched failing under the live condition. `docs/RELEASING.md`
+carries the diagnosis rather than only the workaround, including the
+companion foot-gun: `CLOUDFLARE_DEPLOYED_COMMIT` SUPPRESSES the automatic
+deploy for the commit it names.
+
+### The research that set the agenda is in the repository
+
+Six agents surveyed the tree at `f7c8ee6` on 2026-08-20 and their reports
+lived, until now, only in a session scratchpad under `/tmp` — 210KB of
+evidence-cited analysis that produced nearly every commit in this release,
+one temp-directory sweep from gone. `docs/research/2026-08-survey/` holds
+them verbatim, stamped with the commit they describe and deliberately never
+rewritten to agree with what shipped. `docs/research/README.md` is the living
+half: all 62 findings with a disposition — 35 closed against the commit and
+symbol that closed them, 6 partial, 21 open — where OPEN is defined
+mechanically as "nothing in `f7c8ee6..main` closed it", so the index cannot
+drift into a victory lap. The two findings the survey got wrong are recorded
+under their own heading.
+
+Their citations are not exempted from `npm run docs:check`. The measured
+drift was two stale symbols out of 401 across a quarter's refactoring, so
+each is annotated in place instead of a new exemption mechanism existing to
+erode.
+
+### The article, and a fourth front door that did not work
+
+`docs/bring-your-own-ai-agent.md` was written months ago, pushed to a branch,
+and never merged — the clearest statement of the product we have, living
+where nobody would find it. It is now beside the north star, and its two
+script tags no longer carry the defect requirement 6 exists to catch:
+`data-relay` looks optional and is not (absent, `site/src/connect.ts#relayUrl`
+falls back to the *reader's own host*), and it called `AgentPort.connect` at
+top level, which needs a user gesture behind it.
 
 ### The supply was walked, and it is real
 
