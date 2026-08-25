@@ -556,6 +556,36 @@ not arrived yet, and what they meet is the deployed artifact — so a fix that
 is landed and unreleased is, from the only perspective that requirement cares
 about, not a fix.
 
+Two commands answer it, so nobody has to reason about it from commits:
+
+```bash
+npm run relay:version   # what the deployed relay speaks vs this tree
+npm run deployed:check  # is the deployed connect.js this build, byte for byte
+```
+
+**As of v0.0.14 / CLI v0.1.8 (2026-08-25) they agree**: the deployed relay
+speaks `agentport/7` and the front door is this tree's build. That release was
+also the first this project deployed without a human running Wrangler — the
+protected `production` environment had never had `CLOUDFLARE_API_TOKEN`, which
+is the whole reason every previous release was manual.
+
+**What is next, in order.** Not a wish list — the first item gates the second,
+and the second is the wedge:
+
+1. **Protocol v8: pairwise per-origin agent identity**
+   (`docs/ADR-026-pairwise-agent-identity.md`). Every site currently learns a
+   stable agent public key, so any two origins can compare notes and discover
+   they were visited by the same person. D4 — how the connect tier names the
+   agent without learning the root key — is an open question the ADR says must
+   be settled by prototype BEFORE any of it merges.
+2. **Chrome Web Store submission.** The engineering worklist is done; ADR-026
+   gates it, because the identifier a stranger's site first sees is the one it
+   keeps.
+3. **Everything else** is in `docs/research/README.md`, which gives all 62
+   survey findings a disposition. Twenty-one are open, headed by `page.navigate`
+   (a prototype exists — see that file's preserved-work table) and remembered
+   consent, which stays behind ADR-019's Gate C.
+
 Working: pairing, cert issuance and verification, directory + presence,
 capability grants with TTL, prompt streaming, plan reporting, tool-call
 round-trip, approval round-trip, cancellation, reconnect with in-place session

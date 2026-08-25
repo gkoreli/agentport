@@ -145,6 +145,41 @@ right, which is the distinction the consumer-class filing turns on.
 
 ---
 
+## Preserved work that never landed
+
+On 2026-08-24 this repository had sixteen worktrees and seventeen branches
+attached to it, twelve of them holding uncommitted changes. Fourteen branches
+were already contained in `main`. The rest was audited rather than assumed,
+and the measurement is the useful part: across all twelve dirty worktrees
+there were **zero net-new tracked files**, and eleven of the twelve were
+80–98% already in `main` — what remained was superseded prose, renamed
+symbols and stale check counts.
+
+Nothing was discarded. Every uncommitted change was captured with
+`git stash create`, which builds a commit object without touching the
+worktree, and pushed to `refs/wip/*` on origin:
+
+```bash
+git ls-remote origin 'refs/wip/*'                    # what exists
+git fetch origin 'refs/wip/*:refs/wip/*'             # bring them local
+git show refs/wip/wf_af2cca26-9af-6                  # read one
+```
+
+They are under `refs/wip/` rather than `refs/tags/` deliberately: durable and
+off-machine, but absent from the tags and releases UI, so a public repository's
+tag list still shows only releases.
+
+Two of those refs hold work that is genuinely not in `main`:
+
+| ref | what is in it | why it did not land |
+|---|---|---|
+| `refs/wip/wf_af2cca26-9af-6` | a working `page.navigate` — same-origin only, refusing cross-origin with the attachment's approved origin named, and answering before the document is torn down so the agent never sees a call that neither succeeded nor failed | a **port**, not a rebase: it is written against `page.listElements`, and `packages/extension/src/pagetools.ts` has since moved to handle-based `page.find`. `docs/ADR-021-web-harness.md` also defers the tool pending the cross-origin decision and an authority domain, which are protocol questions |
+| `refs/wip/untracked` | `pagetools-check.ts`, a 340-line offline happy-dom harness asserting that every tool is gated as its grant claims, that `display:none` and `[hidden]` controls are never offered, that truncation is reported truthfully, and that reads carry the untrusted marker | written against the same older API. `packages/extension/check.ts` now covers part of this ground; the delta is worth reading before rewriting it from scratch |
+
+`refs/wip/untracked` exists because `git stash create` captures **tracked**
+changes only. Three untracked files would otherwise have survived as loose
+blobs, recoverable until the next `git gc` and not one moment longer.
+
 ## What the survey got wrong
 
 Kept deliberately, because a research archive that records only its hits is
