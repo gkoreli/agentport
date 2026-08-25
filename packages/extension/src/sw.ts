@@ -21,10 +21,17 @@
  *     never in page DOM or an OS notification that may be silently hidden;
  *   - what a page learns about the agent is a generic label plus a per-origin
  *     alias — real names, pubkeys and cert contents stay in extension chrome;
- *   - the page's session survives navigation and worker eviction without any
+ *   - a session survives navigation and worker eviction without any
  *     re-consent, because the grant never lapsed: first by re-binding the
  *     worker-held session, then by resuming through the relay with a stored
  *     token (every resumed attachment performs a fresh mandatory handshake).
+ *
+ * There is ONE lifecycle for that last property. A page-declared surface and
+ * the extension's own widget park and reclaim by the same rules; what differs
+ * is only the identity they are reclaimed by, computed once in `lifecycle.ts`.
+ * Crossing an origin is not a navigation the attachment follows: the origin is
+ * the unit of consent, so a top-level document arriving on a different origin
+ * closes what the tab was holding instead of parking it.
  */
 
 import { AgentWallet, ResumeError, type AgentSession, type SiteTool } from '@agentport/client';
@@ -45,6 +52,7 @@ import {
   type WorkerToConsent,
   type WorkerToContent,
 } from './bridge.js';
+import { leftBehindByNavigation, mayReclaim, reclaimKeyFor } from './lifecycle.js';
 import { loadCerts, saveCert,
   DEFAULT_RELAY_URL,
   clearResume,
@@ -199,8 +207,18 @@ interface SessionEntry {
   origin: string;
   /** The tab the binding lives in — same-tab reclaim beats the disconnect race. */
   tabId: number | undefined;
-  /** The surface name from the connect request — the reclaim key with origin. */
+  /** 0 for a tab's top-level document. Only top-frame entries are evicted by a
+   *  cross-origin navigation, and only a top-frame arrival evicts. */
+  frameId: number | undefined;
+  /** The surface name from the connect request. Page-supplied: for logs and the
+   *  consent card, never for addressing — see `reclaimKey`. */
   name: string;
+  /**
+   * The one identity a parked session is reclaimed by, in the worker's table
+   * and in the durable resume record alike. Null means this surface cannot
+   * outlive its document and is closed on disconnect.
+   */
+  reclaimKey: string | null;
   session: AgentSession;
   /** The relay's resume token — how this session survives a socket drop. */
   token: string | undefined;
@@ -213,15 +231,35 @@ interface SessionEntry {
    *  to whoever declared it, and results are only accepted for a call we made. */
   toolNames: Set<string>;
   pending: Map<string, Deferred<{ ok: boolean; result?: unknown; error?: string }>>;
+  /** Prompt ids the agent is still working on. A document that reclaims this
+   *  session mid-turn needs them to render a running turn instead of idle. */
+  activePrompts: Set<string>;
+  /** Tool calls that arrived while the document was away, waiting for the next
+   *  one to bind. Settled by `reclaimSession` or by `dropSession`. */
+  parked: Set<(outcome: { port: chrome.runtime.Port } | { error: string }) => void>;
+  /** Agent events dropped because no document was bound. Counted, never
+   *  buffered: the transcript is the user's, and the agent's own store is
+   *  where a reclaiming document re-reads it from. */
+  missedEvents: number;
   orphanTimer?: ReturnType<typeof setTimeout>;
 }
 
 /**
  * How long an orphaned session waits for its page to come back. Navigation and
- * refresh land well inside this; a closed tab costs one grace window before
- * the daemon sees the close.
+ * refresh land well inside this. A cross-origin navigation no longer waits at
+ * all (see `noteDocument`), so what remains on this clock is a closed tab or a
+ * destination with no content script — chrome://, the PDF viewer, a download.
  */
 const ORPHAN_GRACE_MS = 2 * 60 * 1000;
+
+/**
+ * How long a tool call waits for the next document to bind before failing.
+ * The agent clicks a link and immediately reads the page it landed on; that
+ * call must wait for the navigation rather than error out mid-turn. It must
+ * also not wait for the whole orphan grace: the daemon has no tool-call
+ * timeout, so an unanswerable call blocks the agent's turn.
+ */
+const NAV_SETTLE_MS = 10_000;
 
 const sessions = new Map<string, SessionEntry>();
 const portSessions = new WeakMap<chrome.runtime.Port, Set<string>>();
@@ -244,21 +282,51 @@ function lookup(port: chrome.runtime.Port, ref: unknown): SessionEntry | undefin
  * relay session it holds — did not, so the session is parked instead of
  * closed and the next document from the same origin may reclaim it (the
  * grant's surface + TTL never lapsed, so no re-consent is asked).
+ *
+ * The calls that were in flight ARE a goodbye, though: the document that would
+ * have answered them is gone, the daemon has no tool-call timeout, and a
+ * deferred nobody can settle blocks the agent's turn for the whole grace
+ * window. Fail them now and let the agent try again against the new document.
  */
 function orphanSession(entry: SessionEntry): void {
   if (entry.port) refsOf(entry.port).delete(entry.ref);
   entry.port = null;
+  const abandoned = entry.pending.size;
+  for (const deferred of entry.pending.values()) {
+    deferred.resolve({ ok: false, error: 'the page navigated before this call completed' });
+  }
+  entry.pending.clear();
+  log.info('session parked while its document navigates', {
+    sessionId: entry.session.id,
+    data: { origin: entry.origin, surface: entry.name, abandonedCalls: abandoned, graceMs: ORPHAN_GRACE_MS },
+  });
   entry.orphanTimer = setTimeout(() => {
     const current = sessions.get(entry.ref);
     if (current && current.port === null) dropSession(current, 'frame_closed');
   }, ORPHAN_GRACE_MS);
 }
 
-function reclaimSession(port: chrome.runtime.Port, origin: string, request: PageConnectRequest): SessionEntry | undefined {
+/**
+ * Hand a parked session to the document that just announced itself.
+ *
+ * `key` and `origin` both come from the browser's own stamp on the connecting
+ * port — never from anything the page said — so a link to another site cannot
+ * pick up an attachment the user approved for this one.
+ */
+function reclaimSession(
+  port: chrome.runtime.Port,
+  origin: string,
+  key: string | null,
+  request: PageConnectRequest,
+): SessionEntry | undefined {
+  if (!key) return undefined;
   const tabId = port.sender?.tab?.id;
+  const now = Date.now();
   for (const entry of sessions.values()) {
-    if (entry.origin !== origin || entry.name !== request.name || entry.from !== 'page') continue;
-    if (entry.session.closed || entry.session.grant.expiresAt <= Date.now()) continue;
+    if (!mayReclaim(
+      { reclaimKey: entry.reclaimKey, origin: entry.origin, closed: entry.session.closed, expiresAt: entry.session.grant.expiresAt },
+      { key, origin, now },
+    )) continue;
     // Orphaned is the ordinary case. A refresh, though, can deliver the new
     // document's resume BEFORE the old port's onDisconnect — the entry still
     // looks bound. Same tab means the old document is gone by definition, so
@@ -270,10 +338,29 @@ function reclaimSession(port: chrome.runtime.Port, origin: string, request: Page
     entry.orphanTimer = undefined;
     entry.port = port;
     entry.tabId = tabId;
+    entry.frameId = port.sender?.frameId;
+    // Whoever was going to answer these is gone — this is a different document.
+    // In the ordinary path `orphanSession` already emptied this; in the
+    // refresh race it did not, and an unsettled deferred blocks the turn.
+    for (const deferred of entry.pending.values()) {
+      deferred.resolve({ ok: false, error: 'the page navigated before this call completed' });
+    }
+    entry.pending.clear();
     // The new document re-declared its tools; the dispatch allowlist follows
     // the live declaration, still bounded by the original grant on the wire.
     entry.toolNames = new Set(request.tools.map((tool) => tool.name));
     refsOf(port).add(entry.ref);
+    if (entry.missedEvents > 0) {
+      // Not a silent loss: the reclaiming document re-reads the conversation
+      // from the agent's own store, and this says how much it has to recover.
+      log.info('agent events arrived while no document was bound', {
+        sessionId: entry.session.id,
+        data: { origin: entry.origin, missedEvents: entry.missedEvents },
+      });
+      entry.missedEvents = 0;
+    }
+    for (const settle of [...entry.parked]) settle({ port });
+    entry.parked.clear();
     return entry;
   }
   return undefined;
@@ -285,12 +372,46 @@ function dropSession(entry: SessionEntry, reason: string): void {
   if (entry.port) refsOf(entry.port).delete(entry.ref);
   for (const deferred of entry.pending.values()) deferred.resolve({ ok: false, error: `session closed: ${reason}` });
   entry.pending.clear();
+  for (const settle of [...entry.parked]) settle({ error: `session closed: ${reason}` });
+  entry.parked.clear();
   entry.session.close(reason);
-  if (entry.from === 'page') {
-    observe(clearResume(entry.origin, entry.name, entry.session.id), 'failed to clear session resume record', {
+  if (entry.reclaimKey) {
+    observe(clearResume(entry.origin, entry.reclaimKey, entry.session.id), 'failed to clear session resume record', {
       sessionId: entry.session.id,
       data: { origin: entry.origin, surface: entry.name },
     });
+  }
+}
+
+/** The browser's own view of which site is asking. Never taken from a frame. */
+function originOf(port: chrome.runtime.Port): string {
+  return port.sender?.origin ?? port.sender?.url ?? 'unknown://';
+}
+
+/**
+ * A top-level document announced itself. Anything this tab still holds for a
+ * DIFFERENT origin belongs to a page the user has navigated away from, so it
+ * is closed — a real `session.close` on the wire, which ends the agent-side
+ * session and withdraws its MCP bridge — rather than parked for the grace
+ * window. The attachment does not follow a link off the origin the user
+ * approved it for.
+ *
+ * This is the only navigation signal the extension has without the `tabs` or
+ * `webNavigation` permission, and it costs nothing: the content script runs at
+ * document_start on every http(s) page and opens this port immediately. A
+ * destination with no content script — chrome://, the PDF viewer, a download,
+ * or a closed tab — still falls back to the orphan timer.
+ */
+function noteDocument(port: chrome.runtime.Port): void {
+  const arriving = { origin: originOf(port), tabId: port.sender?.tab?.id, frameId: port.sender?.frameId };
+  if (arriving.frameId !== 0) return;
+  for (const entry of [...sessions.values()]) {
+    if (!leftBehindByNavigation({ origin: entry.origin, tabId: entry.tabId, frameId: entry.frameId }, arriving)) continue;
+    log.info('detaching a session the tab navigated away from', {
+      sessionId: entry.session.id,
+      data: { from: entry.origin, to: arriving.origin, surface: entry.name },
+    });
+    dropSession(entry, 'navigated_away');
   }
 }
 
@@ -462,6 +583,13 @@ function wireSession(entry: SessionEntry): void {
     session.on(event, (payload) => {
       const target = livePort();
       if (target) post(target, { t: 'event', ref, event, payload });
+      // Nothing is bound: the document is navigating. Count what it missed so
+      // the reclaiming document can say how much it is re-reading, and so the
+      // loss is never silent.
+      else {
+        const current = sessions.get(ref);
+        if (current) current.missedEvents += 1;
+      }
     });
   }
   session.on('closed', (payload) => {
@@ -471,8 +599,12 @@ function wireSession(entry: SessionEntry): void {
     if (current && current.session !== session) return;
     sessions.delete(ref);
     clearTimeout(current?.orphanTimer);
-    if (current?.from === 'page') {
-      observe(clearResume(current.origin, current.name, session.id), 'failed to clear closed-session resume record', {
+    if (current) {
+      for (const settle of [...current.parked]) settle({ error: 'session closed' });
+      current.parked.clear();
+    }
+    if (current?.reclaimKey) {
+      observe(clearResume(current.origin, current.reclaimKey, session.id), 'failed to clear closed-session resume record', {
         sessionId: session.id,
         data: { origin: current.origin, surface: current.name },
       });
@@ -492,7 +624,7 @@ async function openSession(
 ): Promise<{ ref: string; info: unknown; grant: unknown }> {
   if (refsOf(port).size >= LIMITS.sessionsPerChannel) throw new Rejected('denied', 'too many open sessions in this tab');
 
-  const origin = port.sender?.origin ?? port.sender?.url ?? 'unknown://';
+  const origin = originOf(port);
   const wallet = await getWallet();
   const agents = await wallet.listAgents();
   if (agents.length === 0) throw new Rejected('no_agents', 'no agents paired yet');
@@ -531,29 +663,41 @@ async function openSession(
     from,
     origin,
     tabId: port.sender?.tab?.id,
+    frameId: port.sender?.frameId,
     name: request.name,
+    reclaimKey: reclaimKeyFor({
+      from,
+      origin,
+      name: request.name,
+      tabId: port.sender?.tab?.id,
+      toolSource: request.context?.['source'],
+    }),
     session,
     token: wallet.resumeTokenFor(session.id),
     agent: wallet.agentKeyFor(session.id),
     who,
     toolNames: new Set(request.tools.map((tool) => tool.name)),
     pending: new Map(),
+    activePrompts: new Set(),
+    parked: new Set(),
+    missedEvents: 0,
   };
   sessions.set(ref, entry);
   refsOf(port).add(ref);
   wireSession(entry);
 
-  // Page sessions outlive the worker: persist the resume record so a restarted
-  // worker can re-attach through the relay without any new consent.
+  // A reclaimable session outlives the worker too: persist the resume record,
+  // under the same key the in-memory table uses, so a restarted worker can
+  // re-attach through the relay without any new consent.
   const agentKey = wallet.agentKeyFor(session.id);
-  if (from === 'page' && entry.token && agentKey) {
+  if (entry.reclaimKey && entry.token && agentKey) {
     observe(
       saveResume({
         id: session.id,
         agent: agentKey,
         token: entry.token,
         origin,
-        name: request.name,
+        name: entry.reclaimKey,
         expiresAt: session.grant.expiresAt,
       }),
       'failed to persist session resume record',
@@ -573,22 +717,25 @@ async function openSession(
  */
 async function resumeFromStore(
   port: chrome.runtime.Port,
+  from: Origin,
   origin: string,
+  key: string | null,
   request: PageConnectRequest,
 ): Promise<SessionEntry | undefined> {
-  const record = await loadResume(origin, request.name);
+  if (!key) return undefined;
+  const record = await loadResume(origin, key);
   if (!record) return undefined;
   if (record.expiresAt <= Date.now()) {
-    observe(clearResume(origin, request.name, record.id), 'failed to clear expired resume record', {
+    observe(clearResume(origin, key, record.id), 'failed to clear expired resume record', {
       sessionId: record.id,
       data: { origin, surface: request.name },
     });
     return undefined;
   }
-  // A live entry bound to another tab already owns this session; the relay
-  // would refuse anyway (already_attached), so do not even race it.
+  // A live entry already owns this session; the relay would refuse anyway
+  // (already_attached), so do not even race it.
   for (const entry of sessions.values()) {
-    if (entry.origin === origin && entry.name === request.name && entry.from === 'page') return undefined;
+    if (entry.reclaimKey === key) return undefined;
   }
 
   const wallet = await getWallet();
@@ -611,16 +758,21 @@ async function resumeFromStore(
     const entry: SessionEntry = {
       ref,
       port,
-      from: 'page',
+      from,
       origin,
       tabId: port.sender?.tab?.id,
+      frameId: port.sender?.frameId,
       name: request.name,
+      reclaimKey: key,
       session,
       token: record.token,
       agent: record.agent,
       who,
       toolNames: new Set(request.tools.map((tool) => tool.name)),
       pending: new Map(),
+      activePrompts: new Set(),
+      parked: new Set(),
+      missedEvents: 0,
     };
     sessions.set(ref, entry);
     refsOf(port).add(ref);
@@ -630,7 +782,7 @@ async function resumeFromStore(
     const reason = err instanceof ResumeError ? err.reason : '';
     if (reason === 'not_resumable' || reason === 'grant_expired') {
       // Proven dead. Anything else is transient — keep the token for retry.
-      observe(clearResume(origin, request.name, record.id), 'failed to clear dead resume record', {
+      observe(clearResume(origin, key, record.id), 'failed to clear dead resume record', {
         sessionId: record.id,
         data: { origin, surface: request.name },
       });
@@ -644,24 +796,57 @@ async function resumeFromStore(
   }
 }
 
+/**
+ * Wait for the next document to bind this session.
+ *
+ * The agent clicks a link and then reads the page it landed on. Failing that
+ * read because the document is mid-navigation would make the harness useless
+ * exactly when it works; waiting forever would wedge the turn, because the
+ * daemon has no tool-call timeout of its own. So: a bounded wait, and a
+ * truthful error when the document never came back.
+ */
+function awaitRebind(entry: SessionEntry): Promise<chrome.runtime.Port> {
+  return new Promise<chrome.runtime.Port>((resolve, reject) => {
+    const settle = (outcome: { port: chrome.runtime.Port } | { error: string }): void => {
+      clearTimeout(timer);
+      entry.parked.delete(settle);
+      if ('port' in outcome) resolve(outcome.port);
+      else reject(new Error(outcome.error));
+    };
+    const timer = setTimeout(() => {
+      log.warn('tool call gave up waiting for the page to come back', {
+        sessionId: entry.session.id,
+        data: { origin: entry.origin, waitedMs: NAV_SETTLE_MS },
+      });
+      settle({ error: 'the page navigated and did not come back' });
+    }, NAV_SETTLE_MS);
+    entry.parked.add(settle);
+  });
+}
+
 /** A tool call goes back to whoever registered the tool, and nowhere else. */
-function dispatchToolCall(ref: string, name: string, args: Record<string, unknown>): Promise<unknown> {
+async function dispatchToolCall(ref: string, name: string, args: Record<string, unknown>): Promise<unknown> {
   const entry = sessions.get(ref);
   if (!entry) throw new Error('session is gone');
   if (!entry.toolNames.has(name)) throw new Error(`tool ${name} is not in this grant`);
-  if (entry.pending.size >= LIMITS.pendingCallsPerSession) throw new Error('too many tool calls in flight');
+  if (entry.pending.size + entry.parked.size >= LIMITS.pendingCallsPerSession) {
+    throw new Error('too many tool calls in flight');
+  }
 
-  if (!entry.port) throw new Error('the page is navigating; retry in a moment');
+  const port = entry.port ?? (await awaitRebind(entry));
+  // The wait is an await: re-check that this session is still the live one and
+  // that the tool the reclaiming document declared is still this tool.
+  if (sessions.get(ref) !== entry) throw new Error('session is gone');
+  if (!entry.toolNames.has(name)) throw new Error(`tool ${name} is not in this grant`);
 
   const callId = mintId('c_');
   const deferred = new Deferred<{ ok: boolean; result?: unknown; error?: string }>();
   entry.pending.set(callId, deferred);
-  post(entry.port, { t: 'tool.call', ref, callId, name, arguments: args });
+  post(port, { t: 'tool.call', ref, callId, name, arguments: args });
 
-  return deferred.promise.then((outcome) => {
-    if (!outcome.ok) throw new Error(outcome.error ?? 'tool call failed');
-    return outcome.result;
-  });
+  const outcome = await deferred.promise;
+  if (!outcome.ok) throw new Error(outcome.error ?? 'tool call failed');
+  return outcome.result;
 }
 
 class Rejected extends Error {
@@ -676,6 +861,7 @@ class Rejected extends Error {
 type ContentRequest = Exclude<ContentToWorker, { t: 'hello' }>;
 
 function handleContent(port: chrome.runtime.Port): void {
+  noteDocument(port);
   let contentVersion: string | undefined;
   port.onMessage.addListener((raw: unknown) => {
     if (!isRecord(raw)) return;
@@ -721,9 +907,11 @@ function handleContent(port: chrome.runtime.Port): void {
     for (const ref of [...refsOf(port)]) {
       const entry = sessions.get(ref);
       if (!entry) continue;
-      // The extension's own widget sessions die with their document — only
-      // page surfaces navigate and come back.
-      if (entry.from === 'page') orphanSession(entry);
+      // One lifecycle. A surface that has a reclaim identity is parked for the
+      // next document; a surface that has none cannot outlive this document —
+      // an opaque origin nobody could have consented to, or a widget grant
+      // harvested from THIS document's WebMCP registrations.
+      if (entry.reclaimKey) orphanSession(entry);
       else dropSession(entry, 'frame_closed');
     }
   });
@@ -768,14 +956,31 @@ async function onContentMessage(port: chrome.runtime.Port, message: ContentReque
         post(port, { t: 'err', rid: message.rid, reason: 'denied', message: 'malformed connect request' });
         return;
       }
-      const origin = port.sender?.origin ?? port.sender?.url ?? 'unknown://';
+      // The content script says which surface is asking; the browser says who
+      // it is. The reclaim key is built from the browser's answer.
+      const from: Origin = message.from === 'widget' ? 'widget' : 'page';
+      const origin = originOf(port);
+      const key = reclaimKeyFor({
+        from,
+        origin,
+        name: request.name,
+        tabId: port.sender?.tab?.id,
+        toolSource: request.context?.['source'],
+      });
       // Worker-held first (nothing crossed the network); relay-token second.
-      let entry = reclaimSession(port, origin, request);
-      if (!entry) entry = await resumeFromStore(port, origin, request);
+      let entry = reclaimSession(port, origin, key, request);
+      if (!entry) entry = await resumeFromStore(port, from, origin, key, request);
       post(port, {
         t: 'ok',
         rid: message.rid,
-        value: entry ? { ref: entry.ref, info: await infoFor(entry), grant: grantFor(entry) } : null,
+        value: entry
+          ? {
+              ref: entry.ref,
+              info: await infoFor(entry),
+              grant: grantFor(entry),
+              activePrompts: [...entry.activePrompts],
+            }
+          : null,
       });
       return;
     }
@@ -826,9 +1031,16 @@ async function onContentMessage(port: chrome.runtime.Port, message: ContentReque
       // The page minted the prompt id; run the turn under it so every event
       // the page sees already carries the id it knows.
       const request = entry.session.startPrompt(message.text, message.context, message.promptId);
+      // A document that reclaims this session mid-turn asks for these: without
+      // them it renders an idle composer while the agent is still speaking.
+      entry.activePrompts.add(request.id);
       request.result.then(
-          (text) => post(port, { t: 'ok', rid: message.rid, value: text }),
+          (text) => {
+            entry.activePrompts.delete(request.id);
+            post(port, { t: 'ok', rid: message.rid, value: text });
+          },
           (err: unknown) => {
+            entry.activePrompts.delete(request.id);
             log.error('session prompt failed', { sessionId: entry.session.id, err });
             post(port, { t: 'err', rid: message.rid, reason: 'error', message: toErr(err).message });
           },

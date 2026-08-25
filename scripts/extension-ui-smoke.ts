@@ -20,6 +20,22 @@ const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const EXTENSION = join(ROOT, 'packages/extension/dist');
 const TIMEOUT_MS = 20_000;
 
+/**
+ * Attach to every target EXCEPT the extension's own service worker.
+ *
+ * An extension service worker auto-attached with `waitForDebuggerOnStart`
+ * never answers `Runtime.runIfWaitingForDebugger`, so it stays paused and the
+ * wallet is dead for the rest of the run — and the content script now talks to
+ * it on every page load. `browser` and `tab` are excluded because that is what
+ * the default filter does; the empty entry keeps everything else.
+ */
+const AUTO_ATTACH_FILTER = [
+  { type: 'service_worker', exclude: true },
+  { type: 'browser', exclude: true },
+  { type: 'tab', exclude: true },
+  {},
+];
+
 type JsonObject = Record<string, unknown>;
 
 interface CdpMessage {
@@ -86,10 +102,25 @@ class CdpClient {
     return () => this.#listeners.delete(listener);
   }
 
+  /** Bounded on purpose: a CDP call that never answers must fail the run, not
+   *  hang it — `waitFor` only re-checks its deadline between attempts. */
   send(method: string, params: JsonObject = {}, sessionId?: string): Promise<JsonObject> {
     const id = ++this.#nextId;
     return new Promise((resolveResult, rejectResult) => {
-      this.#pending.set(id, { resolve: resolveResult, reject: rejectResult });
+      const timer = setTimeout(() => {
+        if (!this.#pending.delete(id)) return;
+        rejectResult(new Error(`CDP ${method} did not answer within ${TIMEOUT_MS}ms`));
+      }, TIMEOUT_MS);
+      this.#pending.set(id, {
+        resolve: (value) => {
+          clearTimeout(timer);
+          resolveResult(value);
+        },
+        reject: (error) => {
+          clearTimeout(timer);
+          rejectResult(error);
+        },
+      });
       this.#socket.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }));
     });
   }
@@ -207,7 +238,7 @@ function hostilePage(): string {
 </html>`;
 }
 
-async function serveHostilePage(): Promise<{ server: Server; url: string }> {
+async function serveHostilePage(): Promise<{ server: Server; origin: string }> {
   const server = createServer((_request, response) => {
     response.writeHead(200, {
       'content-type': 'text/html; charset=utf-8',
@@ -221,7 +252,7 @@ async function serveHostilePage(): Promise<{ server: Server; url: string }> {
   });
   const address = server.address();
   if (!address || typeof address === 'string') throw new Error('test server did not expose a TCP port');
-  return { server, url: `http://127.0.0.1:${address.port}/hostile` };
+  return { server, origin: `http://127.0.0.1:${address.port}` };
 }
 
 async function closeServer(server: Server): Promise<void> {
@@ -314,7 +345,11 @@ async function main(): Promise<void> {
   const chrome = await chromeExecutable();
   const temporary = await mkdtemp(join(tmpdir(), 'agentport-extension-ui-'));
   const profile = join(temporary, 'profile');
-  const { server, url } = await serveHostilePage();
+  const { server, origin } = await serveHostilePage();
+  // A second loopback port is a second origin: the extension's cross-origin
+  // rules must be exercised against a real browser-stamped origin change.
+  const { server: otherServer, origin: otherOrigin } = await serveHostilePage();
+  const url = `${origin}/hostile`;
   const stderr: string[] = [];
   let browser: ChildProcess | undefined;
   let client: CdpClient | undefined;
@@ -349,17 +384,32 @@ async function main(): Promise<void> {
     const prepare = (sessionId: string, info: TargetInfo): void => {
       sessions.set(sessionId, { sessionId, info });
       const work = (async () => {
-        await client?.send('Runtime.enable', {}, sessionId);
-        await client?.send('Log.enable', {}, sessionId);
-        if (info.type === 'page' || info.type === 'iframe') {
-          await client?.send('Target.setAutoAttach', {
-            autoAttach: true,
-            waitForDebuggerOnStart: true,
-            flatten: true,
-          }, sessionId);
-        }
+        // Queue the domain enables ahead of the resume so no early event is
+        // missed, but do NOT await their replies first: a target paused at
+        // start (the extension service worker, which now restarts on every
+        // navigation) answers them only once it is running, and awaiting them
+        // before `runIfWaitingForDebugger` deadlocks the whole run.
+        const enabled = Promise.all([
+          client?.send('Runtime.enable', {}, sessionId),
+          client?.send('Log.enable', {}, sessionId),
+          ...(info.type === 'page' || info.type === 'iframe'
+            ? [client?.send('Target.setAutoAttach', {
+                autoAttach: true,
+                waitForDebuggerOnStart: true,
+                flatten: true,
+                filter: AUTO_ATTACH_FILTER,
+              }, sessionId)]
+            : []),
+        ]);
+        // If the resume below fails first, these replies would reject with
+        // nobody listening and take the process down on an unhandled
+        // rejection. The real failure is reported through `work`.
+        enabled.catch(() => undefined);
         await client?.send('Runtime.runIfWaitingForDebugger', {}, sessionId);
-      })();
+        await enabled;
+      })().catch((error: unknown) => {
+        throw new Error(`could not prepare ${info.type} target ${info.url}: ${String(error)}`);
+      });
       setup.add(work);
       void work.finally(() => setup.delete(work));
     };
@@ -402,6 +452,7 @@ async function main(): Promise<void> {
       autoAttach: true,
       waitForDebuggerOnStart: true,
       flatten: true,
+      filter: AUTO_ATTACH_FILTER,
     });
 
     const created = await client.send('Target.createTarget', { url: 'about:blank' });
@@ -507,6 +558,74 @@ async function main(): Promise<void> {
     check('panel uses the iframe inset', Number(layout['panelTop']) === 18 && Number(layout['panelLeft']) === 18 && Number(layout['viewportWidth']) - Number(layout['panelRight']) === 18, layout);
     check('idle attachment surface rendered', String(rendered['panelText']).includes('Attach your agent'), rendered);
 
+    // --- navigation ------------------------------------------------------
+    //
+    // The widget now reclaims its attachment at document_start on every
+    // top-level page, and that same port is what tells the worker which origin
+    // the tab is on. This harness has no relay, daemon or paired agent, so it
+    // cannot hold a live attachment across the navigation; what it CAN prove is
+    // that the new document_start path runs on a real page without error and
+    // that the extension re-establishes its own isolated surface afterwards —
+    // including on a document whose origin the tab never approved.
+    const seenOverlayTargets = new Set<string>([frame.info.targetId]);
+
+    const navigate = async (label: string, destination: string): Promise<void> => {
+      await client!.send('Page.navigate', { url: destination }, page.sessionId);
+      page = await waitFor(`${label} navigation`, () => {
+        const target = [...sessions.values()].find((candidate) => candidate.info.targetId === pageTargetId);
+        return target?.info.url === destination ? target : undefined;
+      });
+      const next = await waitFor(`${label} overlay iframe`, () =>
+        [...sessions.values()].find((target) =>
+          target.info.type === 'iframe'
+          && /^chrome-extension:\/\/[^/]+\/overlay\.html#/.test(target.info.url)
+          && !seenOverlayTargets.has(target.info.targetId)));
+      seenOverlayTargets.add(next.info.targetId);
+      await Promise.all([...setup]);
+
+      const isolation = await waitFor<JsonObject>(`${label} isolation`, async () => {
+        const value = await evaluate<JsonObject | undefined>(client!, page.sessionId, `(() => {
+          const host = document.querySelector('[data-agentport-ui]');
+          if (!host) return undefined;
+          return {
+            hostCount: document.querySelectorAll('[data-agentport-ui]').length,
+            shadowRoot: host.shadowRoot,
+            visibleIframes: document.querySelectorAll('iframe').length,
+            frameCount: window.length,
+          };
+        })()`);
+        return value;
+      });
+      check(`${label}: one extension host after navigation`, isolation['hostCount'] === 1, isolation);
+      check(`${label}: host still exposes no shadow root`, isolation['shadowRoot'] === null, isolation);
+      check(`${label}: page still cannot enumerate the iframe`, isolation['visibleIframes'] === 0, isolation);
+      check(`${label}: window.frames still cannot enumerate the iframe`, isolation['frameCount'] === 0, isolation);
+
+      await waitFor(`${label} FAB`, async () => {
+        const didClick = await evaluate<boolean>(client!, next.sessionId, `(() => {
+          const button = document.querySelector('button.fab');
+          if (!button) return false;
+          button.click();
+          return true;
+        })()`, true);
+        return didClick ? true : undefined;
+      });
+      const panelText = await waitFor<string>(`${label} panel`, async () => {
+        const value = await evaluate<string | undefined>(client!, next.sessionId, `(() => {
+          const panel = document.querySelector('.panel');
+          return panel ? panel.textContent : undefined;
+        })()`);
+        return value === undefined || value === '' ? undefined : value;
+      });
+      // No agent is paired in this profile, so the only correct outcome is the
+      // idle attach surface: a hung reclaim or a session handed to this
+      // document would render something else.
+      check(`${label}: idle attachment surface rendered`, panelText.includes('Attach your agent'), panelText);
+    };
+
+    await navigate('same-origin navigation', `${origin}/second`);
+    await navigate('cross-origin navigation', `${otherOrigin}/hostile`);
+
     await delay(100);
     await Promise.all([...setup]);
     check('no runtime, console, or browser log errors', runtimeErrors.length === 0, runtimeErrors);
@@ -519,6 +638,7 @@ async function main(): Promise<void> {
     await client?.close().catch(() => undefined);
     if (browser) await stopChrome(browser);
     await closeServer(server).catch(() => undefined);
+    await closeServer(otherServer).catch(() => undefined);
     await rm(temporary, { recursive: true, force: true });
   }
 }

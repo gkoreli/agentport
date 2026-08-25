@@ -172,13 +172,31 @@ consent, in two layers:
 
 1. **Worker-held re-binding.** The service worker owns the relay socket and
    the session; a navigating document only orphans its binding. The next
-   document from the same origin + surface reclaims it (2-minute grace) —
-   nothing crosses the network.
+   document with the same *reclaim key* picks it up (2-minute grace) — nothing
+   crosses the network.
 2. **Relay-token resume.** If the worker itself was evicted and restarted, a
    resume record `{sessionId, agent, token}` in `chrome.storage.session`
    (extension contexts only, dies with the browser) lets it re-attach via
    `wallet.resumeSession`. Every resumed attachment performs a mandatory fresh
    sealing handshake; plaintext resume is not a protocol state.
+
+Both surfaces use that one lifecycle; only the key differs, and every part of
+it comes from the browser's own stamp on the connecting port (`src/lifecycle.ts`):
+
+- a page-declared surface is `page|<origin>|<surface name>`;
+- the widget is `widget|<origin>|<tab id>` — its surface name is
+  `document.title`, which changes on nearly every navigation;
+- a widget whose grant was harvested from the page's WebMCP registrations has
+  **no** key: those tools belong to that document, so the session ends with it.
+  So does any surface on an origin nobody could have consented to (an opaque
+  `"null"` origin, or no origin stamp at all).
+
+Leaving the origin is not a navigation the attachment follows. The content
+script opens its worker port at `document_start` in every top frame, so the
+worker sees the tab's new origin immediately and closes anything the tab was
+holding for a different one — a real `session.close` on the wire, not a parked
+session. A destination with no content script (chrome://, the PDF viewer, a
+download) or a closed tab still falls back to the 2-minute grace.
 
 The socket itself is kept alive by a 20s storage touch while sessions exist
 plus a `chrome.alarms` wake, and a dropped socket is redialed with backoff
