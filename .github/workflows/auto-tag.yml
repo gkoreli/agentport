@@ -114,6 +114,8 @@ jobs:
           npm run source:check
           npm run docs:check
           npm run e2e
+          npm run site:build
+          npm run wallet:build
 
       - name: Build release package
         env:
@@ -166,8 +168,7 @@ jobs:
         always() &&
         needs.prepare.result == 'success' &&
         needs.verify.result == 'success' &&
-        (needs.tag.result == 'success' || needs.tag.result == 'skipped') &&
-        (github.event_name == 'push' || inputs.deploy)
+        (needs.tag.result == 'success' || needs.tag.result == 'skipped')
       }}
     runs-on: ubuntu-latest
     environment: production
@@ -181,13 +182,15 @@ jobs:
           node-version: "24"
           package-manager-cache: false
 
+      - name: Install deployment dependencies
+        run: npm ci
+
       - name: Deploy matching Worker, relay, and wallet
+        if: github.event_name == 'push' || inputs.deploy
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
-        run: |
-          npm ci
-          npm run deploy:ci
+        run: npm run deploy:ci
 
       - uses: actions/download-artifact@v4
         with:
@@ -219,7 +222,7 @@ jobs:
         needs.prepare.result == 'success' &&
         needs.verify.result == 'success' &&
         (needs.tag.result == 'success' || needs.tag.result == 'skipped') &&
-        (needs.deploy.result == 'success' || needs.deploy.result == 'skipped') &&
+        needs.deploy.result == 'success' &&
         (needs.prepare.outputs.changed == 'true' || github.event_name == 'workflow_dispatch')
       }}
     runs-on: ubuntu-latest
