@@ -35,7 +35,8 @@
  * Prose says `daemon.ts` constantly and means it loosely; a path starting
  * `packages/` is claiming precision, and this holds it to that claim.
  */
-import { readdir, readFile, stat } from 'node:fs/promises';
+import { readdir, readFile } from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -75,14 +76,30 @@ async function* docs(dir: string): AsyncGenerator<string> {
   }
 }
 
-const exists = async (path: string): Promise<boolean> => {
-  try {
-    await stat(join(root, path));
-    return true;
-  } catch {
-    return false;
-  }
-};
+/**
+ * Citations resolve against what git TRACKS, not against this disk.
+ *
+ * `stat()` was the obvious implementation and it made this check
+ * machine-dependent: `site/public/connect.js` is a gitignored build artifact,
+ * so a citation naming it passed for everyone who had run a build and failed
+ * in a clean checkout. It shipped exactly that way — green locally, red in
+ * CI, on a release commit.
+ *
+ * That is the same defect as the citation form this file exists to refuse:
+ * a check that answers a question about the READER's ability to go and look,
+ * using evidence only the author has. A stranger cloning this repository gets
+ * the tracked tree and nothing else, so the tracked tree is the only honest
+ * definition of "exists" — and a build output is never a citable location,
+ * because there is no source in it to read.
+ */
+const tracked = new Set(
+  execFileSync('git', ['ls-files', '-z'], { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
+    .split('\0')
+    .filter(Boolean),
+);
+if (tracked.size === 0) throw new Error('git ls-files returned nothing; refusing to pass every citation vacuously');
+
+const exists = (path: string): boolean => tracked.has(path);
 
 console.log('documentation citations');
 
@@ -115,7 +132,7 @@ for await (const doc of docs(root)) {
     // Resolution needs an unambiguous path. Prose says `daemon.ts` loosely and
     // means it loosely; only a rooted path is claiming to be followable.
     if (!ROOTS.some((prefix) => path.startsWith(prefix))) continue;
-    if (!(await exists(path))) {
+    if (!exists(path)) {
       missingFile.push(`${where}: ${path}`);
       continue;
     }
