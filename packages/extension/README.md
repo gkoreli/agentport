@@ -187,8 +187,13 @@ consent, in two layers:
 2. **Relay-token resume.** If the worker itself was evicted and restarted, a
    resume record `{sessionId, agent, token}` in `chrome.storage.session`
    (extension contexts only, dies with the browser) lets it re-attach via
-   `wallet.resumeSession`. Every resumed attachment performs a mandatory fresh
-   sealing handshake; plaintext resume is not a protocol state.
+   `wallet.resumeSession` under the same extension-held Ed25519 identity.
+   Protocol v6 requires that identity's fresh EPK proof as well as the visible
+   token. Every resumed attachment performs a mandatory fresh sealing
+   handshake; plaintext or bearer-only resume is not a protocol state. After
+   success the fresh wallet retains the authenticated token, so another socket
+   loss rekeys the same handle again. An authenticated `revoked` denial clears
+   the stored record instead of retrying withdrawn authority.
 
 The socket itself is kept alive by a 20s storage touch while sessions exist
 plus a `chrome.alarms` wake, and a dropped socket is redialed with backoff

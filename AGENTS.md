@@ -84,9 +84,12 @@ section is the short implementation checklist, not a second protocol spec.
    are verified when a connection presents them and live only as long as the
    socket. The durable copies are at the edges: the daemon's identity file and
    the wallet's own store.
-2. **The grant is the boundary.** `AgentDaemon#callTool` rejects any tool not
-   in the session's grant and any call after `grant.expiresAt`. Enforced again
-   on the client, which only dispatches tools it registered.
+2. **Attachment authority is the boundary.** Its live lifetime is
+   `min(grant.expiresAt, delegation.expiresAt)` when a delegation exists.
+   `AgentDaemon#authorityError` enforces that boundary at prompt admission,
+   tool dispatch before and after approval, and late tool results;
+   `AgentDaemon#callTool` also rejects tools absent from the grant. The client
+   independently dispatches only tools it registered.
 3. **The relay stamps identity.** `session.open` forwards `client: <pubkey>`
    from the authenticated socket. Never trust a self-reported identity in a
    frame.
@@ -105,7 +108,8 @@ section is the short implementation checklist, not a second protocol spec.
    daemon re-checks `client === cert.user` itself — the invariant holds even
    against a lying relay.
 7. **Secret keys never cross the wire.** Only public keys, signatures, and
-   certs identify endpoints; attachment secrets remain in endpoint memory.
+   certs identify endpoints. A resumable page may keep its bounded attachment
+   key in per-tab `sessionStorage`; it never receives or persists the user root.
 8. **A page may answer for its own capability, never for the user's, and
    never as the user** (ADR-024 R11). A `site_tool` approval is the page's own
    function, so a site forging one gains nothing it did not already have —
@@ -146,7 +150,12 @@ section is the short implementation checklist, not a second protocol spec.
    never adopts a resumer's identity. A page reload persists only that bounded
    attachment secret beside the token in per-tab storage, never the user root.
    Grant, delegation, and revocation boundaries are all re-judged before a
-   fresh X25519 channel replaces the detached one.
+   fresh X25519 channel replaces the detached one. Protocol v6 is signed into
+   every EPK proof transcript, so a relay cannot split-negotiate an older proof
+   rule with one endpoint. After authenticated resume, `AgentWallet#attemptResume`
+   retains the token so the fresh wallet can survive another socket loss on the
+   same handle. `revoked` is terminal for page and extension resume records;
+   both clear the dead record rather than retrying withdrawn authority.
 
 These are mandatory acceptance properties. ADR-018 maps them to current
 evidence and names the remaining blocking coverage gaps. If you change routing
@@ -166,7 +175,7 @@ Open the demo, hit **Pair a new agent**, paste the code, then **Connect
 agent**. The daemon's pairing link (`/pair#code=…`) auto-fills the dialog.
 
 ```bash
-npm run e2e        # full loop over real sockets, no browser, 179 checks
+npm run e2e        # full loop over real sockets, no browser, 187 checks
 npm run webmcp:harvest # our belief about the WebMCP draft, checked
 npm run wire:check # wire validation: 521 fixture cases across all 45 frames
 npm run agui:check # every emitted AG-UI event parsed by @ag-ui/core's schemas
@@ -490,11 +499,9 @@ schemas admit, but do not call it JCS; it is not a certified implementation.
 Deliberately, this is the *same* function that canonicalizes cert and
 delegation bodies for signing: one dialect, not two that drift.
 
-Consequence: **the relay and the endpoints deploy together.** An older peer
-emitting insertion-order JSON is rejected visibly rather than slipped into an
-ambiguous-parse gap. The relay already rejected unknown frame types, so
-protocol changes already required deploying it first; this widens that to
-field-level changes.
+Consequence: **the relay and the endpoints cut over together.** Canonical form,
+field-level changes, and required security semantics are one hard protocol
+boundary. Protocol v6 has no v5 parser or proof fallback.
 
 Two rules that are easy to get wrong:
 
@@ -536,7 +543,7 @@ Working: pairing, cert issuance and verification, directory + presence,
 capability grants with TTL, prompt streaming, plan reporting, tool-call
 round-trip, approval round-trip, cancellation, reconnect with in-place session
 resume, session teardown, revocation, authority-tagged approvals, the agent
-asking its own user a question, and the full demo UI. 179 e2e checks and 521
+asking its own user a question, and the full demo UI. 187 e2e checks and 521
 wire-validation cases pass.
 
 Not built yet, in rough priority order:
@@ -599,13 +606,16 @@ Not built yet, in rough priority order:
    (`revoke`/`revoked`, owner-key only, never a delegated page key), a daemon
    `revoke()`/`unpair()`, and `agentport status|revoke|unpair` over the
    control file. Revoked means **unresumable at the daemon**, not just closed
-   — the client redials by itself now.
+   — the client redials by itself now — and an authenticated `revoked` denial
+   clears the page or extension resume record that would otherwise retry it.
 6. ~~Reconnect + session resume.~~ **Done.** An unexpected socket close
    redials with bounded backoff and re-resumes every live session in place, so
    the page keeps the handle (and the listeners) it already had. Fresh keys per
    ADR-003 mean the fingerprint words change, which the panel shows as
-   persistent state. e2e section 12b kills the socket from outside and proves
-   the same handle still drives the agent.
+   persistent state. A fresh wallet also adopts the authenticated token after
+   resume, so another socket loss rekeys that same handle again. e2e section
+   12b kills the socket from outside and proves the same handle still drives
+   the agent; section 19 proves the fresh-wallet path.
 
 ## Transport, and why not Tailscale
 
@@ -627,7 +637,9 @@ self-hosting — `AGENTPORT_RELAY=wss://your-own-host/relay` runs the identical
 **Shipped (ADR-003):** session content is sealed end-to-end. Each attachment
 mints an ephemeral X25519 keypair, proves it with an Ed25519 signature from its
 identity key (`epk`/`epkSig` on session.open/opened/resume, scope-bound so
-proofs cannot be replayed across sessions), derives a key via HKDF-SHA256, and
+proofs cannot be replayed across sessions and signed over `PROTOCOL_VERSION`
+so a relay cannot split-negotiate an older proof transcript), derives a key
+via HKDF-SHA256, and
 every content frame crosses the relay as `{t:'enc', s, n, c}` under
 XChaCha20-Poly1305. The relay cannot see content or its inner frame type.
 Lifecycle frames remain clear: notably surface metadata, the capability grant

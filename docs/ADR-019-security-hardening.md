@@ -162,12 +162,13 @@ Add direct, non-vacuous tests for every ADR-018 enforcement row. At minimum:
   and certificate replay;
 - substitution of self-reported client or agent identity against the relay
   stamp and daemon re-check;
-- expired grant at open, tool call, approval return, detach, and resume
-  boundaries;
+- expired authority at open and detach remains required; live prompt
+  admission, tool dispatch on both sides of approval, late tool results, and
+  resume are now covered using the minimum of grant and delegation expiry;
 - every forbidden client/agent lifecycle and sealed inner-frame direction;
 - non-participant injection for lifecycle and ciphertext frames;
-- handshake-proof replay across session, mode, surface, grant, peer, and resume
-  authority;
+- handshake-proof replay across protocol version, session, mode, surface,
+  grant, peer, and resume authority;
 - old attachment ciphertext rejected after resume;
 - old and resumed attachments demonstrably derive different keys;
 - identity-bound resume-token theft after forced detach and live-session
@@ -408,7 +409,7 @@ Evidence: `npm run wire:check` — 521 fixture cases across all 45 frame types
 (valid, boundary-accepted, missing/unknown/wrong-type/oversize/deep, and raw
 hostile seeds including non-canonical and `__proto__` smuggles), a coverage
 gate over `FRAME_SCHEMAS`, programmatic bounds, and sealed-path checks on real
-crypto. `npm run e2e` — 179 checks over real sockets. `npm run integration`
+crypto. `npm run e2e` — 187 checks over real sockets. `npm run integration`
 against a local relay — full ACP-shaped stack. `npm run ui:smoke` — 49 checks.
 `npm run typecheck` plus the four out-of-references projects and
 `npm run check:extension`.
@@ -425,11 +426,12 @@ caps and sweeps.
 
 Two behavioral consequences worth stating plainly:
 
-1. **Deployment is lockstep.** Canonical form and strict types mean a peer
-   running older code is rejected. The relay already rejected unknown frame
-   types, so protocol changes already required deploying it first; this widens
-   that to field-level changes. `scripts/deploy.ts` ships the Worker and the
-   wallet together.
+1. **Deployment is lockstep.** Canonical form, strict types, and required
+   security semantics are one protocol release. Protocol v6 signs its version
+   into every EPK proof transcript so a relay cannot split-negotiate a legacy
+   proof. The relay, Worker/browser artifacts, wallet, daemon CLI, and extension
+   cut over together; there is no v5 fallback. `scripts/deploy.ts` ships the
+   Worker and wallet together.
 2. **`session.opened`/`connect.begin` without sealing proofs die at the relay's
    decoder**, not at the daemon — the schema requires `epk`/`epkSig`. The
    daemon's `sealing_required` check is NOT dead and was not deleted: `client`

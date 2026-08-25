@@ -72,9 +72,11 @@ prologue, and failure rules are the normative design reference; libsodium's
 
 - Per-attachment **ephemeral X25519** keypairs, exchanged in the session-open
   frames. Ed25519 proofs bind the epks to the canonical handshake context:
-  session/mode, both peers, surface, capability grant, and resume authority as
-  applicable. The relay cannot swap keys or rewrite lifecycle metadata without
-  invalidating the handshake. Resume re-runs the exchange.
+  protocol version, session/mode, both peers, surface, capability grant, and
+  resume authority as applicable. Signing the version prevents a relay from
+  split-negotiating an older proof transcript with one endpoint. The relay
+  cannot swap keys or rewrite lifecycle metadata without invalidating the
+  handshake. Resume re-runs the exchange.
 - Shared secret → **HKDF-SHA256** (session id and direction as info) → separate
   client→agent and agent→client keys. Each direction owns a strict monotonic
   64-bit nonce; tampering, replay, reordering, or exhaustion fails closed.
@@ -638,9 +640,9 @@ path for session content.
    frames are sealed. Missing or invalid key material never selects a weaker
    transport.
 2. **Authenticate the entire decision context.** Ephemeral-key proofs bind the
-   mode, peers, surface, capability grant, and resume authority applicable to
-   that exchange. Cleartext lifecycle metadata may be observed, but cannot be
-   rewritten undetectably.
+   protocol version, mode, peers, surface, capability grant, and resume
+   authority applicable to that exchange. Cleartext lifecycle metadata may be
+   observed, but cannot be rewritten or split-negotiated undetectably.
 3. **Least authority, for one attachment.** A grant names the only site tools
    available, records approval policy, and expires. The daemon and client both
    enforce it; the relay is not a capability authority.
@@ -665,7 +667,7 @@ path for session content.
 | Site/surface | Its tool implementations and results; prompts and agent output intentionally delivered to its tab | Untrusted requester and application-side plaintext consumer. The wallet/client is the cryptographic endpoint. Site content and tool results are hostile input. In the in-page demo the site can also reach the demo wallet key, which is why that arrangement is not a production custody boundary. |
 | Wallet/client | User identity key, owned-agent certs, grant decision, site-tool dispatch, attachment keys | Trusted endpoint. Production custody and approvals belong behind the extension boundary. |
 | Relay | Public identities and certs, lifecycle frames, live routing state, ciphertext metadata | Untrusted for content confidentiality and integrity; relied on only for availability, rendezvous, identity stamping, and best-effort routing. Endpoint checks remain valid against a lying relay. |
-| Daemon | Agent device key and cert, grants, resume tokens, attachment keys, transcript/runtime session mapping | Trusted endpoint and final policy authority. It re-checks ownership, grant expiry, tool membership, approvals, resume authority, and client frame types. |
+| Daemon | Agent device key and cert, grants, resume tokens, attachment keys, transcript/runtime session mapping | Trusted endpoint and final policy authority. It re-checks ownership, the minimum of grant/delegation expiry throughout live traffic, tool membership, approvals, resume authority, and client frame types. |
 | ACP runtime | Plaintext conversation and the user's own runtime capabilities | User-selected trusted computing base, but model output and retrieved content are not trusted instructions. Runtime auto-approval is forbidden. |
 | Network observer | TLS records outside the relay; timing and endpoints | TLS protects each relay leg. E2EE additionally protects content from the TLS-terminating relay. |
 
@@ -772,13 +774,18 @@ The daemon owns resume authority and rejects token guessing with a bounded
 attempt count, constant-time comparison, and a generic unprovable-session
 response. Because the relay sees a valid token, resume additionally requires
 an EPK proof by the Ed25519 client identity captured at open. That stored
-identity is immutable: a resumer cannot replace it.
+identity is immutable: a resumer cannot replace it. Protocol v6 is part of the
+signed EPK transcript, so a relay cannot pair a current endpoint with an older
+versionless proof rule.
 
 ### Capability, content, and provenance boundaries
 
-- The daemon rejects expired grants and tools absent from the grant. The
-  client dispatches only tools registered for that session. Approval defaults
-  to denial; drop-in approval moves to the daemon rather than disappearing.
+- The daemon treats attachment lifetime as the minimum of grant and delegation
+  expiry. It checks that boundary at prompt admission, tool dispatch before and
+  after approval, and late tool results, and rejects tools absent from the
+  grant. The client dispatches only tools registered for that session.
+  Approval defaults to denial; drop-in approval moves to the daemon rather
+  than disappearing.
 - Because the relay cannot inspect encrypted inner types, both endpoints
   enforce which content-frame types the peer may originate. Relay-side role
   checks remain for visible lifecycle frames and session membership.
@@ -791,7 +798,8 @@ identity is immutable: a resumer cannot replace it.
   capability only in per-tab storage. The extension also
   records the origin/name lookup key and grant expiry in extension-only session
   storage. A resume token is a bearer secret scoped to its existing session
-  and still bounded by the original grant and expiry.
+  and still bounded by the original grant and expiry; it is never sufficient
+  without proof by the original attachment identity.
 - X25519 sealing keys live only in endpoint memory and are replaced on every
   resume. A resumable page attachment's bounded Ed25519 identity lives beside
   its token until the tab/session ends. JavaScript cannot guarantee physical
@@ -821,10 +829,10 @@ identity is immutable: a resumer cannot replace it.
 |---|---|---|
 | Ownership cert cannot be forged or rebound | protocol signature helpers; relay identify; daemon owner re-check | invalid cert/binding checks in `scripts/e2e.ts` |
 | Relay-stamped identity is authoritative | relay session routing; daemon open/resume handling | self-reported identity substitution test |
-| Grant is the tool boundary | daemon `callTool`; client session dispatcher | ungranted and expired tool checks |
+| Attachment authority is the live boundary | daemon `#authorityError` and `callTool`; client session dispatcher | ungranted tools plus prompt, approval/dispatch, late-result, and resume expiry checks |
 | Only participants and valid roles speak | relay membership/origination checks; endpoint inner-type allowlists | cross-role and non-participant injection checks |
 | Content is always sealed | protocol sealing; wallet and daemon send/receive boundaries | on-path observer plus plaintext-proof stripping checks |
-| Handshake metadata cannot be rewritten | canonical epk proof bindings | grant-rewrite and missing/invalid proof checks |
+| Handshake metadata or version cannot be rewritten | canonical epk proof bindings including `PROTOCOL_VERSION` | grant-rewrite, missing/invalid proof, and legacy versionless-proof checks |
 | Ciphertext is ordered and authentic | channel counter and AEAD state | tamper, replay, wrong-AAD, and counter tests |
 | Resume preserves identity and authority while rekeying | daemon-owned token/client/grant/delegation state; fresh endpoint epks | malicious-relay token theft after forced detach, legitimate same-identity recovery, authorization expiry, live-session replacement, and rekey checks |
 | Conversation remains at the edge | daemon/runtime history; relay count-and-drop behavior | refresh replay proves history came from agent side |
@@ -842,10 +850,11 @@ assertion cannot fail for the claimed property does not count as evidence.
   TypeScript types inferred from them.
 - The E2E suite covers ownership denial, grant restriction, approval refusal,
   on-path observation, tampering, replay, proof stripping, grant rewriting,
-  identity-bound resume-token theft after forced detach, and edge-owned
-  history. It does not yet directly attack invalid cert rebinding,
-  self-reported identity replacement outside resume, grant expiry outside the
-  resume boundary, or
+  identity-bound resume-token theft after forced detach, live grant/delegation
+  expiry at prompt, tool approval/dispatch, late-result and resume boundaries,
+  and edge-owned history. It does not yet directly attack invalid cert
+  rebinding, self-reported identity replacement outside resume, expiry at open
+  or detach, or
   every cross-role/non-participant route. Those rows above remain required
   test work, not implied coverage. (Old and resumed attachment keys *are* now
   compared — e2e asserts the fingerprint words change across a rekey, since
@@ -877,9 +886,10 @@ Any change to identity, pairing, lifecycle fields, grants, routing, sealing,
 resume, consent placement, persistence, or transcript handling must update
 this record and its adversarial tests in the same change. New cryptographic
 design must cite an open standard or established implementation, preserve
-browser compatibility, and receive focused review. Backward compatibility may
-justify a new explicit protocol version; it never justifies accepting
-plaintext or unauthenticated content under the current version.
+browser compatibility, and receive focused review. A wire or
+required-semantics change requires a new explicit protocol version and
+coordinated relay/endpoints cutover; it never justifies a fallback to
+plaintext, unauthenticated content, or an older proof rule.
 
 **Consequences.** Security claims now have one reviewable source tied to code
 and executable evidence. The cost is intentional: protocol changes carry a

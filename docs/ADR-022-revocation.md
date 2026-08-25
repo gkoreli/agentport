@@ -108,17 +108,17 @@ session **unresumable at the daemon**, not merely closed. Both `session.open`
 and `session.resume` consult the tombstones.
 
 For resume that means retaining the `SessionDelegation` on the session rather
-than collapsing it to a boolean, because a resume presents **only a bearer
-token** — it proves possession, never identity, and the hosted flow resumes
-from a freshly minted page key by construction (`site/src/connect.ts` mints a
-new keypair on every load). So the delegation is the only thing left tying a
-detached attachment to an origin the user may since have cut off.
+than collapsing it to a boolean. When this ADR first shipped, resume presented
+only a bearer token and the hosted flow minted a new page key on reload. That
+made the delegation the only remaining origin binding and was later found to
+let a relay-observed token transfer the E2EE endpoint.
 
-An earlier draft of this ruling said resume would gain "the ownership check it
-has never had". That was wrong, and the code says so: an identity check on
-resume would break refresh-resume for every hosted-wallet session. Resume
-being a bearer token is a deliberate, documented property (ADR-018), and the
-tombstone is the check that a token cannot walk past.
+Protocol v6 corrects that historical design. The hosted page persists the
+original bounded attachment identity beside the token, and resume requires a
+fresh EPK proof by that identity. The tombstone remains independently
+load-bearing: identity proves *which attachment* is returning, while
+revocation decides whether that same attachment's origin authority still
+exists.
 
 The tombstone on resume is load-bearing in its own right, not a belt on top of
 teardown: `agentport revoke` writes the tombstone and never talks to the
@@ -156,6 +156,11 @@ Sessions closed by revocation close with reason `revoked`. Not the origin, not
 a count, not a message. ADR-019 §5 requires a stable reason revealing no
 content; ADR-019 §1 forbids reflecting input into a frame. The client learns
 that its authority ended and nothing about anyone else's.
+
+`revoked` is also a terminal authenticated resume denial. The drop-in and
+extension clear their matching stored resume records when they receive it;
+otherwise every later page load or worker wake would retry authority the user
+has permanently withdrawn.
 
 ### R8. The instruction crosses the relay as an owner-only lifecycle frame
 
@@ -239,6 +244,8 @@ The e2e section must prove, over real sockets:
 2. **Then force the socket to drop, and assert the client's automatic
    redial-and-re-resume comes back denied rather than reattached.** A check
    that only proves the socket died would pass while the property is broken.
+   The page and extension treat the authenticated `revoked` result as terminal
+   cleanup for the matching resume record.
 3. A still-valid delegation for a revoked origin cannot open a *new* session.
 4. A delegation issued *after* the revocation instant works — the tombstone is
    not a denylist.
