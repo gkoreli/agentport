@@ -88,6 +88,8 @@ class FakeRelay {
   // same relay, which still knows the session it is routing.
   static surface: unknown;
   static grant: unknown;
+  /** Authenticated daemon denial used to exercise permanent-record cleanup. */
+  static resumeDenial: string | undefined;
   /**
    * What the daemon says this attachment may do with the agent's OWN tools
    * (ADR-024 R11). Mutable so the panel can be watched changing its mind on a
@@ -165,6 +167,10 @@ class FakeRelay {
       });
     }
     if (frame.t === 'session.resume') {
+      if (FakeRelay.resumeDenial) {
+        this.#reply({ t: 'session.denied', s: String(frame.s), reason: FakeRelay.resumeDenial });
+        return;
+      }
       // The daemon answers a resume with FRESH keys (ADR-003): the reattached
       // session must be sealed under a new channel, not the dead one.
       const mine = generateSealKeyPair();
@@ -304,6 +310,34 @@ check(
   FakeRelay.clients[1] === FakeRelay.clients[0],
   FakeRelay.clients,
 );
+
+// That successful resume happened in a fresh AgentWallet. Its next socket
+// loss must reuse the same token and rekey the handle it just returned; this
+// is the in-memory half of surviving more than one navigation/network event.
+let freshHandleReattached = false;
+resumedFromRecord?.session.on('reattached', () => {
+  freshHandleReattached = true;
+});
+const dialsBeforeFreshLoss = FakeRelay.dialled.length;
+FakeRelay.latest!.kill();
+await new Promise((resolve) => setTimeout(resolve, 1200));
+check(
+  'a fresh resumed wallet redials after its next socket loss',
+  FakeRelay.dialled.length > dialsBeforeFreshLoss,
+  FakeRelay.dialled.length,
+);
+check('the fresh wallet rekeys the same resumed handle', freshHandleReattached, freshHandleReattached);
+check('the twice-attached handle remains live', resumedFromRecord?.session.closed === false);
+
+// Revocation is authenticated by the same signed resume exchange as the
+// other permanent denials. Keeping this record would make every later page
+// load retry authority the owner has permanently withdrawn.
+window.sessionStorage.setItem('agentport.session:Revoked', JSON.stringify({ ...storedResume, surface: 'Revoked' }));
+FakeRelay.resumeDenial = 'revoked';
+const revokedResume = await AgentPortConnect.resume({ name: 'Revoked', tools: inkwellUiTools });
+check('an authenticated revoked denial starts fresh', revokedResume === null);
+check('the revoked resume record is cleared', window.sessionStorage.getItem('agentport.session:Revoked') === null);
+FakeRelay.resumeDenial = undefined;
 FakeRelay.latest = panelRelay;
 
 console.log('\n5. panel AG-UI path');

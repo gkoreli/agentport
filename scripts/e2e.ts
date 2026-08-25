@@ -2639,10 +2639,23 @@ console.log('\n19. delegated resume, and a runtime that ignores its policy');
   // A runtime that asks REGARDLESS of what its policy said — the peer we do
   // not control, and the case capability negotiation alone cannot cover.
   const askAttempted: boolean[] = [];
+  const runtimePrompts: string[] = [];
+  const crossingToolOutcomes: string[] = [];
   class DisobedientRuntime implements AgentRuntime {
     readonly name = 'disobedient';
     openSession(): void {}
-    async prompt(_text: string, ctx: TurnContext): Promise<void> {
+    async prompt(text: string, ctx: TurnContext): Promise<void> {
+      runtimePrompts.push(text);
+      if (text === 'cross the delegation boundary') {
+        try {
+          await ctx.callTool('page.slow', {});
+          crossingToolOutcomes.push('completed');
+        } catch (err) {
+          crossingToolOutcomes.push(err instanceof Error ? err.message : String(err));
+        }
+        ctx.say('done');
+        return;
+      }
       const answers = await ctx.ask({ message: 'Who are you really?', fields: [{ key: 'who', label: 'You' }] });
       askAttempted.push(answers !== undefined);
       ctx.say('done');
@@ -2666,7 +2679,23 @@ console.log('\n19. delegated resume, and a runtime that ignores its policy');
 
   const pageKeys = generateKeyPair();
   const origin19 = 'https://delegated-resume.test';
-  const grant19 = buildGrant({ surface: { name: 'Delegated' }, tools: [], ttlMs: 2 * 60 * 60 * 1000 });
+  const toolStarted19 = new Deferred<void>();
+  const releaseTool19 = new Deferred<void>();
+  const crossingTool19: SiteTool = {
+    name: 'page.slow',
+    description: 'A site tool held across the delegation deadline',
+    inputSchema: { type: 'object', properties: {} },
+    handler: async () => {
+      toolStarted19.resolve();
+      await releaseTool19.promise;
+      return { completed: true };
+    },
+  };
+  const grant19 = buildGrant({
+    surface: { name: 'Delegated' },
+    tools: [crossingTool19],
+    ttlMs: 2 * 60 * 60 * 1000,
+  });
   const issued19 = now19;
   const approved19 = {
     grant: grant19,
@@ -2685,7 +2714,7 @@ console.log('\n19. delegated resume, and a runtime that ignores its policy');
     agent: agent19.publicKey,
     approved: approved19,
     surface: { name: 'Delegated', origin: origin19 },
-    tools: [],
+    tools: [crossingTool19],
   });
 
   // The page must NEVER be asked on this tier, even by a runtime that tries.
@@ -2704,11 +2733,21 @@ console.log('\n19. delegated resume, and a runtime that ignores its policy');
   firstTab.disconnect();
   await new Promise((resolve) => setTimeout(resolve, 250));
 
-  const secondTab = new AgentWallet({ relayUrl: url19, userSecretKey: pageKeys.secretKey, socketFactory });
+  const secondTabSockets: NodeWebSocket[] = [];
+  const secondTabSocketFactory = (url: string) => {
+    const socket = new NodeWebSocket(url);
+    secondTabSockets.push(socket);
+    return socket as never;
+  };
+  const secondTab = new AgentWallet({
+    relayUrl: url19,
+    userSecretKey: pageKeys.secretKey,
+    socketFactory: secondTabSocketFactory,
+  });
   await secondTab.connect();
   let resumeFailure = '';
   const resumed19 = await secondTab
-    .resumeSession({ id: delegated19.id, agent: agent19.publicKey, token: token19, tools: [] })
+    .resumeSession({ id: delegated19.id, agent: agent19.publicKey, token: token19, tools: [crossingTool19] })
     .catch((err: Error) => {
       resumeFailure = err.message;
       return undefined;
@@ -2720,9 +2759,81 @@ console.log('\n19. delegated resume, and a runtime that ignores its policy');
     resumed19?.session.info.agentName,
   );
 
-  // The grant deliberately lives an hour longer than the root-signed
-  // delegation. Resume must re-check that outer authorization boundary, not
-  // merely the token, grant, and revocation tombstone.
+  // The wallet above is FRESH: it learned this attachment from the resume
+  // record rather than from session.open. Kill its next socket and require
+  // automatic recovery to rekey the SAME handle. Every wait is bounded so a
+  // missing token reports the bug instead of hanging the suite.
+  if (resumed19) {
+    const reattached19 = new Deferred<boolean>();
+    resumed19.session.on('reattached', () => reattached19.resolve(true));
+    const reconnected19 = new Deferred<{ sessions: number; missed: number }>();
+    secondTab.on('reconnected', (event) => reconnected19.resolve(event));
+    secondTabSockets.at(-1)!.terminate();
+
+    const restoredAgain = await Promise.race([
+      reconnected19.promise,
+      new Promise<'deadline'>((resolve) => setTimeout(() => resolve('deadline'), 10_000)),
+    ]);
+    check(
+      'a freshly resumed wallet automatically restores the attachment after its next socket loss',
+      restoredAgain !== 'deadline' && restoredAgain.sessions === 1,
+      restoredAgain,
+    );
+    const sameHandleReattached = await Promise.race([
+      reattached19.promise,
+      new Promise<false>((resolve) => setTimeout(() => resolve(false), 2_000)),
+    ]);
+    check('the fresh wallet rekeys the same session handle', sameHandleReattached === true, sameHandleReattached);
+    const sameHandleReply = await Promise.race([
+      resumed19.session.prompt('same handle after the second socket').catch((err: Error) => err.message),
+      new Promise<'deadline'>((resolve) => setTimeout(() => resolve('deadline'), 3_000)),
+    ]);
+    check('the twice-attached handle still drives the agent', sameHandleReply === 'done', sameHandleReply);
+
+    // The grant lives an hour longer than the root-signed delegation. Keep
+    // the socket connected, begin the call while both are live, then cross
+    // only the delegation boundary before the page answers it.
+    const crossingPrompt19 = resumed19.session
+      .prompt('cross the delegation boundary')
+      .then(() => 'settled')
+      .catch((err: Error) => err.message);
+    const toolReachedPage19 = await Promise.race([
+      toolStarted19.promise.then(() => true),
+      new Promise<false>((resolve) => setTimeout(() => resolve(false), 3_000)),
+    ]);
+    check('the site tool began before delegation expiry', toolReachedPage19 === true, toolReachedPage19);
+    now19 = issued19 + 60 * 60 * 1000 + 1;
+    releaseTool19.resolve();
+    const crossingSettled19 = await Promise.race([
+      crossingPrompt19,
+      new Promise<'deadline'>((resolve) => setTimeout(() => resolve('deadline'), 3_000)),
+    ]);
+    check('the crossing tool call settles rather than hanging', crossingSettled19 !== 'deadline', crossingSettled19);
+    check(
+      'a site tool result crossing delegation expiry is refused',
+      crossingToolOutcomes.some((outcome) => outcome.includes('delegation authorization expired')),
+      crossingToolOutcomes,
+    );
+
+    const promptsBeforeExpiryRefusal = runtimePrompts.length;
+    const liveExpiredPrompt = await Promise.race([
+      resumed19.session.prompt('new prompt after delegation expiry').then(() => 'completed').catch((err: Error) => err.message),
+      new Promise<'deadline'>((resolve) => setTimeout(() => resolve('deadline'), 3_000)),
+    ]);
+    check(
+      'a still-connected delegated attachment refuses new prompts after delegation expiry',
+      liveExpiredPrompt.includes('delegation authorization expired'),
+      liveExpiredPrompt,
+    );
+    check(
+      'the expired prompt never reaches the runtime',
+      runtimePrompts.length === promptsBeforeExpiryRefusal,
+      runtimePrompts,
+    );
+  }
+
+  // Resume must re-check that same outer authorization boundary, not merely
+  // the token, grant, and revocation tombstone.
   secondTab.disconnect();
   await new Promise((resolve) => setTimeout(resolve, 250));
   now19 = issued19 + 60 * 60 * 1000 + 1;
@@ -2735,7 +2846,7 @@ console.log('\n19. delegated resume, and a runtime that ignores its policy');
   await afterAuthorization.connect();
   const expiredAuthorization = await Promise.race([
     afterAuthorization
-      .resumeSession({ id: delegated19.id, agent: agent19.publicKey, token: token19, tools: [] })
+      .resumeSession({ id: delegated19.id, agent: agent19.publicKey, token: token19, tools: [crossingTool19] })
       .then(() => 'resumed')
       .catch((err: Error) => err.message),
     new Promise<string>((resolve) => setTimeout(() => resolve('deadline'), 3_000)),
