@@ -41,11 +41,22 @@ interface TargetInfo {
 interface SessionTarget {
   sessionId: string;
   info: TargetInfo;
+  lifecycle: 'preparing' | 'prepared' | 'retired';
+  failure?: Error;
+}
+
+/** A flattened auto-attach session ceased to exist before CDP answered. */
+class CdpSessionDetachedError extends Error {
+  constructor(readonly sessionId: string) {
+    super(`CDP target session ${sessionId} detached before it answered`);
+  }
 }
 
 class CdpClient {
   readonly #socket: WebSocket;
   readonly #pending = new Map<number, {
+    sessionId?: string;
+    timer: ReturnType<typeof setTimeout>;
     resolve: (value: JsonObject) => void;
     reject: (error: Error) => void;
   }>();
@@ -67,7 +78,10 @@ class CdpClient {
       for (const listener of this.#listeners) listener(message);
     });
     socket.on('close', () => {
-      for (const pending of this.#pending.values()) pending.reject(new Error('Chrome DevTools connection closed'));
+      for (const pending of this.#pending.values()) {
+        clearTimeout(pending.timer);
+        pending.reject(new Error('Chrome DevTools connection closed'));
+      }
       this.#pending.clear();
     });
   }
@@ -96,6 +110,8 @@ class CdpClient {
         rejectResult(new Error(`CDP ${method} did not answer within ${TIMEOUT_MS}ms`));
       }, TIMEOUT_MS);
       this.#pending.set(id, {
+        sessionId,
+        timer,
         resolve: (value) => {
           clearTimeout(timer);
           resolveResult(value);
@@ -107,6 +123,21 @@ class CdpClient {
       });
       this.#socket.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }));
     });
+  }
+
+  /**
+   * A flattened auto-attach session is not a durable target handle. Chrome can
+   * tear down a service worker while its startup commands are in flight, and
+   * then never reply to those commands. Turn that observable lifecycle event
+   * into a bounded rejection instead of waiting for each command's deadline.
+   */
+  rejectSession(sessionId: string): void {
+    for (const [id, pending] of this.#pending) {
+      if (pending.sessionId !== sessionId) continue;
+      this.#pending.delete(id);
+      clearTimeout(pending.timer);
+      pending.reject(new CdpSessionDetachedError(sessionId));
+    }
   }
 
   async close(): Promise<void> {
@@ -299,6 +330,14 @@ function targetInfo(value: unknown): TargetInfo | undefined {
   };
 }
 
+function targetInfos(response: JsonObject): TargetInfo[] {
+  const value = response['targetInfos'];
+  if (!Array.isArray(value)) throw new Error('Target.getTargets returned no targetInfos array');
+  const infos = value.map(targetInfo);
+  if (infos.some((info) => !info)) throw new Error('Target.getTargets returned malformed target info');
+  return infos as TargetInfo[];
+}
+
 function remoteValue(response: JsonObject): unknown {
   const exception = response['exceptionDetails'];
   if (exception && typeof exception === 'object') {
@@ -365,8 +404,28 @@ async function main(): Promise<void> {
     const setup = new Set<Promise<void>>();
     const runtimeErrors: string[] = [];
 
+    const assertTargetPreparation = (): void => {
+      const failed = [...sessions.values()].find((target) => target.failure);
+      if (failed) throw failed.failure;
+    };
+
+    const settleCurrentPreparation = async (): Promise<void> => {
+      await Promise.all([...setup]);
+      assertTargetPreparation();
+    };
+
     const prepare = (sessionId: string, info: TargetInfo): void => {
-      sessions.set(sessionId, { sessionId, info });
+      const existing = sessions.get(sessionId);
+      // `attachedToTarget` identifies an attachment, not a target. Do not
+      // queue a second resume if Chrome repeats the notification for the same
+      // live attachment; a second `runIfWaitingForDebugger` has no separate
+      // paused target to resume.
+      if (existing) {
+        existing.info = info;
+        return;
+      }
+      const target: SessionTarget = { sessionId, info, lifecycle: 'preparing' };
+      sessions.set(sessionId, target);
       const work = (async () => {
         // Queue the domain enables ahead of the resume so no early event is
         // missed, but do NOT await their replies first: a target paused at
@@ -390,11 +449,16 @@ async function main(): Promise<void> {
         enabled.catch(() => undefined);
         await client?.send('Runtime.runIfWaitingForDebugger', {}, sessionId);
         await enabled;
+        target.lifecycle = 'prepared';
       })().catch((error: unknown) => {
-        throw new Error(`could not prepare ${info.type} target ${info.url}: ${String(error)}`);
+        // The detach event above is the only evidence that permits treating a
+        // missing reply as normal target retirement. In particular, a timeout,
+        // a CDP error, or a worker that never appeared remains a test failure.
+        if (error instanceof CdpSessionDetachedError && target.lifecycle === 'retired') return;
+        target.failure = new Error(`could not prepare ${target.info.type} target ${target.info.url}: ${String(error)}`);
       });
       setup.add(work);
-      void work.finally(() => setup.delete(work));
+      void work.then(() => setup.delete(work));
     };
 
     client.onEvent((message) => {
@@ -402,6 +466,15 @@ async function main(): Promise<void> {
         const sessionId = message.params?.['sessionId'];
         const info = targetInfo(message.params?.['targetInfo']);
         if (typeof sessionId === 'string' && info) prepare(sessionId, info);
+        return;
+      }
+      if (message.method === 'Target.detachedFromTarget') {
+        const sessionId = message.params?.['sessionId'];
+        if (typeof sessionId !== 'string') return;
+        const target = sessions.get(sessionId);
+        if (!target || target.lifecycle === 'retired') return;
+        target.lifecycle = 'retired';
+        client?.rejectSession(sessionId);
         return;
       }
       if (message.method === 'Target.targetInfoChanged') {
@@ -430,6 +503,43 @@ async function main(): Promise<void> {
       }
     });
 
+    const discoverExtensionWorker = async (extensionOrigin: string): Promise<SessionTarget> => {
+      const workerUrl = `${extensionOrigin}/sw.js`;
+      const deadline = Date.now() + TIMEOUT_MS;
+      while (Date.now() < deadline) {
+        assertTargetPreparation();
+        // Discovery is separate from auto-attach: this Chrome build does not
+        // report the extension's MV3 worker through the page's related-target
+        // tree, but the browser target directory still exposes it.
+        const info = targetInfos(await client!.send('Target.getTargets')).find((candidate) =>
+          candidate.type === 'service_worker' && candidate.url === workerUrl);
+        if (!info) {
+          await delay(50);
+          continue;
+        }
+
+        const existing = [...sessions.values()].find((target) =>
+          target.info.targetId === info.targetId && target.lifecycle !== 'retired');
+        if (existing) {
+          await settleCurrentPreparation();
+          return existing;
+        }
+
+        // `attachedToTarget` is issued for an explicit attach too, but prepare
+        // from the returned session id as well so ordering of that event cannot
+        // turn a successful attach into a missing setup.
+        const attached = await client!.send('Target.attachToTarget', { targetId: info.targetId, flatten: true });
+        const sessionId = attached['sessionId'];
+        if (typeof sessionId !== 'string') throw new Error('Target.attachToTarget returned no session id');
+        prepare(sessionId, info);
+        const worker = sessions.get(sessionId);
+        if (!worker) throw new Error('Target.attachToTarget did not create a tracked session');
+        await settleCurrentPreparation();
+        return worker;
+      }
+      throw new Error(`timed out discovering unpacked extension service worker ${workerUrl}`);
+    };
+
     await client.send('Target.setDiscoverTargets', { discover: true });
     await client.send('Target.setAutoAttach', {
       autoAttach: true,
@@ -443,7 +553,7 @@ async function main(): Promise<void> {
 
     let page = await waitFor('auto-attached host page', () =>
       [...sessions.values()].find((target) => target.info.targetId === pageTargetId));
-    await Promise.all([...setup]);
+    await settleCurrentPreparation();
     await client.send('Page.enable', {}, page.sessionId);
     await client.send('Page.navigate', { url }, page.sessionId);
 
@@ -455,7 +565,12 @@ async function main(): Promise<void> {
     const frame = await waitFor('extension overlay iframe', () =>
       [...sessions.values()].find((target) =>
         target.info.type === 'iframe' && /^chrome-extension:\/\/[^/]+\/overlay\.html#/.test(target.info.url)));
-    await Promise.all([...setup]);
+    await settleCurrentPreparation();
+    // WHATWG URL treats extension schemes as opaque and reports `origin` as
+    // "null" in Node. Chrome still gives every unpacked extension a stable,
+    // browser-stamped protocol/host pair; build that exact origin explicitly.
+    const extensionUrl = new URL(frame.info.url);
+    const extensionOrigin = `${extensionUrl.protocol}//${extensionUrl.host}`;
 
     const boundary = await waitFor<JsonObject>('closed overlay host', async () => {
       const value = await evaluate<JsonObject | undefined>(client!, page.sessionId, `(() => {
@@ -540,6 +655,9 @@ async function main(): Promise<void> {
     check('panel uses the iframe inset', Number(layout['panelTop']) === 18 && Number(layout['panelLeft']) === 18 && Number(layout['viewportWidth']) - Number(layout['panelRight']) === 18, layout);
     check('idle attachment surface rendered', String(rendered['panelText']).includes('Attach your agent'), rendered);
 
+    const worker = await discoverExtensionWorker(extensionOrigin);
+    check('unpacked extension service worker was discovered and attached', worker.info.url === `${extensionOrigin}/sw.js`, worker.info);
+
     // --- navigation ------------------------------------------------------
     //
     // The widget now reclaims its attachment at document_start on every
@@ -563,7 +681,7 @@ async function main(): Promise<void> {
           && /^chrome-extension:\/\/[^/]+\/overlay\.html#/.test(target.info.url)
           && !seenOverlayTargets.has(target.info.targetId)));
       seenOverlayTargets.add(next.info.targetId);
-      await Promise.all([...setup]);
+      await settleCurrentPreparation();
 
       const isolation = await waitFor<JsonObject>(`${label} isolation`, async () => {
         const value = await evaluate<JsonObject | undefined>(client!, page.sessionId, `(() => {
@@ -609,7 +727,7 @@ async function main(): Promise<void> {
     await navigate('cross-origin navigation', `${otherOrigin}/hostile`);
 
     await delay(100);
-    await Promise.all([...setup]);
+    await settleCurrentPreparation();
     check('no runtime, console, or browser log errors', runtimeErrors.length === 0, runtimeErrors);
     check('Chrome remained alive', browser.exitCode === null, { exitCode: browser.exitCode, signal: browser.signalCode });
     console.log('Extension UI smoke passed');
