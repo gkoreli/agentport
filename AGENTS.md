@@ -582,9 +582,10 @@ and the second is the wedge:
    gates it, because the identifier a stranger's site first sees is the one it
    keeps.
 3. **Everything else** is in `docs/research/README.md`, which gives all 62
-   survey findings a disposition. Twenty-one are open, headed by `page.navigate`
-   (a prototype exists — see that file's preserved-work table) and remembered
-   consent, which stays behind ADR-019's Gate C.
+   survey findings a disposition. Nineteen are open, headed by remembered
+   consent, which stays behind ADR-019's Gate C. (`page.navigate` landed
+   2026-08-25; ADR-021's addendum records why the two things it was deferred
+   for turned out not to be protocol territory.)
 
 Working: pairing, cert issuance and verification, directory + presence,
 capability grants with TTL, prompt streaming, plan reporting, tool-call

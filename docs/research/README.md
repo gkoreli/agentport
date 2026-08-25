@@ -20,7 +20,8 @@ was true before, and the only reason to keep it is that it was true before.
 ## The shape of the result
 
 Of 62 findings across five lenses (the sixth, `landscape.md`, is reference
-rather than findings), **35 are closed, 6 partial, 21 open**. The open set is
+rather than findings), **37 are closed, 6 partial, 19 open** (the harness's
+two navigation findings closed on 2026-08-25). The open set is
 not a backlog of neglect: it is dominated by two deliberate gates — remembered
 consent behind ADR-019's Gate C, and pairwise identity behind
 `docs/ADR-026-pairwise-agent-identity.md` — plus a cluster of P2/P3
@@ -169,7 +170,9 @@ They are under `refs/wip/` rather than `refs/tags/` deliberately: durable and
 off-machine, but absent from the tags and releases UI, so a public repository's
 tag list still shows only releases.
 
-Two of those refs hold work that is genuinely not in `main`:
+As of 2026-08-25 **both refs that held real work have been landed**, so the
+archive is spent — kept because reading an original costs nothing and
+re-deriving one is expensive, not because anything is owed to it:
 
 | ref | what is in it | why it did not land |
 |---|---|---|
@@ -179,6 +182,18 @@ Two of those refs hold work that is genuinely not in `main`:
 `refs/wip/untracked` exists because `git stash create` captures **tracked**
 changes only. Three untracked files would otherwise have survived as loose
 blobs, recoverable until the next `git gc` and not one moment longer.
+
+The one part of the archive still worth reading is the rest of that harness.
+Only two of its assertions were ported; it also covers truthful truncation
+reporting and the element cap's note, against an API that no longer exists.
+Whoever next extends `packages/extension/check.ts` should read it before
+writing those from scratch.
+
+When it stops being worth keeping, it goes in one command:
+
+```bash
+git ls-remote origin 'refs/wip/*' | awk '{print ":"$2}' | xargs git push origin
+```
 
 ## What the survey got wrong
 
